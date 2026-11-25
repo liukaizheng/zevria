@@ -1,9 +1,7 @@
 //! Shared state and input for the MCP inspector. Renderers own navigation keys,
 //! focus and layout; this model owns request correlation and prompt drafts.
-use std::{
-    collections::{BTreeMap, VecDeque},
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::collections::BTreeMap;
+use zevria_session_api::ManagementEvent;
 
 use zevria_foundation::*;
 use zevria_session_api::{ManagementCommand, SessionCommand, SessionEvent, TurnCommand};
@@ -41,7 +39,7 @@ pub struct McpInspector {
     pub tab: McpTab,
     pub draft: Option<McpPromptDraft>,
     pub notice: Option<String>,
-    pub commands: VecDeque<SessionCommand>,
+    pub commands: crate::outbox::CommandOutbox,
     pub prompts: Vec<(McpServerName, McpPromptInfo)>,
     query: Option<String>,
     mutation: Option<String>,
@@ -143,8 +141,7 @@ impl McpInspector {
     }
 
     fn send(&mut self, request: McpManagementRequest) -> String {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let request_id = format!("mcp-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+        let request_id = crate::outbox::RequestIdAllocator::allocate("mcp-");
         self.commands
             .push_back(SessionCommand::Manage(ManagementCommand::Mcp {
                 request_id: request_id.clone(),
@@ -155,17 +152,17 @@ impl McpInspector {
 
     pub fn event(&mut self, event: &SessionEvent) -> bool {
         match event {
-            SessionEvent::McpChanged { .. } => {
+            SessionEvent::Manage(ManagementEvent::McpChanged { .. }) => {
                 if self.mutation.is_none() {
                     self.refresh();
                 }
                 true
             }
-            SessionEvent::McpResult { request_id, result }
+            SessionEvent::Manage(ManagementEvent::McpResult { request_id, result })
                 if self.mutation.as_ref() == Some(request_id) =>
             {
                 self.mutation = None;
-                self.notice = match result {
+                self.notice = match &**result {
                     McpManagementResult::Changed {
                         unchanged: true, ..
                     } => Some("No configuration change.".into()),
@@ -178,11 +175,11 @@ impl McpInspector {
                 self.refresh();
                 true
             }
-            SessionEvent::McpResult { request_id, result }
+            SessionEvent::Manage(ManagementEvent::McpResult { request_id, result })
                 if self.query.as_ref() == Some(request_id) =>
             {
                 self.query = None;
-                match result {
+                match &**result {
                     McpManagementResult::View { view } => {
                         self.view = Some(view.clone());
                         self.prompts.clone_from(&view.prompts);
@@ -437,14 +434,14 @@ mod tests {
                 prompts: vec![],
             },
         };
-        assert!(!i.event(&SessionEvent::McpResult {
+        assert!(!i.event(&SessionEvent::Manage(ManagementEvent::McpResult {
             request_id: first,
-            result: view.clone()
-        }));
-        assert!(i.event(&SessionEvent::McpResult {
+            result: Box::new(view.clone())
+        })));
+        assert!(i.event(&SessionEvent::Manage(ManagementEvent::McpResult {
             request_id: second,
-            result: view
-        }));
+            result: Box::new(view)
+        })));
         i.reload(true);
         assert!(i.commands.is_empty());
         i.reload(false);

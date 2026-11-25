@@ -3,6 +3,8 @@ use super::{App, UiAction};
 use zevria_foundation::SessionMode;
 use zevria_session_api::ManagementCommand;
 #[cfg(test)]
+use zevria_session_api::ManagementEvent;
+#[cfg(test)]
 use zevria_session_api::ModeSelectionResult;
 
 impl App {
@@ -16,7 +18,7 @@ impl App {
     }
 
     pub(crate) fn mode_selection_pending(&self) -> bool {
-        self.model.session.pending_mode_selection.is_some()
+        self.model.session.mode_selection().is_some()
     }
 
     pub(super) fn begin_mode_selection(
@@ -43,17 +45,22 @@ impl App {
         });
         self.interaction.clear_chords();
         self.view.invalidate_rendered_geometry();
-        Some(UiAction::SetMode { request_id, mode })
+        Some(UiAction::Session(
+            zevria_session_api::SessionCommand::Manage(ManagementCommand::SetMode {
+                request_id,
+                mode,
+            }),
+        ))
     }
 
     #[cfg(test)]
     pub(super) fn accept_mode_selection(&mut self, request_id: &str, result: ModeSelectionResult) {
-        let reduction = self
-            .model
-            .reduce(zevria_session_api::SessionEvent::ModeResult {
+        let reduction = self.model.reduce(zevria_session_api::SessionEvent::Manage(
+            ManagementEvent::ModeResult {
                 request_id: request_id.into(),
                 result,
-            });
+            },
+        ));
         self.apply_reduction(reduction);
     }
 }

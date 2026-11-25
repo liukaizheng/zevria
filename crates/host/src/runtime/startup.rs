@@ -30,7 +30,7 @@ use zevria_foundation::{
     AcpMcpServerSpec, McpManagementRequest, McpManagementResult, McpToolAccess, ModelRole,
     SessionMode, SessionPolicies,
 };
-use zevria_instructions::{SkillCatalog, SkillContext, skill::ActiveSkills};
+use zevria_instructions::{SkillCatalog, SkillContext};
 use zevria_mcp::{McpConfigSource, McpManager};
 use zevria_provider::{ProviderRouter, ProviderRouterFactory};
 use zevria_session_api::mcp::McpSessionService;
@@ -88,7 +88,6 @@ struct SessionServices {
     tools: ToolServerHandle,
     policies: SessionPolicies,
     skill_catalog: Arc<SkillCatalog>,
-    active_skills: ActiveSkills,
     event_tx: SessionEventSender,
     event_rx: SessionEventReceiver,
     responder: QuestionResponder,
@@ -108,8 +107,7 @@ struct RootTasks {
 }
 struct BuiltEngine {
     engine: SessionEngine<ProviderRouter>,
-    skill_catalog: Arc<SkillCatalog>,
-    active_skills: ActiveSkills,
+    skill_context: SkillContext,
     event_tx: SessionEventSender,
     event_rx: SessionEventReceiver,
     command_jobs: Option<CommandJobs>,
@@ -316,13 +314,6 @@ async fn build_services(
     let config = resolved.config;
     let (event_tx, event_rx) = session_event_channel(config.session.event_queue_capacity);
     let questions = question_channels(event_tx.clone());
-    // Reuse the validated load's frontend-owned pin snapshot. Fresh metadata
-    // contains no lifecycle applications, so its active set is exactly empty.
-    let active_skills = storage
-        .loaded
-        .as_ref()
-        .map(|outcome| outcome.replay().instructions.skills().clone())
-        .unwrap_or_default();
     if resolved.profile.is_worker() {
         // Restricted workers never discover/manage skills, mutate models,
         // launch subtasks/ensembles, or project Markdown Plans.
@@ -338,7 +329,6 @@ async fn build_services(
             tools,
             policies: worker_policies(),
             skill_catalog,
-            active_skills,
             event_tx,
             event_rx,
             responder: questions.responder,
@@ -366,15 +356,6 @@ async fn build_services(
     })
     .await
     .context("skill catalog loader failed")??;
-    let skill_context = SkillContext {
-        catalog: skill_catalog.clone(),
-        pins: active_skills,
-        mode_enabled: true,
-    };
-    for diagnostic in skill_context.pin_diagnostics() {
-        tracing::warn!(target: "zevria::runtime", "{}", diagnostic.message);
-    }
-    let active_skills = skill_context.pins;
     let command_jobs = (config.command.max_background_jobs > 0)
         .then(|| CommandJobs::new(command_job_limits(config.command), Some(event_tx.clone())));
     if let Some(jobs) = &command_jobs {
@@ -435,7 +416,6 @@ async fn build_services(
         tools,
         policies,
         skill_catalog,
-        active_skills,
         event_tx,
         event_rx,
         responder: questions.responder,
@@ -544,7 +524,6 @@ async fn build_engine(
         tools,
         policies,
         skill_catalog,
-        active_skills,
         event_tx,
         event_rx,
         responder,
@@ -596,10 +575,10 @@ async fn build_engine(
             tools,
             policies,
             writer,
-            skill_catalog.clone(),
+            skill_catalog,
             outcome,
         )?,
-        None => SessionEngine::builder(provider, tools, policies, writer, skill_catalog.clone())?
+        None => SessionEngine::builder(provider, tools, policies, writer, skill_catalog)?
             .with_transcript_items(std::mem::take(&mut storage.initial_items))?,
     };
     let workspace = resolved.workspace.clone();
@@ -658,6 +637,12 @@ async fn build_engine(
     };
     let mut engine = engine.build()?;
     append_guidance_notices(&mut startup_notices, engine.refresh_application_guidance()?);
+    let skill_context = engine.management_skill_context()?;
+    if root.is_some() {
+        for diagnostic in skill_context.pin_diagnostics() {
+            tracing::warn!(target: "zevria::runtime", "{}", diagnostic.message);
+        }
+    }
     let root = root
         .map(|root| -> anyhow::Result<_> {
             let config = SubtaskSupervisorConfig {
@@ -742,8 +727,7 @@ async fn build_engine(
 
     Ok(BuiltEngine {
         engine,
-        skill_catalog,
-        active_skills,
+        skill_context,
         event_tx,
         event_rx,
         command_jobs,
@@ -765,8 +749,7 @@ fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result<Start
     } = storage;
     let BuiltEngine {
         engine,
-        skill_catalog,
-        active_skills,
+        skill_context,
         event_tx,
         event_rx,
         command_jobs,
@@ -838,8 +821,7 @@ fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result<Start
             agent_runs_root: agent_runs_dir(&resolved.workspace, &resolved.id),
             transcript_path: resolved.path,
             transcript_items,
-            skill_catalog,
-            active_skills,
+            skill_context,
             startup_notices,
             mcp_prompts,
             plan_state,

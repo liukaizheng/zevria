@@ -3,6 +3,7 @@ use super::*;
 use zevria_foundation::ReasoningLevel as Level;
 use zevria_model::models::{ModelSelection, SessionModels};
 use zevria_session_api::ManagementCommand;
+use zevria_session_api::ManagementEvent;
 
 async fn change(
     running: &runtime::StartedSession,
@@ -30,9 +31,9 @@ async fn change(
         .unwrap();
     let result = event(events).await;
     assert!(
-        matches!(result, SessionEvent::ModelsResult {
-        result: Result::Changed { role: actual, reasoning_level: Level::High, .. }, ..
-    } if actual == role),
+        matches!(&result, SessionEvent::Manage(ManagementEvent::ModelsResult {
+        result, ..
+    })  if matches!(result.as_ref(), Result::Changed { role: actual, reasoning_level: Level::High, .. } if *actual == role)),
         "{result:?}"
     );
 }

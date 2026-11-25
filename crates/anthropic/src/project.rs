@@ -292,58 +292,17 @@ pub fn is_thinking(block: &Value) -> bool {
 pub fn project(
     input: &[ModelRequestItem<'_>],
     target: &ModelProfileRef,
-    system_messages: bool,
-    system: &Value,
-    tools: &Value,
-    strip_all_thinking: bool,
-) -> anyhow::Result<ProjectedMessages> {
-    project_with_compatibility(
-        input,
-        target,
-        &crate::Compatibility {
-            system_messages,
-            ..Default::default()
-        },
-        system,
-        tools,
-        strip_all_thinking,
-    )
-}
-
-pub fn project_with_compatibility(
-    input: &[ModelRequestItem<'_>],
-    target: &ModelProfileRef,
     compatibility: &crate::Compatibility,
     system: &Value,
     tools: &Value,
     strip_all_thinking: bool,
-) -> anyhow::Result<ProjectedMessages> {
-    project_impl(
-        input,
-        target,
-        compatibility,
-        system,
-        tools,
-        strip_all_thinking,
-        true,
-    )
-}
-
-fn project_impl(
-    input: &[ModelRequestItem<'_>],
-    target: &ModelProfileRef,
-    compatibility: &crate::Compatibility,
-    system: &Value,
-    tools: &Value,
-    strip_all_thinking: bool,
-    completion: bool,
 ) -> anyhow::Result<ProjectedMessages> {
     bind_projection(
         &project_history(input, target, compatibility)?,
         system,
         tools,
         strip_all_thinking,
-        completion,
+        true,
         None,
     )
 }
@@ -764,102 +723,67 @@ fn validate_messages_for(messages: &[Value], completion: bool) -> anyhow::Result
     Ok(())
 }
 
-pub fn preflight(
-    input: &[ModelRequestItem<'_>],
-    target: &ModelProfileRef,
-    system_messages: bool,
-) -> anyhow::Result<ReplayPreflight> {
-    preflight_with_compatibility(
-        input,
-        target,
-        &crate::Compatibility {
-            system_messages,
-            ..Default::default()
-        },
-    )
+/// Destination compatibility and accounting for admission to a Messages request.
+#[derive(Clone, Copy)]
+pub struct HistoryOptions<'a> {
+    pub target: &'a ModelProfileRef,
+    pub compatibility: &'a crate::Compatibility,
+    pub policy: &'a zevria_foundation::image_accounting::ImageAccountingPolicy,
+    pub measured_prefix: Option<(usize, zevria_model::ContextTokenEstimate)>,
 }
 
-pub fn preflight_with_compatibility(
-    input: &[ModelRequestItem<'_>],
-    target: &ModelProfileRef,
-    compatibility: &crate::Compatibility,
-) -> anyhow::Result<ReplayPreflight> {
-    assess_history_with_policy(
-        input,
-        target,
-        compatibility,
-        &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
-        None,
-    )
-}
-
-/// Preserve management conversion/error precedence while retaining the same
-/// unbound validated history for subsequent completion/count binding.
-pub fn prepare_history(
-    input: &[ModelRequestItem<'_>],
-    target: &ModelProfileRef,
-    compatibility: &crate::Compatibility,
-    identity: Option<&zevria_model::ModelInputIdentity>,
-) -> anyhow::Result<(ReplayPreflight, Option<ValidatedHistory>)> {
-    prepare_history_with_policy(
-        input,
-        target,
-        compatibility,
-        identity,
-        &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
-    )
-}
-pub fn prepare_history_with_policy(
-    input: &[ModelRequestItem<'_>],
-    target: &ModelProfileRef,
-    compatibility: &crate::Compatibility,
-    identity: Option<&zevria_model::ModelInputIdentity>,
-    policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
-) -> anyhow::Result<(ReplayPreflight, Option<ValidatedHistory>)> {
-    assess_and_prepare_history(input, target, compatibility, identity, policy, None)
+impl<'a> HistoryOptions<'a> {
+    pub fn new(target: &'a ModelProfileRef, compatibility: &'a crate::Compatibility) -> Self {
+        Self {
+            target,
+            compatibility,
+            policy: &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
+            measured_prefix: None,
+        }
+    }
 }
 
 /// Keep the exact unbound projection used for admission; only media bytes
 /// are deferred until actual request serialization.
-pub fn assess_and_prepare_history(
+pub fn prepare_history(
     input: &[ModelRequestItem<'_>],
-    target: &ModelProfileRef,
-    compatibility: &crate::Compatibility,
     identity: Option<&zevria_model::ModelInputIdentity>,
-    policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
-    measured_prefix: Option<(usize, zevria_model::ContextTokenEstimate)>,
+    options: HistoryOptions<'_>,
 ) -> anyhow::Result<(ReplayPreflight, Option<ValidatedHistory>)> {
-    let (assessment, projection) =
-        assess_projection(input, target, compatibility, policy, measured_prefix)?;
+    let (assessment, projection) = assess_projection(input, options)?;
     let history = projection
         .map(|projection| {
-            ValidatedHistory::from_projection(projection, input, target, compatibility, identity)
+            ValidatedHistory::from_projection(
+                projection,
+                input,
+                options.target,
+                options.compatibility,
+                identity,
+            )
         })
         .transpose()?;
     Ok((assessment, history))
 }
 
-/// Pure management/admission projection. Images/PDF bytes are substituted BEFORE
-/// projection allocation; actual transport history is prepared only at dispatch.
-/// Trusted prefix accounting avoids re-hashing/re-parsing historical attachments.
-pub fn assess_history_with_policy(
+/// Pure admission projection with no retained history. Trusted prefix facts
+/// avoid re-hashing/re-parsing historical attachments.
+pub fn assess_history(
     input: &[ModelRequestItem<'_>],
-    target: &ModelProfileRef,
-    compatibility: &crate::Compatibility,
-    policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
-    measured_prefix: Option<(usize, zevria_model::ContextTokenEstimate)>,
+    options: HistoryOptions<'_>,
 ) -> anyhow::Result<ReplayPreflight> {
-    assess_projection(input, target, compatibility, policy, measured_prefix)
-        .map(|(assessment, _)| assessment)
+    assess_projection(input, options).map(|(assessment, _)| assessment)
 }
 
 fn assess_projection(
     input: &[ModelRequestItem<'_>],
-    target: &ModelProfileRef,
-    compatibility: &crate::Compatibility,
-    policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
-    measured_prefix: Option<(usize, zevria_model::ContextTokenEstimate)>,
+    options: HistoryOptions<'_>,
 ) -> anyhow::Result<(ReplayPreflight, Option<HistoryProjection>)> {
+    let HistoryOptions {
+        target,
+        compatibility,
+        policy,
+        measured_prefix,
+    } = options;
     policy.validate(true)?;
     let sources = input
         .iter()

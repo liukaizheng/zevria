@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{SubtaskEvent, TurnEvent};
 
 #[test]
 fn native_answer_frames_grow_and_reconcile_citations_in_the_same_selected_block() {
@@ -33,11 +34,11 @@ fn native_answer_frames_grow_and_reconcile_citations_in_the_same_selected_block(
     publish(&mut app, attempt.clone());
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnCompleted {
+        SessionEvent::Turn(TurnEvent::Completed {
             turn_id: TEST_TURN_ID,
             message: Message::assistant(final_text),
             attempt_id: Some(attempt.id),
-        },
+        }),
     );
     assert_eq!(visible(app.conversation_projection_mut()), [final_text]);
     let HistoryEntry::Conversation(entry) = &app.history()[0] else {
@@ -300,7 +301,7 @@ fn native_result_and_selection_follow_call_identity_after_earlier_parts_arrive()
     publish(&mut app, attempt.clone());
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             turn_id: TEST_TURN_ID,
             attempt_id: Some(attempt.id.clone()),
             message: assistant_message(vec![tool_call(
@@ -309,7 +310,7 @@ fn native_result_and_selection_follow_call_identity_after_earlier_parts_arrive()
                 "command",
                 json!({"command":"echo result"}),
             )]),
-        },
+        }),
     );
     assert_eq!(tool_status(&app, 0, 1), ToolCallStatus::Executing);
     app.select_for_test(cursor(0, 1));
@@ -324,7 +325,7 @@ fn native_result_and_selection_follow_call_identity_after_earlier_parts_arrive()
     assert_eq!(tool_status(&app, 0, 3), ToolCallStatus::Executing);
     apply_turn_event(
         &mut app,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: tool_result_message(
                 "native-item",
@@ -333,7 +334,7 @@ fn native_result_and_selection_follow_call_identity_after_earlier_parts_arrive()
                 "native result",
             ),
             metadata: vec![],
-        },
+        }),
     );
     assert_eq!(tool_status(&app, 0, 3), ToolCallStatus::Finished);
     attempt.close(Outcome::Completed);
@@ -397,40 +398,40 @@ fn nonfollowing_viewport_tracks_semantic_block_through_growth_and_group_split() 
 #[test]
 fn narrow_native_child_panes_keep_inline_order_through_hidden_updates_and_switching() {
     let mut views = test_session_views(App::new());
-    views.apply(SessionEvent::TurnStarted {
+    views.apply(SessionEvent::Turn(TurnEvent::Started {
         turn_id: TEST_TURN_ID,
         message: Message::user("launch child"),
         mode: SessionMode::Build,
-    });
-    views.apply(SessionEvent::Intermediate {
+    }));
+    views.apply(SessionEvent::Turn(TurnEvent::Intermediate {
         turn_id: TEST_TURN_ID,
         attempt_id: None,
         message: launch_assistant("launch", "inspect web order", "child task"),
-    });
-    views.apply(SessionEvent::SubtaskLaunched {
+    }));
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
         turn_id: TEST_TURN_ID,
         call_id: "launch".into(),
         entry_index: 0,
-        descriptor: child_descriptor("inline-child", "inspect web order"),
-    });
+        descriptor: Box::new(child_descriptor("inline-child", "inspect web order")),
+    }));
     let child_id = SubtaskId::new("inline-child");
-    views.apply(SessionEvent::SubtaskSession {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
         id: child_id.clone(),
-        event: Box::new(SessionEvent::TurnStarted {
+        event: Box::new(SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("child task"),
             mode: SessionMode::Build,
-        }),
-    });
+        })),
+    }));
     let mut attempt = ordered_attempt();
-    views.apply_streams(&zevria_session_api::SessionStreamBatch {
+    views.apply_streams(zevria_session_api::SessionStreamBatch {
         subtasks: [(
             child_id.clone(),
             zevria_session_api::SessionStreamState {
                 revision: 1,
                 turn_id: TEST_TURN_ID,
                 message: None,
-                attempt: Some(attempt.clone()),
+                attempt: Some(attempt.clone().into()),
             },
         )]
         .into(),
@@ -456,21 +457,21 @@ fn narrow_native_child_panes_keep_inline_order_through_hidden_updates_and_switch
     assert_eq!(views.handle_event(ctrl('o')), None);
     assert_eq!(views.visible_child_id(), None);
     attempt.close(Outcome::Completed);
-    views.apply(SessionEvent::SubtaskSession {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
         id: child_id.clone(),
-        event: Box::new(SessionEvent::ResponseAttemptUpdated {
+        event: Box::new(SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated {
             turn_id: TEST_TURN_ID,
-            attempt: attempt.clone(),
-        }),
-    });
-    views.apply(SessionEvent::SubtaskSession {
+            attempt: Box::new(attempt.clone()),
+        })),
+    }));
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
         id: child_id.clone(),
-        event: Box::new(SessionEvent::TurnCompleted {
+        event: Box::new(SessionEvent::Turn(TurnEvent::Completed {
             turn_id: TEST_TURN_ID,
             attempt_id: Some(attempt.id),
             message: Message::assistant("cited answer [source](https://example.com)"),
-        }),
-    });
+        })),
+    }));
     assert_eq!(views.handle_event(key(KeyCode::Tab)), None);
     assert_eq!(views.visible_child_id(), Some(&child_id));
     rendered_views_text(&mut views, 28, 12);
@@ -495,7 +496,7 @@ fn child_rows_keep_disjoint_stable_ids_and_parent_order_when_hosted_parts_arrive
     publish(&mut app, attempt.clone());
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             turn_id: TEST_TURN_ID,
             attempt_id: Some(attempt.id.clone()),
             message: assistant_message(vec![tool_call(
@@ -504,16 +505,16 @@ fn child_rows_keep_disjoint_stable_ids_and_parent_order_when_hosted_parts_arrive
                 "launch_subtasks",
                 json!({"tasks":[{"title":"one","type":"explore","prompt":"inspect"}]}),
             )]),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::SubtaskLaunched {
+        SessionEvent::Subtask(SubtaskEvent::Launched {
             turn_id: TEST_TURN_ID,
             call_id: "batch".into(),
             entry_index: 0,
-            descriptor: child_descriptor("ordered-child", "inspect"),
-        },
+            descriptor: Box::new(child_descriptor("ordered-child", "inspect")),
+        }),
     );
     app.select_for_test(cursor(0, 1));
     let identity = app

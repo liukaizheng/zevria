@@ -1,3 +1,4 @@
+use crate::elicitation_meta::{CustomAnswer, OptionDetail, ZevriaElicitationMeta};
 use std::collections::BTreeMap;
 
 use agent_client_protocol::schema::v1::{
@@ -5,7 +6,6 @@ use agent_client_protocol::schema::v1::{
     ElicitationContentValue, ElicitationFormMode, ElicitationSchema, ElicitationSessionScope,
     EnumOption, MultiSelectPropertySchema, SessionId, StringPropertySchema,
 };
-use serde_json::json;
 use zevria_foundation::QuestionAnswer;
 use zevria_foundation::QuestionAnswerValue;
 use zevria_foundation::QuestionPrompt;
@@ -164,14 +164,10 @@ pub(crate) fn question_form(
             let mut companion = StringPropertySchema::new()
                 .title(format!("{} — Other", question.header))
                 .description("Custom answer used when Other is selected.")
-                .meta(serde_json::Map::from_iter([(
-                    "zevria".to_string(),
-                    json!({
-                        "questionId": property,
-                        "isOtherAnswer": true,
-                        "otherValue": OTHER_TOKEN,
-                    }),
-                )]));
+                .meta(ZevriaElicitationMeta::custom_answer(CustomAnswer {
+                    question_id: &property,
+                    other_value: OTHER_TOKEN,
+                }));
             if let Some(default) = other_default(question) {
                 companion = companion.default_value(default);
             }
@@ -307,10 +303,10 @@ fn select_options(
         values.push(if let Some(detail) = &option.detail {
             value
                 .description(format!("{}\n\n{detail}", option.description))
-                .meta(serde_json::Map::from_iter([(
-                    "zevria".to_string(),
-                    json!({"description": option.description, "detail": detail}),
-                )]))
+                .meta(ZevriaElicitationMeta::option(OptionDetail {
+                    description: Some(&option.description),
+                    detail,
+                }))
         } else {
             value.description(option.description.clone())
         });

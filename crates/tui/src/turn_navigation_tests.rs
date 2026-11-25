@@ -4,6 +4,8 @@ use super::selection_tests::{mixed_role_jump_events, numbered_lines};
 use super::*;
 use crate::app::TurnStartTarget;
 use ratatui::{buffer::Buffer, layout::Rect};
+use zevria_session_api::SessionStreamState;
+use zevria_session_api::{EnsembleEvent, PlanEvent, TurnEvent};
 
 fn jump(app: &mut App, ch: char) {
     assert_eq!(app.handle_event(key(KeyCode::Char(ch))), None);
@@ -246,42 +248,42 @@ fn native_prompt_kinds_are_destinations_live_and_restored_but_metadata_is_not() 
             } else {
                 for (index, message) in prompts.into_iter().enumerate() {
                     let turn_id = TurnId::new(index as u64 + 1);
-                    app.reduce_without_effects(SessionEvent::TurnStarted {
+                    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
                         turn_id,
                         message,
                         mode: SessionMode::Build,
-                    });
-                    app.reduce_without_effects(SessionEvent::TurnCompleted {
+                    }));
+                    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Completed {
                         turn_id,
                         message: Message::assistant("answer"),
                         attempt_id: None,
-                    });
+                    }));
                 }
                 app.seed_history_entry(HistoryEntry::PlanArtifact(test_plan_artifact()));
                 app.seed_history_entry(HistoryEntry::Error("diagnostic".into()));
                 app.seed_history_entry(HistoryEntry::CompactionDivider);
-                app.reduce_without_effects(SessionEvent::PlanHandoffStarted {
+                app.reduce_without_effects(SessionEvent::Plan(PlanEvent::HandoffStarted {
                     turn_id: TurnId::new(4),
-                    handoff: handoff.clone(),
-                });
-                app.reduce_without_effects(SessionEvent::TurnCompleted {
+                    handoff: Box::new(handoff.clone()),
+                }));
+                app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Completed {
                     turn_id: TurnId::new(4),
                     message: Message::assistant("implemented"),
                     attempt_id: None,
-                });
-                app.reduce_without_effects(SessionEvent::EnsembleStarted {
+                }));
+                app.reduce_without_effects(SessionEvent::Ensemble(EnsembleEvent::Started {
                     turn_id: TurnId::new(5),
-                    start: start.clone(),
+                    start: Box::new(start.clone()),
                     resumed: false,
-                });
-                app.reduce_without_effects(SessionEvent::TurnRecovered {
+                }));
+                app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Recovered {
                     turn_id: TurnId::new(5),
-                });
-                app.reduce_without_effects(SessionEvent::TurnStarted {
+                }));
+                app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
                     turn_id: TurnId::new(6),
                     message: image_prompt,
                     mode: SessionMode::Build,
-                });
+                }));
             }
             app.set_view_for_test(0, false);
             draw(&mut app, 100, 20);
@@ -403,11 +405,11 @@ fn reflow_folding_and_streaming_preserve_a_turn_header_not_an_old_scroll_anchor(
     app.set_view_for_test(3, false);
     draw(&mut app, 80, 20);
     // Mutation captures an older generic body anchor before geometry is invalidated.
-    app.reduce_without_effects(SessionEvent::TurnStarted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
         turn_id: TurnId::new(10),
         message: Message::user("latest"),
         mode: SessionMode::Build,
-    });
+    }));
     jump(&mut app, ']');
     assert_first_row(&mut app, 80, 20, "Approved Plan handoff · #2");
     let wide = app.view_scroll();
@@ -425,10 +427,10 @@ fn reflow_folding_and_streaming_preserve_a_turn_header_not_an_old_scroll_anchor(
     let folded_top = app.view_scroll();
     assert!(folded_top < wide);
     assert!(app.folds().entry(2).is_message_folded());
-    app.reduce_without_effects(SessionEvent::AssistantStreamUpdated {
-        turn_id: TurnId::new(10),
-        snapshot: Message::assistant(numbered_lines(100)).into(),
-    });
+    app.reduce_without_effects(SessionStreamState::new(
+        TurnId::new(10),
+        Message::assistant(numbered_lines(100)).into(),
+    ));
     assert_first_row(&mut app, 80, 20, "Approved Plan handoff · #2");
     assert_eq!(app.view_scroll(), folded_top);
     assert!(!app.view_follow());

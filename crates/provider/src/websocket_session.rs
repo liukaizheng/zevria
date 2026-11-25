@@ -30,23 +30,28 @@ pub(crate) enum OpenAiWebSocketTerminalCategory {
 }
 
 impl OpenAiWebSocketTerminalCategory {
-    pub(crate) fn as_str(self) -> &'static str {
+    #[cfg(feature = "cache-diagnostics")]
+    pub(crate) const fn as_str(self) -> &'static str {
+        self.retry_category().as_str()
+    }
+
+    pub(crate) const fn retry_category(self) -> zevria_model::RetryCategory {
         match self {
-            Self::CloseFrame => "close_frame",
-            Self::EndOfStream => "end_of_stream",
-            Self::ReadError => "read_error",
-            Self::SendError => "send_error",
-            Self::SendTimeout => "send_timeout",
-            Self::ResponseIdleTimeout => "response_idle_timeout",
-            Self::NotConnected => "not_connected",
-            Self::PongError => "pong_error",
-            Self::ConnectionLimit => "connection_limit",
-            Self::UpstreamDisconnect => "upstream_disconnect",
-            Self::InboundOverflow => "inbound_overflow",
-            Self::PumpStopped => "pump_stopped",
-            Self::StartupConnectFailed => "startup_connect_failed",
-            Self::HttpFallback => "http_fallback",
-            Self::LocalCancellation => "local_cancellation",
+            Self::CloseFrame => zevria_model::RetryCategory::CloseFrame,
+            Self::EndOfStream => zevria_model::RetryCategory::EndOfStream,
+            Self::ReadError => zevria_model::RetryCategory::ReadError,
+            Self::SendError => zevria_model::RetryCategory::SendError,
+            Self::SendTimeout => zevria_model::RetryCategory::SendTimeout,
+            Self::ResponseIdleTimeout => zevria_model::RetryCategory::ResponseIdleTimeout,
+            Self::NotConnected => zevria_model::RetryCategory::NotConnected,
+            Self::PongError => zevria_model::RetryCategory::PongError,
+            Self::ConnectionLimit => zevria_model::RetryCategory::ConnectionLimit,
+            Self::UpstreamDisconnect => zevria_model::RetryCategory::UpstreamDisconnect,
+            Self::InboundOverflow => zevria_model::RetryCategory::InboundOverflow,
+            Self::PumpStopped => zevria_model::RetryCategory::PumpStopped,
+            Self::StartupConnectFailed => zevria_model::RetryCategory::StartupConnectFailed,
+            Self::HttpFallback => zevria_model::RetryCategory::HttpFallback,
+            Self::LocalCancellation => zevria_model::RetryCategory::LocalCancellation,
         }
     }
 }

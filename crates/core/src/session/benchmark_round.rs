@@ -14,6 +14,7 @@ use zevria_instructions::skill::SkillCatalog;
 use zevria_model::ToolDeclarations;
 use zevria_model::config::CompactionPolicy;
 use zevria_model::request::{ModelRequest, ModelResponse};
+use zevria_session_api::TurnEvent;
 use zevria_session_api::command::{SessionCommand, TurnCommand};
 use zevria_session_api::event::{ProgressReporter, SessionEvent, SessionUpdate};
 use zevria_session_api::provider::{ModelProvider, ProviderFuture};
@@ -198,23 +199,23 @@ impl EngineRoundFixture {
             while let Some(update) = receiver.recv().await {
                 if let SessionUpdate::Lifecycle(event) = update {
                     match event {
-                        SessionEvent::TurnStarted { .. } => started += 1,
-                        SessionEvent::ModelCallStarted { .. } => calls += 1,
-                        SessionEvent::ToolResults { metadata, .. } => {
+                        SessionEvent::Turn(TurnEvent::Started { .. }) => started += 1,
+                        SessionEvent::Turn(TurnEvent::ModelCallStarted { .. }) => calls += 1,
+                        SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) => {
                             assert_eq!(metadata.len(), 1);
                             assert_eq!(metadata[0].id, "call-benchmark");
                             assert_eq!(metadata[0].tool_name, EchoTool::NAME);
                             assert_eq!(metadata[0].outcome, ToolCallOutcome::Success);
                             results += 1;
                         }
-                        SessionEvent::TurnCompleted { message, .. } => {
+                        SessionEvent::Turn(TurnEvent::Completed { message, .. }) => {
                             assert_eq!(message, Message::assistant("done"));
                             completed += 1;
                         }
-                        SessionEvent::TurnFailed { .. }
-                        | SessionEvent::TurnRejected { .. }
-                        | SessionEvent::TurnCancelled { .. }
-                        | SessionEvent::CompactionStarted { .. }
+                        SessionEvent::Turn(TurnEvent::Failed { .. })
+                        | SessionEvent::Turn(TurnEvent::Rejected { .. })
+                        | SessionEvent::Turn(TurnEvent::Cancelled { .. })
+                        | SessionEvent::Turn(TurnEvent::CompactionStarted { .. })
                         | SessionEvent::PersistenceChanged { error: Some(_), .. } => {
                             panic!("synthetic round failed: {event:?}")
                         }

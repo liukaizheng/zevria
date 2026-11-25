@@ -1,6 +1,7 @@
 use super::*;
 use zevria_content::HostedActivityStatus as Status;
 use zevria_content::ResponseAttemptOutcome as Outcome;
+use zevria_session_api::TurnEvent;
 
 fn search_item(id: &str, action: Value) -> Value {
     json!({"type":"web_search_call","id":id,"status":"completed","action":action})
@@ -179,7 +180,7 @@ async fn http_answers_stream_before_completion_with_search_disabled_unused_and_u
 async fn hosted_request_controls_policy_choice_and_function_strictness() {
     let mut openai = provider().await;
     let mut parts = parts();
-    let prepare = crate::turn::prepare_turn_request;
+    let prepare = crate::responses::prepare_turn_request;
     assert!(
         prepare(&parts.request(), &mut openai)
             .await
@@ -414,7 +415,9 @@ async fn opted_in_http_search_is_durable_model_inert_and_portable_without_local_
         .position(|update| {
             matches!(
                 update,
-                SessionUpdate::Lifecycle(SessionEvent::ResponseAttemptUpdated { .. })
+                SessionUpdate::Lifecycle(SessionEvent::Turn(
+                    TurnEvent::ResponseAttemptUpdated { .. }
+                ))
             )
         })
         .unwrap();
@@ -423,14 +426,14 @@ async fn opted_in_http_search_is_durable_model_inert_and_portable_without_local_
         .position(|update| {
             matches!(
                 update,
-                SessionUpdate::Lifecycle(SessionEvent::TurnCompleted { .. })
+                SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Completed { .. }))
             )
         })
         .unwrap();
     assert!(progress_index < final_index);
     assert!(!updates.iter().any(|update| matches!(
         update,
-        SessionUpdate::Lifecycle(SessionEvent::ToolResults { .. })
+        SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::ToolResults { .. }))
     )));
 }
 
@@ -822,7 +825,7 @@ async fn recovery_records_leave_prepared_full_input_and_wire_body_identical() {
             allowed_tool_names: None,
         };
         prepared.push(
-            crate::turn::prepare_turn_request(&request(), &mut openai)
+            crate::responses::prepare_turn_request(&request(), &mut openai)
                 .await
                 .unwrap(),
         );

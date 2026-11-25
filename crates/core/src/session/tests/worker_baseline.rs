@@ -1,6 +1,7 @@
 use super::*;
 use crate::session::workflow::ensemble::recovered_ensemble_synthesis;
 use crate::session::workflow::worker_review::validate_frozen_workers;
+use zevria_session_api::EnsembleEvent;
 
 fn fixture(
     count: usize,
@@ -65,10 +66,11 @@ async fn result(
     receiver: &mut SessionEventReceiver,
     request: &WorkerControlId,
 ) -> WorkerControlResult {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    *tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if let Some(SessionUpdate::Lifecycle(SessionEvent::WorkerControlResult { result })) =
-                receiver.recv().await
+            if let Some(SessionUpdate::Lifecycle(SessionEvent::Ensemble(
+                EnsembleEvent::WorkerControlResult { result },
+            ))) = receiver.recv().await
                 && &result.control.request_id == request
             {
                 return result;
@@ -124,12 +126,18 @@ async fn transfer_unmark_resume_and_final_baseline_are_one_durable_seal() {
     assert!(result(&mut receiver, &mark_b.request_id).await.accepted);
     let displaced = next_snapshot(&mut receiver, |state| {
         state.descriptor.id == a.descriptor.id
-            && state.baseline.is_none()
-            && state.confirmation.is_some()
+            && state.proposals.baseline.is_none()
+            && state.proposals.confirmation.is_some()
     })
     .await;
     assert_eq!(
-        displaced.1.confirmation.as_ref().unwrap().request_id,
+        displaced
+            .1
+            .proposals
+            .confirmation
+            .as_ref()
+            .unwrap()
+            .request_id,
         original.request_id
     );
     let clear_b = WorkerControl {
@@ -159,14 +167,14 @@ async fn transfer_unmark_resume_and_final_baseline_are_one_durable_seal() {
     let projected = zevria_transcript::project_worker_reviews(engine.conversation.items()).unwrap();
     let state = &projected[&saved_start.run_id][0];
     assert_eq!(
-        state.baseline.as_ref().unwrap().request_id,
+        state.proposals.baseline.as_ref().unwrap().request_id,
         select.request_id
     );
     assert_eq!(
-        state.confirmation.as_ref().unwrap().request_id,
+        state.proposals.confirmation.as_ref().unwrap().request_id,
         original.request_id
     );
-    assert!(!state.sealed);
+    assert!(!state.is_sealed());
 
     // Resume on another turn, then clear/re-mark an already-confirmed revision.
     let (events, mut receiver) = session_event_channel(256);
@@ -178,12 +186,13 @@ async fn transfer_unmark_resume_and_final_baseline_are_one_durable_seal() {
             .await;
         (engine, result)
     });
-    let (target, state) = next_snapshot(&mut receiver, |state| state.baseline.is_some()).await;
+    let (target, state) =
+        next_snapshot(&mut receiver, |state| state.proposals.baseline.is_some()).await;
     let clear = WorkerControl {
         request_id: WorkerControlId::new(),
         target: target.clone(),
         action: WorkerControlAction::Unbaseline {
-            expected_revision: state.retained.as_ref().unwrap().revision.clone(),
+            expected_revision: state.proposals.retained.as_ref().unwrap().revision.clone(),
         },
     };
     router.route(clear.clone()).unwrap();
@@ -193,17 +202,24 @@ async fn transfer_unmark_resume_and_final_baseline_are_one_durable_seal() {
     assert!(result(&mut receiver, &later.request_id).await.accepted);
     let (_, state) = next_snapshot(&mut receiver, |state| {
         state
+            .proposals
             .baseline
             .as_ref()
             .is_some_and(|receipt| receipt.request_id == later.request_id)
     })
     .await;
     assert_eq!(
-        state.confirmation.as_ref().unwrap().target.turn_id,
+        state
+            .proposals
+            .confirmation
+            .as_ref()
+            .unwrap()
+            .target
+            .turn_id,
         TurnId::new(1)
     );
     assert_eq!(
-        state.baseline.as_ref().unwrap().target.turn_id,
+        state.proposals.baseline.as_ref().unwrap().target.turn_id,
         TurnId::new(2)
     );
     let (old_target, c) = snapshots.get(&saved_start.agents[2].id).unwrap();
@@ -253,11 +269,16 @@ async fn transfer_unmark_resume_and_final_baseline_are_one_durable_seal() {
     assert!(router.route(final_control).is_err());
     zevria_transcript::validate_ensemble_review_history(engine.conversation.items()).unwrap();
     let projected = zevria_transcript::project_worker_reviews(engine.conversation.items()).unwrap();
-    assert!(projected[&saved_start.run_id][2].baseline.is_some());
+    assert!(
+        projected[&saved_start.run_id][2]
+            .proposals
+            .baseline
+            .is_some()
+    );
     assert!(
         projected[&saved_start.run_id]
             .iter()
-            .all(|state| state.sealed)
+            .all(|state| state.is_sealed())
     );
     // Frozen recovery before ReportsReady uses finalize_review, never provider startup.
     let (events, _receiver) = session_event_channel(256);
@@ -292,7 +313,7 @@ async fn transfer_unmark_resume_and_final_baseline_are_one_durable_seal() {
             assert!(
                 projection[&saved_start.run_id]
                     .iter()
-                    .filter(|state| state.baseline.is_some())
+                    .filter(|state| state.proposals.baseline.is_some())
                     .count()
                     <= 1
             );
@@ -370,7 +391,7 @@ async fn failed_transfer_persistence_never_acknowledges_or_displaces_root_select
         (engine, result)
     });
     let (target, b) = next_snapshot(&mut receiver, |state| {
-        state.baseline.is_none() && state.eligible_snapshot().is_some()
+        state.proposals.baseline.is_none() && state.eligible_snapshot().is_some()
     })
     .await;
     let transfer = baseline(target, &b);
@@ -385,11 +406,11 @@ async fn failed_transfer_persistence_never_acknowledges_or_displaces_root_select
     let selected = projection
         .values()
         .flatten()
-        .filter(|state| state.baseline.is_some())
+        .filter(|state| state.proposals.baseline.is_some())
         .collect::<Vec<_>>();
     assert_eq!(selected.len(), 1);
     assert_eq!(
-        selected[0].baseline.as_ref().unwrap().request_id,
+        selected[0].proposals.baseline.as_ref().unwrap().request_id,
         selection.request_id
     );
 }

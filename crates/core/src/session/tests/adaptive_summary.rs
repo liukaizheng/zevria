@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::TurnEvent;
 
 #[derive(Clone, Copy)]
 enum Counting {
@@ -596,7 +597,10 @@ async fn partial_edited_prefix_is_installed_only_with_an_accepted_revision() {
         assert_eq!(
             emitted
                 .iter()
-                .filter(|event| matches!(event, SessionEvent::CompactionCompleted { .. }))
+                .filter(|event| matches!(
+                    event,
+                    SessionEvent::Turn(TurnEvent::CompactionCompleted { .. })
+                ))
                 .count(),
             usize::from(fits)
         );
@@ -691,11 +695,14 @@ async fn mid_turn_partial_checkpoint_preserves_a_complete_batch_even_if_dispatch
     assert_eq!(
         emitted
             .iter()
-            .filter(|event| matches!(event, SessionEvent::CompactionStarted { .. }))
+            .filter(|event| matches!(
+                event,
+                SessionEvent::Turn(TurnEvent::CompactionStarted { .. })
+            ))
             .count(),
         1
     );
-    assert!(emitted.iter().any(|event| matches!(event, SessionEvent::TurnFailed { error, .. } if error.contains("automatic compaction completed"))));
+    assert!(emitted.iter().any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Failed { error, .. }) if error.contains("automatic compaction completed"))));
 }
 
 #[tokio::test]
@@ -763,14 +770,20 @@ async fn partial_manual_checkpoints_roundtrip_and_next_source_keeps_previous_tai
     assert_eq!(
         emitted
             .iter()
-            .filter(|event| matches!(event, SessionEvent::CompactionStarted { .. }))
+            .filter(|event| matches!(
+                event,
+                SessionEvent::Turn(TurnEvent::CompactionStarted { .. })
+            ))
             .count(),
         2
     );
     assert_eq!(
         emitted
             .iter()
-            .filter(|event| matches!(event, SessionEvent::CompactionCompleted { .. }))
+            .filter(|event| matches!(
+                event,
+                SessionEvent::Turn(TurnEvent::CompactionCompleted { .. })
+            ))
             .count(),
         2
     );
@@ -853,19 +866,25 @@ async fn explore_partial_checkpoint_dispatch_or_capacity_failure_is_durable_with
         assert_eq!(
             emitted
                 .iter()
-                .filter(|event| matches!(event, SessionEvent::CompactionStarted { .. }))
+                .filter(|event| matches!(
+                    event,
+                    SessionEvent::Turn(TurnEvent::CompactionStarted { .. })
+                ))
                 .count(),
             1
         );
         assert_eq!(
             emitted
                 .iter()
-                .filter(|event| matches!(event, SessionEvent::CompactionCompleted { .. }))
+                .filter(|event| matches!(
+                    event,
+                    SessionEvent::Turn(TurnEvent::CompactionCompleted { .. })
+                ))
                 .count(),
             1
         );
         if !fits {
-            assert!(emitted.iter().any(|event| matches!(event, SessionEvent::TurnRejected { error, .. } if error.contains("automatic compaction completed") && error.contains("3500-token input limit"))));
+            assert!(emitted.iter().any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Rejected { error, .. }) if error.contains("automatic compaction completed") && error.contains("3500-token input limit"))));
         }
     }
 }

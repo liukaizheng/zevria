@@ -2,6 +2,7 @@ use super::*;
 use zevria_foundation::{
     CREATE_PLAN_TOOL_NAME, PlanDraftDetail, READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
 };
+use zevria_session_api::{PlanEvent, TurnEvent};
 use zevria_workflow::PlanDraft;
 
 fn detail(title: &str, change: Option<FileChange>) -> ToolResultDetail {
@@ -51,19 +52,19 @@ fn draft_rows_restore_exactly_copy_markdown_and_never_show_successful_read_outpu
         let mut app = App::new();
         apply_turn_event(
             &mut app,
-            SessionEvent::Intermediate {
+            SessionEvent::Turn(TurnEvent::Intermediate {
                 turn_id: TEST_TURN_ID,
                 message: call.clone(),
                 attempt_id: None,
-            },
+            }),
         );
         apply_turn_event(
             &mut app,
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 turn_id: TEST_TURN_ID,
                 message: result.clone(),
                 metadata: vec![meta.clone()],
-            },
+            }),
         );
         app.set_view_for_test(0, false);
         let live = rendered_text(&mut app, 160, 80);
@@ -130,19 +131,19 @@ fn read_and_edit_failures_always_show_diagnostics() {
         let mut app = App::new();
         apply_turn_event(
             &mut app,
-            SessionEvent::Intermediate {
+            SessionEvent::Turn(TurnEvent::Intermediate {
                 turn_id: TEST_TURN_ID,
                 message: call,
                 attempt_id: None,
-            },
+            }),
         );
         apply_turn_event(
             &mut app,
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 turn_id: TEST_TURN_ID,
                 message: tool_result_message("failed-plan", None, name, "opaque result"),
                 metadata: vec![metadata],
-            },
+            }),
         );
         assert!(
             rendered_text(&mut app, 160, 40).contains("Exact draft diagnostic; call read_plan."),
@@ -173,13 +174,13 @@ fn draft_only_snapshots_do_not_change_mode_or_close_recovery_and_warn_about_reta
             .replace("Build it.", "Unsubmitted change."),
         source_turn_id: TEST_TURN_ID,
     };
-    app.reduce_without_effects(SessionEvent::PlanStateChanged {
-        state: PlanWorkflowState::Planning {
+    app.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
+        state: Box::new(PlanWorkflowState::Planning {
             id: artifact.version.id,
             previous: Some(artifact.clone()),
             draft: Some(draft.clone()),
-        },
-    });
+        }),
+    }));
     assert_eq!(app.next_mode(), before);
     assert!(app.plan_recovery_open());
     assert!(
@@ -188,17 +189,19 @@ fn draft_only_snapshots_do_not_change_mode_or_close_recovery_and_warn_about_reta
     app.handle_event(key(KeyCode::Char('1')));
     assert_eq!(
         app.handle_event(key(KeyCode::Enter)),
-        Some(UiAction::ResolvePlan {
-            expected: artifact.version,
-            decision: PlanDecision::ImplementCurrent
-        })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::ResolvePlan {
+                expected: artifact.version,
+                decision: PlanDecision::ImplementCurrent
+            }
+        )))
     );
     let mut warning = App::new();
-    warning.reduce_without_effects(SessionEvent::PlanProjectionWarning {
+    warning.reduce_without_effects(SessionEvent::Plan(PlanEvent::ProjectionWarning {
         version: draft.target,
         draft: Some(3),
         path: PathBuf::from("mirror.md"),
         error: "read-only directory".into(),
-    });
+    }));
     assert!(rendered_text(&mut warning, 160, 35).contains("draft 3 remains available"));
 }

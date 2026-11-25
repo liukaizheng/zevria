@@ -1,5 +1,7 @@
 //! Layout behavior and presentation tests.
 use super::*;
+use zevria_session_api::SessionStreamState;
+use zevria_session_api::{EnsembleEvent, ManagementEvent, PlanEvent, QuestionEvent, TurnEvent};
 
 #[test]
 fn narrow_composer_wraps_words_without_mutating_separator_bytes() {
@@ -208,7 +210,7 @@ fn footer_owns_state_and_accounting_while_composer_chrome_is_action_only() {
     assert!(body.contains("i input"));
 
     start_empty_turn(&mut app, TEST_TURN_ID, SessionMode::Build);
-    app.reduce_without_effects(SessionEvent::UsageUpdated {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::UsageUpdated {
         turn_id: TEST_TURN_ID,
         usage: TokenUsage {
             input_tokens: 12_300,
@@ -220,11 +222,11 @@ fn footer_owns_state_and_accounting_while_composer_chrome_is_action_only() {
         model_role: ModelRole::Build,
         input_token_limit: 100_000,
         context_window_tokens: 128_000,
-    });
-    app.reduce_without_effects(SessionEvent::TurnFailed {
+    }));
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Failed {
         turn_id: TEST_TURN_ID,
         error: "failed after usage".to_string(),
-    });
+    }));
     let rows = rendered_rows(&mut app, 140, 20);
     let footer = rows.last().expect("footer");
     let body = rows[..rows.len() - 1].concat();
@@ -429,10 +431,10 @@ fn transcript_entry_and_tail_accents_follow_semantic_colors() {
 
     let mut streaming = App::new();
     start_empty_turn(&mut streaming, TEST_TURN_ID, SessionMode::Build);
-    streaming.reduce_without_effects(SessionEvent::AssistantStreamUpdated {
-        turn_id: TEST_TURN_ID,
-        snapshot: (Message::assistant("stream accent")).into(),
-    });
+    streaming.reduce_without_effects(SessionStreamState::new(
+        TEST_TURN_ID,
+        (Message::assistant("stream accent")).into(),
+    ));
     assert_eq!(
         accent_color(&mut streaming, "stream accent"),
         ZEVRIA_DARK.roles.assistant
@@ -441,14 +443,14 @@ fn transcript_entry_and_tail_accents_follow_semantic_colors() {
 
     let mut retrying = App::new();
     start_empty_turn(&mut retrying, TEST_TURN_ID, SessionMode::Build);
-    retrying.reduce_without_effects(SessionEvent::TurnRetrying {
+    retrying.reduce_without_effects(SessionEvent::Turn(TurnEvent::Retrying {
         call: 1,
         turn_id: TEST_TURN_ID,
         attempt: 2,
         retrying_for: std::time::Duration::from_secs(280),
         retry_after: std::time::Duration::from_millis(500),
         error: "offline".to_string(),
-    });
+    }));
     assert_eq!(gutter_cell(&mut retrying, "reconnecting").symbol(), " ");
     assert_eq!(
         gutter_cell(&mut retrying, "request interrupted:").symbol(),
@@ -456,10 +458,10 @@ fn transcript_entry_and_tail_accents_follow_semantic_colors() {
     );
 
     let mut compacting = App::new();
-    compacting.reduce_without_effects(SessionEvent::CompactionStarted {
+    compacting.reduce_without_effects(SessionEvent::Turn(TurnEvent::CompactionStarted {
         turn_id: TEST_TURN_ID,
         trigger: CompactionTrigger::Manual,
-    });
+    }));
     assert_eq!(
         gutter_cell(&mut compacting, "Compacting context").symbol(),
         " "
@@ -665,15 +667,15 @@ fn status_line_uses_insets_default_background_and_semantic_accents() {
     assert_primary(&mut plan, "Plan · Normal", ZEVRIA_DARK.workflow.plan);
 
     let mut review = configured_app();
-    review.reduce_without_effects(SessionEvent::EnsembleStarted {
+    review.reduce_without_effects(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TEST_TURN_ID,
-        start: editable_ensemble_start(
+        start: Box::new(editable_ensemble_start(
             "semantic-review-status",
             EnsembleWorkflow::Review,
             "review status",
-        ),
+        )),
         resumed: false,
-    });
+    }));
     assert_primary(&mut review, "Review · Waiting", ZEVRIA_DARK.workflow.review);
 
     let mut inspect = App::subtask_inspect("◆ explore · child ◐");
@@ -707,11 +709,11 @@ fn status_line_uses_insets_default_background_and_semantic_accents() {
 #[test]
 fn plan_footer_renders_at_threshold_but_height_four_keeps_all_choice_rows_available() {
     let mut app = App::new();
-    app.reduce_without_effects(SessionEvent::PlanStateChanged {
-        state: PlanWorkflowState::Ready {
+    app.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
+        state: Box::new(PlanWorkflowState::Ready {
             artifact: test_plan_artifact(),
-        },
-    });
+        }),
+    }));
     let tiny = rendered_rows(&mut app, 100, 4);
     assert!(!tiny.concat().contains("Plan ready"));
     assert!(tiny.concat().contains("3. Revise the plan"));
@@ -727,10 +729,10 @@ fn modal_bounds_protect_then_reveal_the_unchanged_footer() {
     start_empty_turn(&mut root, TEST_TURN_ID, SessionMode::Build);
     let mut views = test_session_views(root);
     let expected_status = rendered_views_status_cells(&mut views, 50, 5);
-    views.apply(SessionEvent::QuestionAsked {
+    views.apply(SessionEvent::Question(QuestionEvent::Asked {
         turn_id: TEST_TURN_ID,
         request: question_request("footer-overlay"),
-    });
+    }));
     let mut covered = Terminal::new(TestBackend::new(50, 5)).expect("terminal");
     covered
         .draw(|frame| views.render(frame))
@@ -744,7 +746,11 @@ fn modal_bounds_protect_then_reveal_the_unchanged_footer() {
 
     assert!(matches!(
         views.handle_event(key(KeyCode::Esc)),
-        Some(UiAction::AnswerQuestion { .. })
+        Some(UiAction::Session(
+            zevria_session_api::SessionCommand::Control(
+                zevria_session_api::ControlCommand::AnswerQuestion { .. }
+            )
+        ))
     ));
     let rows = rendered_views_rows(&mut views, 50, 5);
     assert!(
@@ -1249,25 +1255,34 @@ fn non_chat_artifacts_keep_their_surrounding_gap_rows_blank() {
 fn timer_only_tails_reuse_one_blank_history_gap_without_a_leading_gap() {
     for event in [
         None,
-        Some(SessionEvent::TurnRetrying {
-            call: 1,
-            turn_id: TEST_TURN_ID,
-            attempt: 2,
-            retrying_for: std::time::Duration::from_secs(280),
-            retry_after: std::time::Duration::from_secs(4),
-            error: "offline".to_string(),
-        }),
-        Some(SessionEvent::CompactionStarted {
-            turn_id: TEST_TURN_ID,
-            trigger: CompactionTrigger::Manual,
-        }),
-        Some(SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: (Message::User {
-                content: Vec::new(),
+        Some(
+            SessionEvent::Turn(TurnEvent::Retrying {
+                call: 1,
+                turn_id: TEST_TURN_ID,
+                attempt: 2,
+                retrying_for: std::time::Duration::from_secs(280),
+                retry_after: std::time::Duration::from_secs(4),
+                error: "offline".to_string(),
             })
             .into(),
-        }),
+        ),
+        Some(
+            SessionEvent::Turn(TurnEvent::CompactionStarted {
+                turn_id: TEST_TURN_ID,
+                trigger: CompactionTrigger::Manual,
+            })
+            .into(),
+        ),
+        Some(
+            SessionStreamState::new(
+                TEST_TURN_ID,
+                (Message::User {
+                    content: Vec::new(),
+                })
+                .into(),
+            )
+            .into(),
+        ),
     ] {
         for width in [24, 80] {
             for hidden_history in [false, true] {
@@ -1380,10 +1395,7 @@ fn real_streamed_messages_keep_chat_separators_and_own_a_blank_status_boundary()
                 }
                 start_timed_tail(
                     &mut app,
-                    Some(SessionEvent::AssistantStreamUpdated {
-                        turn_id: TEST_TURN_ID,
-                        snapshot: (message.clone()).into(),
-                    }),
+                    Some(SessionStreamState::new(TEST_TURN_ID, message.clone().into()).into()),
                 );
                 let buffer = rendered_buffer(&mut app, width, 60);
                 let content = conversation_content_area(&buffer, false);
@@ -1454,27 +1466,31 @@ fn real_streamed_messages_keep_chat_separators_and_own_a_blank_status_boundary()
 
 #[test]
 fn wrapped_tail_boundaries_project_correctly_when_scrolled_or_bottom_followed() {
-    for event in [
-        SessionEvent::ModelCallStarted {
+    let updates: [SessionUpdate; 3] = [
+        SessionEvent::Turn(TurnEvent::ModelCallStarted {
             turn_id: TEST_TURN_ID,
             call: 1,
-        },
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: (Message::assistant(
+        })
+        .into(),
+        SessionStreamState::new(
+            TEST_TURN_ID,
+            (Message::assistant(
                 "a streamed message with enough words to wrap over several rows\nlast streamed row",
             ))
             .into(),
-        },
-        SessionEvent::TurnRetrying {
+        )
+        .into(),
+        SessionEvent::Turn(TurnEvent::Retrying {
             call: 1,
             turn_id: TEST_TURN_ID,
             attempt: 2,
             retrying_for: std::time::Duration::from_secs(280),
             retry_after: std::time::Duration::from_secs(4),
             error: "**literal error** with enough words to wrap\nlast error row".into(),
-        },
-    ] {
+        })
+        .into(),
+    ];
+    for event in updates {
         for width in [20, 30, 48] {
             let mut app = App::new();
             app.seed_history_entry(history_message(Message::user(
@@ -1507,7 +1523,10 @@ fn wrapped_tail_boundaries_project_correctly_when_scrolled_or_bottom_followed() 
                     "{event:?}, width {width}, status row {row}"
                 );
             }
-            if matches!(event, SessionEvent::TurnRetrying { .. }) {
+            if matches!(
+                event,
+                SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Retrying { .. }))
+            ) {
                 let status_text = (reference_content.y + status_start as u16
                     ..reference_content.y + total as u16)
                     .map(|y| {
@@ -1822,7 +1841,7 @@ fn layout_cache_reuses_unchanged_entries() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -1831,7 +1850,7 @@ fn layout_cache_reuses_unchanged_entries() {
                 "command",
                 json!({}),
             )]),
-        },
+        }),
     );
     app.seed_history_entry(history_message(Message::user("hello")));
 
@@ -1849,11 +1868,11 @@ fn layout_cache_reuses_unchanged_entries() {
     // Finishing the tool call re-renders only the entry holding it.
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("fc_1", Some("call_1"), "command", "done"),
-        },
+        }),
     );
     rendered_text(&mut app, 80, 12);
     assert_eq!(app.view_cache().rebuilds, after_first + 1);
@@ -1974,16 +1993,16 @@ fn streamed_deltas_extend_the_rendered_tail() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: (assistant_message(vec![
+        SessionStreamState::new(
+            TEST_TURN_ID,
+            (assistant_message(vec![
                 AssistantContent::Reasoning(zevria_content::reasoning::summaries(vec![
                     "pondering".to_string(),
                 ])),
                 AssistantContent::text("part one"),
             ]))
             .into(),
-        },
+        ),
     );
     let first = rendered_text(&mut app, 40, 12);
     assert!(first.contains("pondering"));
@@ -1992,26 +2011,21 @@ fn streamed_deltas_extend_the_rendered_tail() {
     // The next snapshot extends the trailing text block, as streaming does.
     apply_turn_event(
         &mut app,
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: (assistant_message(vec![
+        SessionStreamState::new(
+            TEST_TURN_ID,
+            (assistant_message(vec![
                 AssistantContent::Reasoning(zevria_content::reasoning::summaries(vec![
                     "pondering".to_string(),
                 ])),
                 AssistantContent::text("part one and part two"),
             ]))
             .into(),
-        },
+        ),
     );
     let second = rendered_text(&mut app, 40, 12);
     assert!(second.contains("part two"));
 
-    apply_turn_event(
-        &mut app,
-        SessionEvent::StreamCleared {
-            turn_id: TEST_TURN_ID,
-        },
-    );
+    apply_turn_event(&mut app, SessionStreamState::clear(TEST_TURN_ID));
     let cleared = rendered_text(&mut app, 40, 12);
     assert!(!cleared.contains("part one"));
 }
@@ -2119,10 +2133,10 @@ fn workspace_header_preserves_identity_across_panes_and_global_modals() {
     );
     assert_eq!(views.handle_event(key(KeyCode::Esc)), None);
 
-    views.apply(SessionEvent::QuestionAsked {
+    views.apply(SessionEvent::Question(QuestionEvent::Asked {
         turn_id: TEST_TURN_ID,
         request: question_request("header-question"),
-    });
+    }));
     assert_eq!(
         rendered_views_row_cells(&mut views, width, 24, 0),
         root_header,
@@ -2155,20 +2169,21 @@ fn workspace_header_follows_idle_mode_with_composer_and_status() {
     {
         if index > 0 {
             let previous = views.root().next_mode();
-            let Some(UiAction::SetMode { request_id, mode }) =
-                views.handle_event(key(KeyCode::BackTab))
+            let Some(UiAction::Session(zevria_session_api::SessionCommand::Manage(
+                zevria_session_api::ManagementCommand::SetMode { request_id, mode },
+            ))) = views.handle_event(key(KeyCode::BackTab))
             else {
                 panic!("idle mode shortcut must request management selection");
             };
             assert_eq!(views.root().next_mode(), previous);
             assert!(views.root().mode_selection_pending());
-            views.apply(SessionEvent::ModeResult {
+            views.apply(SessionEvent::Manage(ManagementEvent::ModeResult {
                 request_id,
                 result: zevria_session_api::ModeSelectionResult::Accepted {
                     mode,
                     changed: true,
                 },
-            });
+            }));
             assert!(!views.root().is_busy());
         }
         terminal
@@ -2335,11 +2350,11 @@ fn workspace_header_refreshes_after_root_tool_results_and_focus_regain() {
         1,
         ZEVRIA_DARK.workflow.build,
     );
-    views.apply(SessionEvent::ToolResults {
+    views.apply(SessionEvent::Turn(TurnEvent::ToolResults {
         turn_id: TEST_TURN_ID,
         message: tool_result_message("branch-refresh", None, "command", "done"),
         metadata: Vec::new(),
-    });
+    }));
     assert_workspace_header_cells(
         &rendered_views_row_cells(&mut views, width, 20, 0),
         &workspace_display,

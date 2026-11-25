@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{SubtaskEvent, TurnEvent};
 
 #[tokio::test]
 async fn root_and_subtask_fences_are_independent_and_relays_get_parent_sequences() {
@@ -14,7 +15,7 @@ async fn root_and_subtask_fences_are_independent_and_relays_get_parent_sequences
             attempt: None,
             revision: 700,
             turn_id,
-            message: Some(Message::assistant("stale first child")),
+            message: Some(Message::assistant("stale first child").into()),
         },
     );
     sender.set_subtask_stream(
@@ -23,17 +24,17 @@ async fn root_and_subtask_fences_are_independent_and_relays_get_parent_sequences
             attempt: None,
             revision: 900,
             turn_id,
-            message: Some(Message::assistant("second child")),
+            message: Some(Message::assistant("second child").into()),
         },
     );
-    let child_commit = SessionEvent::SubtaskSession {
+    let child_commit = SessionEvent::Subtask(SubtaskEvent::Session {
         id: first_child.clone(),
-        event: Box::new(SessionEvent::Intermediate {
+        event: Box::new(SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id,
             message: Message::assistant("first child commit"),
-        }),
-    };
+        })),
+    });
     sender
         .send(child_commit.clone())
         .await
@@ -49,7 +50,7 @@ async fn root_and_subtask_fences_are_independent_and_relays_get_parent_sequences
     };
     assert_eq!(
         batch.root.and_then(|state| state.message),
-        Some(Message::assistant("root preview"))
+        Some(Message::assistant("root preview").into())
     );
     assert!(!batch.subtasks.contains_key(&first_child));
     assert_eq!(
@@ -60,15 +61,15 @@ async fn root_and_subtask_fences_are_independent_and_relays_get_parent_sequences
             // third publication on this parent channel.
             revision: 3,
             turn_id,
-            message: Some(Message::assistant("second child")),
+            message: Some(Message::assistant("second child").into()),
         })
     );
 
-    let root_commit = SessionEvent::Intermediate {
+    let root_commit = SessionEvent::Turn(TurnEvent::Intermediate {
         attempt_id: None,
         turn_id,
         message: Message::assistant("root commit"),
-    };
+    });
     sender
         .send(root_commit.clone())
         .await
@@ -79,7 +80,7 @@ async fn root_and_subtask_fences_are_independent_and_relays_get_parent_sequences
             attempt: None,
             revision: 1,
             turn_id,
-            message: Some(Message::assistant("fresh first child")),
+            message: Some(Message::assistant("fresh first child").into()),
         },
     );
     assert_eq!(
@@ -94,7 +95,7 @@ async fn root_and_subtask_fences_are_independent_and_relays_get_parent_sequences
         batch
             .subtasks
             .get(&first_child)
-            .and_then(|state| state.message.as_ref()),
+            .and_then(|state| state.message.as_deref()),
         Some(&Message::assistant("fresh first child"))
     );
 }
@@ -152,9 +153,9 @@ async fn failed_children_surface_as_correlated_tool_errors() {
     let tool_results = events
         .iter()
         .find_map(|event| match event {
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 message, metadata, ..
-            } => Some((message, metadata)),
+            }) => Some((message, metadata)),
             _ => None,
         })
         .expect("tool results event");
@@ -173,7 +174,7 @@ async fn failed_children_surface_as_correlated_tool_errors() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
     );
     // The model sees the failure in the continuation and can recover.
     let requests = requests.lock().expect("requests lock");

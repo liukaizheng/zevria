@@ -74,7 +74,7 @@ async fn synthetic_seven_turn_partial_reuse_remains_unexplained_across_increment
         provider.responses_parameters = Some(json!({"reasoning":{"effort":"high", "summary":"detailed"}}));
         let mut history = Vec::<zevria_model::OwnedModelRequestItem>::new();
         for (index, turn) in turns.iter().enumerate() {
-            if turn["reconnect"] == true { provider.ws.reconnect().await.unwrap(); }
+            if turn["reconnect"] == true { provider.responses_transport.ws.reconnect().await.unwrap(); }
             history.push(zevria_model::OwnedModelRequestItem::message(Message::user(format!("Synthetic prompt {index}"))));
             let response = provider.complete(request(history.iter().map(zevria_model::OwnedModelRequestItem::as_borrowed).collect()), discard_updates()).await.unwrap();
             assert_eq!(response.record().provider_replay().unwrap().items, synthetic_output(turn, index));
@@ -150,7 +150,7 @@ async fn comparison_only_wire_mutation_is_still_a_wire_mismatch() {
             json!({"comparison_response_id":"resp_operator"}),
         );
         let prompt = Message::user("Synthetic prompt");
-        let prepared = crate::turn::prepare_turn_request(
+        let prepared = crate::responses::prepare_turn_request(
             &request(vec![ModelRequestItem::message(&prompt)]),
             &mut provider,
         )

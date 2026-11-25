@@ -10,11 +10,11 @@ zevria-instructions = { workspace = true }
 zevria-model = { workspace = true }
 zevria-workflow = { workspace = true }
 anyhow = { workspace = true }
+futures-util = { workspace = true }
 rig-core = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-futures-util = { workspace = true }
 tempfile = { workspace = true }

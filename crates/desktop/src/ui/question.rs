@@ -41,7 +41,7 @@ pub(super) struct ChoiceNoteEditor {
 
 impl DesktopWindow {
     pub(super) fn sync_question(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = self.controller.read(cx).model.question.as_ref() else {
+        let Some(form) = self.controller.read(cx).model.controls.question.as_ref() else {
             if !self.question_id.is_empty() {
                 self.composer
                     .update(cx, |input, cx| input.focus(window, cx));
@@ -115,7 +115,7 @@ impl DesktopWindow {
                     if matches!(event, InputEvent::Change) {
                         let value = input.read(cx).value().to_string();
                         this.controller.update(cx, |this, cx| {
-                            if let Some(question) = this.model.question.as_mut()
+                            if let Some(question) = this.model.controls.question.as_mut()
                                 && question.request.id.as_str() == request_id.as_str()
                                 && !question.pending
                                 && let Some(answer) = question.answers.get_mut(index)
@@ -142,6 +142,7 @@ impl DesktopWindow {
             .controller
             .read(cx)
             .model
+            .controls
             .question
             .as_ref()
             .filter(|form| !form.pending)
@@ -174,7 +175,7 @@ impl DesktopWindow {
                 }
                 let value = input.read(cx).value().to_string();
                 this.controller.update(cx, |this, cx| {
-                    if let Some(form) = this.model.question.as_mut()
+                    if let Some(form) = this.model.controls.question.as_mut()
                         && form.request.id == request_target.request_id
                         && form.set_choice_note_draft(
                             request_target.prompt,
@@ -248,7 +249,7 @@ impl DesktopWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let form = self.controller.read(cx).model.question.as_ref()?;
+        let form = self.controller.read(cx).model.controls.question.as_ref()?;
         let t = palette(cx);
         let pending = form.pending;
         let mut fields = div()
@@ -316,7 +317,7 @@ impl DesktopWindow {
                 let request_id = form.request.id.clone();
                 let on_change = cx.listener(move |this, value: &bool, _: &mut Window, cx| {
                     this.controller.update(cx, |this, cx| {
-                        if let Some(form) = this.model.question.as_mut()
+                        if let Some(form) = this.model.controls.question.as_mut()
                             && form.request.id == request_id
                             && form.choose(index, option_index, *value)
                         {
@@ -368,7 +369,7 @@ impl DesktopWindow {
                                 .disabled(pending)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.controller.update(cx, |this, cx| {
-                                        if let Some(form) = this.model.question.as_mut()
+                                        if let Some(form) = this.model.controls.question.as_mut()
                                             && form.request.id == request_id
                                             && form.set_preview(index, option_index)
                                         {
@@ -437,7 +438,7 @@ impl DesktopWindow {
                         .disabled(pending)
                         .on_change(cx.listener(move |this, value, _, cx| {
                             this.controller.update(cx, |this, cx| {
-                                if let Some(form) = this.model.question.as_mut()
+                                if let Some(form) = this.model.controls.question.as_mut()
                                     && form.request.id == request_id
                                     && !form.pending
                                 {
@@ -464,7 +465,7 @@ impl DesktopWindow {
                         .disabled(pending)
                         .on_change(cx.listener(move |this, value, _, cx| {
                             this.controller.update(cx, |this, cx| {
-                                if let Some(form) = this.model.question.as_mut()
+                                if let Some(form) = this.model.controls.question.as_mut()
                                     && form.request.id == request_id
                                     && !form.pending
                                 {

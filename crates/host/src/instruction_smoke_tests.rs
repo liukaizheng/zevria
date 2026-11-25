@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
 use zevria_session_api::{
     ManagementCommand, ModeSelectionResult, SessionEvent, SessionUpdate, TurnCommand,
 };
+use zevria_session_api::{ManagementEvent, TurnEvent};
 
 async fn completed(events: &mut zevria_session_api::SessionEventReceiver) {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -17,13 +18,13 @@ async fn completed(events: &mut zevria_session_api::SessionEventReceiver) {
                 assert!(
                     !matches!(
                         event,
-                        SessionEvent::TurnFailed { .. }
-                            | SessionEvent::TurnRejected { .. }
-                            | SessionEvent::TurnCancelled { .. }
+                        SessionEvent::Turn(TurnEvent::Failed { .. })
+                            | SessionEvent::Turn(TurnEvent::Rejected { .. })
+                            | SessionEvent::Turn(TurnEvent::Cancelled { .. })
                     ),
                     "{event:?}"
                 );
-                if matches!(event, SessionEvent::TurnCompleted { .. }) {
+                if matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })) {
                     completed = true;
                 }
                 if matches!(event, SessionEvent::EngineIdle) {
@@ -55,8 +56,10 @@ async fn select_mode(
         .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(update) = events.recv().await {
-            if let SessionUpdate::Lifecycle(SessionEvent::ModeResult { request_id, result }) =
-                update
+            if let SessionUpdate::Lifecycle(SessionEvent::Manage(ManagementEvent::ModeResult {
+                request_id,
+                result,
+            })) = update
             {
                 assert_eq!(request_id, "smoke-mode");
                 assert_eq!(

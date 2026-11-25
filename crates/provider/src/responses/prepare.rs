@@ -160,18 +160,6 @@ impl ResponsesCountProbe {
     }
 }
 
-fn preflight_options(openai: &OpenAiProvider) -> PreflightOptions<'_> {
-    PreflightOptions {
-        target: &openai.profile,
-        developer_messages: openai.compatibility.developer_messages,
-        tool_options: ToolRendererOptions {
-            strict_tools: openai.compatibility.strict_tools,
-        },
-        additional_tools: openai.compatibility.additional_tools,
-        policy: &openai.image_accounting,
-    }
-}
-
 pub(crate) async fn prepare_turn_request(
     model_request: &ModelRequest<'_>,
     openai: &mut OpenAiProvider,
@@ -187,7 +175,9 @@ pub(super) fn prepare_count_request(
     let probe = match (probe, model_request.input_identity) {
         (None, None) => Some(ResponsesCountProbe::new(
             &model_request.input,
-            preflight_options(openai),
+            openai
+                .compatibility
+                .preflight_options(&openai.profile, &openai.image_accounting),
         )?),
         (probe, _) => probe,
     };
@@ -219,10 +209,10 @@ fn prepare_request(
     let mut live;
     let cache = if use_live_cache {
         live = openai
-            .responses_cache
+            .slot_cache
             .lock()
             .map_err(|_| anyhow::anyhow!("Responses slot cache lock poisoned"))?;
-        &mut *live
+        &mut live.responses
     } else {
         scratch = ResponsesCache::default();
         &mut scratch
@@ -298,7 +288,9 @@ fn prepare_request(
             &mut cache.input,
             &model_request.input,
             identity,
-            preflight_options(openai),
+            openai
+                .compatibility
+                .preflight_options(&openai.profile, &openai.image_accounting),
         )?,
     };
     anyhow::ensure!(
@@ -306,12 +298,17 @@ fn prepare_request(
         "the OpenAI Responses request contained no input items"
     );
     let input_matches_continuation = use_live_cache
-        && openai.ws.continuation.as_ref().is_some_and(|continuation| {
-            let lineage = continuation.lineage;
-            projected.generation == lineage.projection_generation
-                && identity.len() > lineage.input_count
-                && identity.prefix(lineage.input_count) == Some(lineage.input_digest)
-        });
+        && openai
+            .responses_transport
+            .ws
+            .continuation
+            .as_ref()
+            .is_some_and(|continuation| {
+                let lineage = continuation.lineage;
+                projected.generation == lineage.projection_generation
+                    && identity.len() > lineage.input_count
+                    && identity.prefix(lineage.input_count) == Some(lineage.input_digest)
+            });
     Ok(PreparedRequest {
         cache_diagnostics: Diagnostics::empty_request(),
         request_properties,
@@ -334,13 +331,13 @@ fn project_input(
     identity: &ModelInputIdentity,
     options: PreflightOptions<'_>,
 ) -> anyhow::Result<ProjectedInput> {
-    let assessment = cache.assess_with_policy(input, identity, options)?;
+    let assessment = cache.assess(input, identity, options)?;
     if let zevria_model::models::ReplayPreflight::ConversionRequired { .. } = assessment {
         let replay = input
             .iter()
             .find_map(|item| match item {
                 ModelRequestItem::ReplayOnly(replay)
-                    if &replay.source_profile != options.target
+                    if &replay.source_profile != options.projection.target
                         || replay.protocol() != Some(zevria_model::ReplayProtocol::Responses) =>
                 {
                     Some(replay)
@@ -352,7 +349,7 @@ fn project_input(
             "cannot send replay-only {} history from source profile {} to foreign target profile {}: conversion required",
             replay.provider,
             replay.source_profile,
-            options.target
+            options.projection.target
         );
     }
     Ok(cache.projected_input().expect("compatible projection"))

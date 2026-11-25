@@ -5,6 +5,8 @@ use crate::{
 };
 use rig_core::message::{AssistantContent, AssistantMessage, Reasoning};
 use zevria_content::{AssistantStreamSnapshot, ResponseAttempt, ResponseAttemptOutcome};
+use zevria_session_api::SessionStreamState;
+use zevria_session_api::{PlanEvent, QuestionEvent, TurnEvent};
 use zevria_transcript::transcript::TranscriptItem;
 
 fn thinking(text: &str) -> Message {
@@ -15,19 +17,19 @@ fn thinking(text: &str) -> Message {
 fn start(controller: &Entity<SessionController>, id: TurnId, cx: &mut TestAppContext) {
     event(
         controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id: id,
             mode: SessionMode::Build,
             message: Message::user("Trace the source"),
-        },
+        }),
         cx,
     );
     event(
         controller,
-        E::ModelCallStarted {
+        E::Turn(TurnEvent::ModelCallStarted {
             turn_id: id,
             call: 1,
-        },
+        }),
         cx,
     );
 }
@@ -39,13 +41,13 @@ fn stream(
 ) {
     event(
         controller,
-        E::AssistantStreamUpdated {
-            turn_id: id,
-            snapshot: AssistantStreamSnapshot {
+        SessionStreamState::new(
+            id,
+            AssistantStreamSnapshot {
                 message: Some(message),
                 attempt: None,
             },
-        },
+        ),
         cx,
     );
 }
@@ -66,7 +68,7 @@ fn render(window: Window, cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn first_thought_retains_its_renderer_and_auto_collapses_on_prose(cx: &mut TestAppContext) {
-    let (window, view, controller, _) = setup(cx);
+    let (window, view, controller, _receiver) = setup(cx);
     let id = TurnId::new(100);
     start(&controller, id, cx);
     stream(&controller, id, thinking("### **Trace** the source"), cx);
@@ -89,11 +91,11 @@ fn first_thought_retains_its_renderer_and_auto_collapses_on_prose(cx: &mut TestA
     assert!(!thoughts(&view, cx)[0].expanded);
     event(
         &controller,
-        E::TurnCompleted {
+        E::Turn(TurnEvent::Completed {
             turn_id: id,
             message: answer,
             attempt_id: None,
-        },
+        }),
         cx,
     );
     render(window, cx);
@@ -114,7 +116,7 @@ fn first_thought_retains_its_renderer_and_auto_collapses_on_prose(cx: &mut TestA
 #[gpui_kit::test]
 fn later_call_thought_stays_in_order_and_keeps_pinned_intent(cx: &mut TestAppContext) {
     use rig_core::message::{CallId, ToolCall, ToolFunction, ToolName};
-    let (window, view, controller, _) = setup(cx);
+    let (window, view, controller, _receiver) = setup(cx);
     let id = TurnId::new(102);
     start(&controller, id, cx);
     let inspect = ToolCall::new(
@@ -126,19 +128,19 @@ fn later_call_thought_stays_in_order_and_keeps_pinned_intent(cx: &mut TestAppCon
     );
     event(
         &controller,
-        E::Intermediate {
+        E::Turn(TurnEvent::Intermediate {
             turn_id: id,
             attempt_id: None,
             message: Message::Assistant(AssistantMessage::new(vec![
                 AssistantContent::Reasoning(Reasoning::new("Read the source")),
                 AssistantContent::ToolCall(inspect),
             ])),
-        },
+        }),
         cx,
     );
     event(
         &controller,
-        E::ToolResults {
+        E::Turn(TurnEvent::ToolResults {
             turn_id: id,
             metadata: vec![],
             message: Message::tool_result(
@@ -146,15 +148,15 @@ fn later_call_thought_stays_in_order_and_keeps_pinned_intent(cx: &mut TestAppCon
                 ToolName::new("read").unwrap(),
                 "contents",
             ),
-        },
+        }),
         cx,
     );
     event(
         &controller,
-        E::ModelCallStarted {
+        E::Turn(TurnEvent::ModelCallStarted {
             turn_id: id,
             call: 2,
-        },
+        }),
         cx,
     );
     stream(&controller, id, thinking("Check the reported path"), cx);
@@ -195,11 +197,11 @@ fn later_call_thought_stays_in_order_and_keeps_pinned_intent(cx: &mut TestAppCon
     assert!(thoughts(&view, cx)[1].expanded);
     event(
         &controller,
-        E::TurnCompleted {
+        E::Turn(TurnEvent::Completed {
             turn_id: id,
             message: thinking("Check the reported path and revision"),
             attempt_id: None,
-        },
+        }),
         cx,
     );
     render(window, cx);
@@ -330,12 +332,16 @@ fn opaque_only_thinking_has_no_header_and_truthful_waiting_tip(cx: &mut TestAppC
 fn message_only_stop_keeps_unsaved_partial_before_a_neutral_stopped_node_but_not_restore(
     cx: &mut TestAppContext,
 ) {
-    let (window, view, controller, _) = setup(cx);
+    let (window, view, controller, _receiver) = setup(cx);
     let id = TurnId::new(105);
     start(&controller, id, cx);
     stream(&controller, id, thinking("Partial provider thought"), cx);
     render(window, cx);
-    event(&controller, E::TurnCancelled { turn_id: id }, cx);
+    event(
+        &controller,
+        E::Turn(TurnEvent::Cancelled { turn_id: id }),
+        cx,
+    );
     render(window, cx);
     let data = data(&view, cx);
     let index = data
@@ -370,7 +376,7 @@ fn attempt_reasoning_streams_in_place_and_interruption_is_not_marked_unsaved(
         AssistantPartIdentity, AssistantPresentationContent, AssistantPresentationPart,
         AssistantSourceAddress,
     };
-    let (window, view, controller, _) = setup(cx);
+    let (window, view, controller, _receiver) = setup(cx);
     let id = TurnId::new(106);
     start(&controller, id, cx);
     let mut attempt = ResponseAttempt::new(zevria_foundation::ModelProfileRef::new("p", "m"));
@@ -386,13 +392,13 @@ fn attempt_reasoning_streams_in_place_and_interruption_is_not_marked_unsaved(
     });
     event(
         &controller,
-        E::AssistantStreamUpdated {
-            turn_id: id,
-            snapshot: AssistantStreamSnapshot {
+        SessionStreamState::new(
+            id,
+            AssistantStreamSnapshot {
                 message: None,
                 attempt: Some(attempt.clone()),
             },
-        },
+        ),
         cx,
     );
     render(window, cx);
@@ -419,20 +425,24 @@ fn attempt_reasoning_streams_in_place_and_interruption_is_not_marked_unsaved(
         .unwrap();
     event(
         &controller,
-        E::ResponseAttemptUpdated {
+        E::Turn(TurnEvent::ResponseAttemptUpdated {
             turn_id: id,
-            attempt,
-        },
+            attempt: Box::new(attempt),
+        }),
         cx,
     );
-    event(&controller, E::TurnCancelled { turn_id: id }, cx);
+    event(
+        &controller,
+        E::Turn(TurnEvent::Cancelled { turn_id: id }),
+        cx,
+    );
     render(window, cx);
     let interrupted = thoughts(&view, cx).remove(0);
     assert_eq!(before.data.key, interrupted.data.key);
     assert_eq!(interrupted.phase, Phase::Interrupted);
     assert!(!interrupted.expanded);
     assert!(interrupted.data.primary_copy().contains("Revised in place"));
-    assert!(controller.read_with(cx, |c, _| c.unsaved_blocks.is_empty()));
+    assert!(controller.read_with(cx, |c, _| c.model.root.unsaved_blocks().is_empty()));
     assert!(
         data(&view, cx)
             .iter()
@@ -458,24 +468,24 @@ fn attempt_reasoning_streams_in_place_and_interruption_is_not_marked_unsaved(
 fn failed_message_tail_is_retained_but_a_foreign_terminal_cannot_capture_it(
     cx: &mut TestAppContext,
 ) {
-    let (_, view, controller, _) = setup(cx);
+    let (_, view, controller, _receiver) = setup(cx);
     let id = TurnId::new(109);
     start(&controller, id, cx);
     stream(&controller, id, thinking("Partial before failure"), cx);
     event(
         &controller,
-        E::TurnCancelled {
+        E::Turn(TurnEvent::Cancelled {
             turn_id: TurnId::new(999),
-        },
+        }),
         cx,
     );
-    assert!(controller.read_with(cx, |c, _| c.unsaved_blocks.is_empty()));
+    assert!(controller.read_with(cx, |c, _| c.model.root.unsaved_blocks().is_empty()));
     event(
         &controller,
-        E::TurnFailed {
+        E::Turn(TurnEvent::Failed {
             turn_id: id,
             error: "Connection closed".into(),
-        },
+        }),
         cx,
     );
     let blocks = data(&view, cx);
@@ -502,7 +512,7 @@ fn minimum_window_question_dock_and_plan_overlay_fit_and_keyboard_decisions_pres
     let request_id = QuestionRequestId::new("dock");
     event(
         &controller,
-        E::QuestionAsked {
+        E::Question(QuestionEvent::Asked {
             turn_id: id,
             request: QuestionRequest {
                 allow_choice_notes: false,
@@ -522,7 +532,7 @@ fn minimum_window_question_dock_and_plan_overlay_fit_and_keyboard_decisions_pres
                     default: None,
                 }],
             },
-        },
+        }),
         cx,
     );
     render(window, cx);
@@ -535,7 +545,9 @@ fn minimum_window_question_dock_and_plan_overlay_fit_and_keyboard_decisions_pres
         window.press("escape", cx);
     })
     .unwrap();
-    assert!(!controller.read_with(cx, |c, _| c.model.question.as_ref().unwrap().pending));
+    assert!(!controller.read_with(cx, |c, _| {
+        c.model.controls.question.as_ref().unwrap().pending
+    }));
     assert!(receiver.try_recv().is_err());
     #[cfg(windows)]
     cx.update_window(window.into(), |_, window, cx| {
@@ -548,7 +560,7 @@ fn minimum_window_question_dock_and_plan_overlay_fit_and_keyboard_decisions_pres
     .unwrap();
     #[cfg(not(windows))]
     controller.update(cx, |c, cx| {
-        c.model.question.as_mut().unwrap().answers[0].text = "Answer".into();
+        c.model.controls.question.as_mut().unwrap().answers[0].text = "Answer".into();
         cx.notify();
     });
     cx.update_window(window.into(), |_, window, cx| {
@@ -561,21 +573,22 @@ fn minimum_window_question_dock_and_plan_overlay_fit_and_keyboard_decisions_pres
     ));
     event(
         &controller,
-        E::QuestionClosed {
+        E::Question(QuestionEvent::Closed {
             turn_id: id,
             request_id,
-        },
+        }),
         cx,
     );
     event(
         &controller,
-        E::TurnCompleted {
+        E::Turn(TurnEvent::Completed {
             turn_id: id,
             message: Message::assistant("Done"),
             attempt_id: None,
-        },
+        }),
         cx,
     );
+    expect_skill_completion_query(&mut receiver);
     assert_eq!(
         controller.read_with(cx, |c, _| c.draft.clone()),
         "Retain my draft"
@@ -586,16 +599,16 @@ fn minimum_window_question_dock_and_plan_overlay_fit_and_keyboard_decisions_pres
     };
     event(
         &controller,
-        E::PlanStateChanged {
-            state: PlanWorkflowState::Ready {
+        E::Plan(PlanEvent::StateChanged {
+            state: Box::new(PlanWorkflowState::Ready {
                 artifact: PlanArtifact {
                     version,
                     title: "Plan".into(),
                     markdown: "Review the source".into(),
                     source_turn_id: id,
                 },
-            },
-        },
+            }),
+        }),
         cx,
     );
     render(window, cx);
@@ -663,7 +676,7 @@ fn subtasks_panel_navigation_inspects_children_without_resetting_disclosure(
     })
     .unwrap();
     assert_eq!(
-        controller.read_with(cx, |c, _| c.model.selected_child.clone()),
+        controller.read_with(cx, |c, _| c.model.controls.selected_child.clone()),
         Some(id)
     );
     render(window, cx);
@@ -672,7 +685,7 @@ fn subtasks_panel_navigation_inspects_children_without_resetting_disclosure(
         window.press("up", cx);
     })
     .unwrap();
-    assert!(controller.read_with(cx, |c, _| c.model.selected_child.is_none()));
+    assert!(controller.read_with(cx, |c, _| c.model.controls.selected_child.is_none()));
     render(window, cx);
     assert!(thoughts(&view, cx)[0].expanded);
     assert_eq!(
@@ -702,7 +715,7 @@ fn root_question_dock_keeps_ownership_while_a_child_is_inspected(cx: &mut TestAp
             status: Some(zevria_foundation::SubtaskStatus::Running),
             model,
         });
-        c.model.selected_child = Some(child_id.clone());
+        c.model.controls.selected_child = Some(child_id.clone());
         cx.notify();
     });
     let id = TurnId::new(112);
@@ -710,7 +723,7 @@ fn root_question_dock_keeps_ownership_while_a_child_is_inspected(cx: &mut TestAp
     let request_id = QuestionRequestId::new("root-owned");
     event(
         &controller,
-        E::QuestionAsked {
+        E::Question(QuestionEvent::Asked {
             turn_id: id,
             request: QuestionRequest {
                 allow_choice_notes: false,
@@ -730,11 +743,11 @@ fn root_question_dock_keeps_ownership_while_a_child_is_inspected(cx: &mut TestAp
                     default: None,
                 }],
             },
-        },
+        }),
         cx,
     );
     controller.update(cx, |c, cx| {
-        c.model.question.as_mut().unwrap().answers[0].text = "Yes".into();
+        c.model.controls.question.as_mut().unwrap().answers[0].text = "Yes".into();
         cx.notify();
     });
     render(window, cx);
@@ -747,7 +760,7 @@ fn root_question_dock_keeps_ownership_while_a_child_is_inspected(cx: &mut TestAp
         matches!(receiver.try_recv().unwrap(), SessionCommand::Control(ControlCommand::AnswerQuestion { request_id: actual, .. }) if actual == request_id)
     );
     assert_eq!(
-        controller.read_with(cx, |c, _| c.model.selected_child.clone()),
+        controller.read_with(cx, |c, _| c.model.controls.selected_child.clone()),
         Some(child_id)
     );
 }
@@ -759,7 +772,7 @@ fn stop_shortcut_works_even_with_a_non_dismissible_question(cx: &mut TestAppCont
     start(&controller, id, cx);
     event(
         &controller,
-        E::QuestionAsked {
+        E::Question(QuestionEvent::Asked {
             turn_id: id,
             request: QuestionRequest {
                 allow_choice_notes: false,
@@ -779,7 +792,7 @@ fn stop_shortcut_works_even_with_a_non_dismissible_question(cx: &mut TestAppCont
                     default: None,
                 }],
             },
-        },
+        }),
         cx,
     );
     render(window, cx);

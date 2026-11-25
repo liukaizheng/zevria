@@ -3,6 +3,7 @@ use zevria_foundation::{
     RequestBehavior, SubtaskEntryMetadata, SubtaskLaunchMetadata, SubtaskStatus,
 };
 use zevria_instructions::RequestDirectiveKind;
+use zevria_session_api::TurnEvent;
 
 struct LaunchFixture {
     entries: Mutex<VecDeque<Vec<&'static str>>>,
@@ -130,7 +131,7 @@ fn reminders(engine: &SessionEngine<ScriptedProvider>) -> usize {
 fn success(events: &[SessionEvent]) -> bool {
     events
         .iter()
-        .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+        .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
 }
 
 #[tokio::test]
@@ -165,7 +166,7 @@ async fn one_batch_not_arguments_text_or_multiple_calls_supplies_evidence() {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event, SessionEvent::TurnFailed { .. }))
+                .filter(|event| matches!(event, SessionEvent::Turn(TurnEvent::Failed { .. })))
                 .count(),
             usize::from(!expected)
         );
@@ -192,7 +193,7 @@ async fn one_durable_correction_preserves_work_then_delegation_can_succeed() {
     let events = submit_request(&mut engine, RequestBehavior::Orchestrate).await;
     assert!(success(&events));
     assert_eq!(reminders(&engine), 1);
-    assert!(events.iter().any(|event| matches!(event, SessionEvent::Intermediate { message, .. } if message == &Message::assistant("premature"))));
+    assert!(events.iter().any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Intermediate { message, .. }) if message == &Message::assistant("premature"))));
     {
         let requests = engine.provider.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
@@ -224,7 +225,7 @@ async fn second_premature_final_fails_after_exactly_one_correction() {
         events
             .iter()
             .filter(
-                |event| matches!(event, SessionEvent::TurnFailed { error, .. }
+                |event| matches!(event, SessionEvent::Turn(TurnEvent::Failed { error, .. })
         if error.contains("concurrent delegation was not fulfilled")
             && error.contains("single corrective directive has already been issued"))
             )
@@ -235,7 +236,7 @@ async fn second_premature_final_fails_after_exactly_one_correction() {
         events
             .iter()
             .filter_map(|event| match event {
-                SessionEvent::ModelCallStarted { call, .. } => Some(*call),
+                SessionEvent::Turn(TurnEvent::ModelCallStarted { call, .. }) => Some(*call),
                 _ => None,
             })
             .collect::<Vec<_>>(),
@@ -374,11 +375,10 @@ async fn mid_turn_compaction_preserves_correction_contract_and_accepted_launch_e
             reminders(&engine),
             usize::from(!qualified_before_compaction)
         );
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, SessionEvent::CompactionCompleted { .. }))
-        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SessionEvent::Turn(TurnEvent::CompactionCompleted { .. })
+        )));
         assert_eq!(*authorization.lock().unwrap(), [true]);
         let requests = engine.provider.requests.lock().unwrap();
         assert_eq!(requests[1].instructions, requests[0].instructions);
@@ -487,8 +487,8 @@ async fn premature_native_completion_keeps_replay_usage_and_display_identity() {
     let events = submit_request(&mut engine, RequestBehavior::Orchestrate).await;
     assert!(!success(&events));
     assert_eq!(reminders(&engine), 1);
-    assert!(events.iter().any(|event| matches!(event, SessionEvent::Intermediate { attempt_id: Some(id), .. } if id == &attempt_id)));
-    assert!(events.iter().any(|event| matches!(event, SessionEvent::UsageUpdated { usage: actual, .. } if *actual == usage)));
+    assert!(events.iter().any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Intermediate { attempt_id: Some(id), .. }) if id == &attempt_id)));
+    assert!(events.iter().any(|event| matches!(event, SessionEvent::Turn(TurnEvent::UsageUpdated { usage: actual, .. }) if *actual == usage)));
     let items = zevria_transcript::load(engine.conversation.path()).unwrap();
     assert!(
         items
@@ -553,7 +553,7 @@ async fn admission_rejects_unsupported_profiles_plan_pending_work_and_limit_one_
             collect_events(&mut receiver)
                 .await
                 .iter()
-                .any(|event| matches!(event, SessionEvent::TurnRejected { .. })),
+                .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Rejected { .. }))),
             "{reason}"
         );
         assert_eq!(engine.conversation.items(), before);

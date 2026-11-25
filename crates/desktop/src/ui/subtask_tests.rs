@@ -1,5 +1,6 @@
 use super::*;
 use zevria_foundation::{SubtaskDescriptor, SubtaskId, SubtaskKind, SubtaskStatus};
+use zevria_session_api::{SubtaskEvent, TurnEvent};
 
 const TURN: TurnId = TurnId::new(9);
 
@@ -13,29 +14,29 @@ fn launch(
     let id = SubtaskId::new(name);
     event(
         controller,
-        E::SubtaskLaunched {
+        E::Subtask(SubtaskEvent::Launched {
             turn_id: TURN,
             call_id: name.into(),
             entry_index: 0,
-            descriptor: SubtaskDescriptor {
+            descriptor: Box::new(SubtaskDescriptor {
                 id: id.clone(),
                 parent_session_id: "session".into(),
                 title: format!("Inspect {name}"),
                 kind,
                 workspace: Some(format!("work/{name}")),
                 status: SubtaskStatus::Starting,
-            },
-        },
+            }),
+        }),
         cx,
     );
     if status != SubtaskStatus::Starting {
         event(
             controller,
-            E::SubtaskStatus {
+            E::Subtask(SubtaskEvent::Status {
                 turn_id: TURN,
                 id: id.clone(),
                 status,
-            },
+            }),
             cx,
         );
     }
@@ -87,11 +88,11 @@ fn chip_counts_live_subtasks_and_the_compact_panel_stays_open_when_switching(
     .unwrap();
     event(
         &controller,
-        E::SubtaskStatus {
+        E::Subtask(SubtaskEvent::Status {
             turn_id: TURN,
             id: explore.clone(),
             status: SubtaskStatus::Completed,
-        },
+        }),
         cx,
     );
     cx.update_window(window.into(), |_, window, cx| {
@@ -108,16 +109,16 @@ fn chip_counts_live_subtasks_and_the_compact_panel_stays_open_when_switching(
     })
     .unwrap();
     assert_eq!(
-        controller.read_with(cx, |c, _| c.model.selected_child.clone()),
+        controller.read_with(cx, |c, _| c.model.controls.selected_child.clone()),
         Some(explore)
     );
     event(
         &controller,
-        E::SubtaskStatus {
+        E::Subtask(SubtaskEvent::Status {
             turn_id: TURN,
             id: build,
             status: SubtaskStatus::Failed,
-        },
+        }),
         cx,
     );
     cx.update_window(window.into(), |_, window, cx| {
@@ -130,7 +131,7 @@ fn chip_counts_live_subtasks_and_the_compact_panel_stays_open_when_switching(
         window.click("subtask-conversation", cx);
     })
     .unwrap();
-    assert!(controller.read_with(cx, |c, _| c.model.selected_child.is_none()));
+    assert!(controller.read_with(cx, |c, _| c.model.controls.selected_child.is_none()));
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
         assert!(window.find("subtasks-panel").visible());
@@ -146,11 +147,11 @@ fn shortcut_and_slash_open_subtasks_while_busy_and_escape_closes(cx: &mut TestAp
     let (window, view, controller, mut receiver) = setup(cx);
     event(
         &controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("Run checks"),
-        },
+        }),
         cx,
     );
     launch(
@@ -223,5 +224,5 @@ fn subtasks_and_jobs_replace_each_other(cx: &mut TestAppContext) {
         assert!(window.try_find("subtasks-panel").is_none());
     })
     .unwrap();
-    assert!(!controller.read_with(cx, |c, _| c.model.subtasks_open));
+    assert!(!controller.read_with(cx, |c, _| c.model.controls.subtasks_open));
 }

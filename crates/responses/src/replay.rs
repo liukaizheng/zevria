@@ -262,56 +262,38 @@ impl InputProjection {
     }
 }
 
-pub fn project(
-    input: &[ModelRequestItem<'_>],
-    target: &ModelProfileRef,
-) -> anyhow::Result<(Vec<serde_json::Value>, ReplaySource)> {
-    project_with_compatibility(
-        input,
-        target,
-        true,
-        crate::tools::ToolRendererOptions::default(),
-        true,
-    )
+/// Options that shape the Responses wire prefix.
+#[derive(Debug, Clone, Copy)]
+pub struct ProjectionOptions<'a> {
+    pub target: &'a ModelProfileRef,
+    pub developer_messages: bool,
+    pub tool_options: crate::tools::ToolRendererOptions,
+    pub additional_tools: bool,
 }
-pub fn preflight(
-    input: &[ModelRequestItem<'_>],
-    target: &ModelProfileRef,
-) -> anyhow::Result<ReplayPreflight> {
-    preflight_with_compatibility(
-        input,
-        target,
-        true,
-        crate::tools::ToolRendererOptions::default(),
-        true,
-    )
+
+impl<'a> From<&'a ModelProfileRef> for ProjectionOptions<'a> {
+    fn from(target: &'a ModelProfileRef) -> Self {
+        Self {
+            target,
+            developer_messages: true,
+            tool_options: Default::default(),
+            additional_tools: true,
+        }
+    }
 }
 
 /// Opaque compatibility is a structured result, not a plain-message fallback.
-pub fn preflight_with_compatibility(
+pub fn preflight<'a>(
     input: &[ModelRequestItem<'_>],
-    target: &ModelProfileRef,
-    developer_messages: bool,
-    tool_options: crate::tools::ToolRendererOptions,
-    additional_tools: bool,
+    options: impl Into<PreflightOptions<'a>>,
 ) -> anyhow::Result<ReplayPreflight> {
-    preflight_with_policy(
-        input,
+    let PreflightOptions { projection, policy } = options.into();
+    let ProjectionOptions {
         target,
-        developer_messages,
         tool_options,
         additional_tools,
-        &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
-    )
-}
-pub fn preflight_with_policy(
-    input: &[ModelRequestItem<'_>],
-    target: &ModelProfileRef,
-    developer_messages: bool,
-    tool_options: crate::tools::ToolRendererOptions,
-    additional_tools: bool,
-    policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
-) -> anyhow::Result<ReplayPreflight> {
+        ..
+    } = projection;
     policy.validate(false)?;
     let sources = foreign_replay_only_sources(input, target);
     if !sources.is_empty() {
@@ -322,13 +304,7 @@ pub fn preflight_with_policy(
             sources: sources.into_iter().collect(),
         });
     }
-    let (projected, _) = project_with_compatibility(
-        input,
-        target,
-        developer_messages,
-        tool_options,
-        additional_tools,
-    )?;
+    let (projected, _) = project(input, projection)?;
     let mut estimate = zevria_model::media_accounting::responses_input(&projected, 0, policy);
     if !additional_tools {
         // Projection omits inline items in fold mode, but their declarations
@@ -368,11 +344,17 @@ fn foreign_replay_only_sources(
 /// Prepared-request settings shared by one cached capacity assessment.
 #[derive(Debug, Clone, Copy)]
 pub struct PreflightOptions<'a> {
-    pub target: &'a ModelProfileRef,
-    pub developer_messages: bool,
-    pub tool_options: crate::tools::ToolRendererOptions,
-    pub additional_tools: bool,
+    pub projection: ProjectionOptions<'a>,
     pub policy: &'a zevria_foundation::image_accounting::ImageAccountingPolicy,
+}
+
+impl<'a> From<&'a ModelProfileRef> for PreflightOptions<'a> {
+    fn from(target: &'a ModelProfileRef) -> Self {
+        Self {
+            projection: target.into(),
+            policy: &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
+        }
+    }
 }
 
 /// One destination projection, shared by local admission and wire dispatch.
@@ -425,36 +407,15 @@ impl ResponsesSlotCache {
         &mut self,
         input: &[ModelRequestItem<'_>],
         identity: &zevria_model::ModelInputIdentity,
-        target: &ModelProfileRef,
-        developer_messages: bool,
-        tool_options: crate::tools::ToolRendererOptions,
-        additional_tools: bool,
-    ) -> anyhow::Result<ReplayPreflight> {
-        self.assess_with_policy(
-            input,
-            identity,
-            PreflightOptions {
-                target,
-                developer_messages,
-                tool_options,
-                additional_tools,
-                policy: &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
-            },
-        )
-    }
-    pub fn assess_with_policy(
-        &mut self,
-        input: &[ModelRequestItem<'_>],
-        identity: &zevria_model::ModelInputIdentity,
         options: PreflightOptions<'_>,
     ) -> anyhow::Result<ReplayPreflight> {
-        let PreflightOptions {
+        let PreflightOptions { projection, policy } = options;
+        let ProjectionOptions {
             target,
             developer_messages,
             tool_options,
             additional_tools,
-            policy,
-        } = options;
+        } = projection;
         policy.validate(false)?;
         anyhow::ensure!(
             identity.len() == input.len(),
@@ -509,13 +470,7 @@ impl ResponsesSlotCache {
                 sources: sources.into_iter().collect(),
             });
         }
-        prefix.projection.extend(
-            suffix,
-            target,
-            developer_messages,
-            tool_options,
-            additional_tools,
-        )?;
+        prefix.projection.extend(suffix, projection)?;
         let mut projected = prefix.projection.take_input();
         if !projected.is_empty() {
             prefix.estimate.append_with_policy(&projected, policy);
@@ -545,21 +500,12 @@ impl ResponsesSlotCache {
     }
 }
 
-pub fn project_with_compatibility(
+pub fn project<'a>(
     input: &[ModelRequestItem<'_>],
-    target: &ModelProfileRef,
-    developer_messages: bool,
-    tool_options: crate::tools::ToolRendererOptions,
-    additional_tools: bool,
+    options: impl Into<ProjectionOptions<'a>>,
 ) -> anyhow::Result<(Vec<serde_json::Value>, ReplaySource)> {
     let mut projection = InputProjection::default();
-    projection.extend(
-        input,
-        target,
-        developer_messages,
-        tool_options,
-        additional_tools,
-    )?;
+    projection.extend(input, options.into())?;
     let source = projection.source();
     Ok((projection.take_input(), source))
 }
@@ -603,11 +549,14 @@ impl InputProjection {
     pub fn extend(
         &mut self,
         input: &[ModelRequestItem<'_>],
-        target: &ModelProfileRef,
-        developer_messages: bool,
-        tool_options: crate::tools::ToolRendererOptions,
-        additional_tools: bool,
+        options: ProjectionOptions<'_>,
     ) -> anyhow::Result<()> {
+        let ProjectionOptions {
+            target,
+            developer_messages,
+            tool_options,
+            additional_tools,
+        } = options;
         // Reserve future native wire handles before minting neutral ones. A
         // configured provider may itself emit IDs using Zevria's neutral prefix.
         for replay in input.iter().filter_map(|item| item.replay_ref()) {

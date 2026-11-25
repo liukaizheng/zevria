@@ -1,5 +1,6 @@
 use super::*;
 use zevria_foundation::{CommandJobMode, CommandJobStatus, TerminationOrigin};
+use zevria_session_api::JobEvent;
 use zevria_session_api::{
     CommandControl, CommandControlAction, CommandControlResult, CommandJobLimits, CommandJobs,
 };
@@ -38,14 +39,14 @@ async fn job_controls_are_immediate_while_busy_and_leave_queued_turns_untouched(
             id: job.snapshot().id,
         },
     ));
-    let result = run.until(|e| matches!(e, SessionEvent::CommandControlResult { request_id, .. } if request_id == "stop")).await;
+    let result = run.until(|e| matches!(e, SessionEvent::Job(JobEvent::ControlResult { request_id, .. }) if request_id == "stop")).await;
     assert!(matches!(
         result,
-        SessionEvent::CommandControlResult {
-            result: CommandControlResult::Accepted(_),
+        SessionEvent::Job(JobEvent::ControlResult {
+            result,
             ..
-        }
-    ));
+        })
+     if matches!(result.as_ref(), CommandControlResult::Accepted(_))));
     assert_eq!(
         *job.termination_requested().borrow(),
         Some(TerminationOrigin::User)
@@ -67,7 +68,7 @@ async fn job_controls_are_immediate_while_busy_and_leave_queued_turns_untouched(
         CommandControlAction::Inspect { id: None },
     ));
     assert!(
-        matches!(run.until(|e| matches!(e, SessionEvent::CommandControlResult { request_id, .. } if request_id == "inspect")).await, SessionEvent::CommandControlResult { result: CommandControlResult::Inspected(v), .. } if v.is_empty())
+        matches!(run.until(|e| matches!(e, SessionEvent::Job(JobEvent::ControlResult { request_id, .. }) if request_id == "inspect")).await, SessionEvent::Job(JobEvent::ControlResult { result, .. })  if matches!(result.as_ref(), CommandControlResult::Inspected(v) if v.is_empty()))
     );
     run.shutdown().await;
 }
@@ -87,14 +88,16 @@ async fn direct_and_idle_job_controls_reject_without_capability() {
     assert!(matches!(
         receiver.recv().await,
         Some(zevria_session_api::SessionUpdate::Lifecycle(
-            SessionEvent::CommandControlResult {
-                result: CommandControlResult::Rejected { .. },
+            SessionEvent::Job(JobEvent::ControlResult {
+                result,
                 ..
-            }
+            })
         ))
-    ));
+     if matches!(result.as_ref(), CommandControlResult::Rejected { .. })));
     let mut run = RunningSession::start(engine, [], events, receiver);
     run.send(control("idle", CommandControlAction::Inspect { id: None }));
-    assert!(matches!(run.until(|e| matches!(e, SessionEvent::CommandControlResult { request_id, .. } if request_id == "idle")).await, SessionEvent::CommandControlResult { result: CommandControlResult::Rejected { .. }, .. }));
+    assert!(
+        matches!(run.until(|e| matches!(e, SessionEvent::Job(JobEvent::ControlResult { request_id, .. }) if request_id == "idle")).await, SessionEvent::Job(JobEvent::ControlResult { result, .. }) if matches!(result.as_ref(), CommandControlResult::Rejected { .. }))
+    );
     run.shutdown().await;
 }

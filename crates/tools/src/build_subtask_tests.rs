@@ -6,6 +6,7 @@ use zevria_foundation::ToolContextRuntimeExt;
 use zevria_session_api::SessionEvent;
 use zevria_session_api::SessionUpdate;
 use zevria_session_api::SubtaskChannels;
+use zevria_session_api::SubtaskEvent;
 use zevria_session_api::session_event_channel;
 use zevria_session_api::subtask_channels;
 
@@ -163,9 +164,9 @@ async fn launch_capability_matrix_is_independent_of_nominal_mode() {
                 assert_eq!(metadata.workspace, descriptor.workspace);
                 assert!(matches!(
                     events_rx.try_recv().expect("launch event"),
-                    SessionUpdate::Lifecycle(SessionEvent::SubtaskLaunched {
+                    SessionUpdate::Lifecycle(SessionEvent::Subtask(SubtaskEvent::Launched {
                         call_id, descriptor: launched, ..
-                    }) if call_id == "call-mode-matrix" && launched == descriptor
+                    })) if call_id == "call-mode-matrix" && launched == Box::new(descriptor)
                 ));
             } else {
                 let error =

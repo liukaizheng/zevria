@@ -89,7 +89,7 @@ impl DesktopWindow {
                     .iter()
                     .find(|(_, focus)| focus.is_focused(window))
                     .map(|(id, _)| id)
-                    .unwrap_or(&model.selected_child);
+                    .unwrap_or(&model.controls.selected_child);
                 let current = focused
                     .as_ref()
                     .and_then(|id| model.children.iter().position(|child| &child.id == id))
@@ -112,7 +112,7 @@ impl DesktopWindow {
                 .row_focus
                 .entry(id.clone())
                 .or_insert_with(|| cx.focus_handle());
-            let active = id == model.selected_child;
+            let active = id == model.controls.selected_child;
             let (element_id, accessible, ink, row) = match child {
                 Some(child) => {
                     let ink = match child.kind {

@@ -200,12 +200,13 @@ impl AnthropicProviderConfig {
         Ok(())
     }
     pub(super) fn resolved_profiles(&self, provider: &str) -> Vec<ResolvedModelProfile> {
+        let endpoint = std::sync::Arc::new(self.endpoint());
         self.models
             .iter()
             .map(|(key, model)| ResolvedModelProfile {
                 profile: ModelProfileRef::new(provider, key),
                 protocol: ProfileProtocol::Anthropic {
-                    endpoint: self.endpoint(),
+                    endpoint: endpoint.clone(),
                     model: model.clone(),
                 },
                 context_window_tokens: model.context_window_tokens,

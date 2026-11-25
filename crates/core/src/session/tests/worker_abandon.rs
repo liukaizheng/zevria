@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::EnsembleEvent;
 
 #[tokio::test]
 async fn ensemble_abandonment_seals_survivors_in_either_control_order() {
@@ -67,7 +68,7 @@ async fn ensemble_abandonment_seals_survivors_in_either_control_order() {
         };
         if abandon_first {
             router.route(abandon.clone()).unwrap();
-            next_snapshot(&mut receiver, |state| state.abandoned).await;
+            next_snapshot(&mut receiver, |state| state.is_abandoned()).await;
             assert!(!runner.is_finished());
             router.route(abandon.clone()).unwrap();
             // Both duplicate acceptance and rejection retain exact correlation.
@@ -85,9 +86,9 @@ async fn ensemble_abandonment_seals_survivors_in_either_control_order() {
             let mut rejected = 0;
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 while !duplicate || rejected < 2 {
-                    if let Some(SessionUpdate::Lifecycle(SessionEvent::WorkerControlResult {
-                        result,
-                    })) = receiver.recv().await
+                    if let Some(SessionUpdate::Lifecycle(SessionEvent::Ensemble(
+                        EnsembleEvent::WorkerControlResult { result },
+                    ))) = receiver.recv().await
                     {
                         if result.control == abandon {
                             assert!(result.accepted);
@@ -141,7 +142,7 @@ async fn ensemble_abandonment_seals_survivors_in_either_control_order() {
                 .unwrap(),
             outcomes
         );
-        let snapshot = next_snapshot(&mut restored, |state| state.abandoned).await;
+        let snapshot = next_snapshot(&mut restored, |state| state.is_abandoned()).await;
         assert_eq!(snapshot.0.worker_id, b.0.worker_id);
         if !unavailable {
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -253,7 +254,7 @@ async fn all_abandoned(worker_count: usize) {
             })
             .unwrap_or_else(|_| panic!("router must be registered after snapshot"));
         next_snapshot(&mut receiver, |state| {
-            state.descriptor.id == worker.id && state.abandoned
+            state.descriptor.id == worker.id && state.is_abandoned()
         })
         .await;
     }

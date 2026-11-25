@@ -36,16 +36,19 @@ fn file_escape_dismisses_only_the_popup_during_recall_and_completion_stays_text(
     let mut views = test_session_views(app);
     let first = views.file_search_request().unwrap();
     views.handle_event(key(KeyCode::Esc));
-    assert!(views.root.is_recalling());
-    assert_eq!(views.root.input(), "Explain @a");
+    assert!(views.workspace.root.is_recalling());
+    assert_eq!(views.workspace.root.input(), "Explain @a");
     assert!(!views.file_search_completed(response(&first, &["late"])));
     views.handle_event(key(KeyCode::Left));
     let next = views.file_search_request().unwrap();
     views.file_search_completed(response(&next, &["app.rs"]));
     assert_eq!(views.handle_event(key(KeyCode::Enter)), None);
-    assert!(views.root.is_recalling());
-    assert_eq!(views.root.input(), "Explain @app.rs ");
-    let Some(UiAction::EditTranscript(edit)) = views.handle_event(ctrl_enter()) else {
+    assert!(views.workspace.root.is_recalling());
+    assert_eq!(views.workspace.root.input(), "Explain @app.rs ");
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+        zevria_session_api::TurnCommand::EditTranscript(edit),
+    ))) = views.handle_event(ctrl_enter())
+    else {
         panic!("recalled prompt edit");
     };
     assert!(
@@ -72,7 +75,7 @@ fn pending_clipboard_owns_delivery_and_retires_file_responses_without_changing_a
         cursor,
         crate::clipboard::ClipboardResult::Text("b".into()),
     );
-    assert_eq!(views.root.input(), "@ab");
+    assert_eq!(views.workspace.root.input(), "@ab");
     assert!(views.file_search_request().is_some());
 }
 
@@ -93,12 +96,12 @@ fn shifted_at_activates_and_repeat_release_events_do_not_type_or_accept() {
                 ))),
                 None
             );
-            assert_eq!(views.root.input(), "Explain @");
+            assert_eq!(views.workspace.root.input(), "Explain @");
         }
     }
     assert_eq!(views.handle_event(key(KeyCode::Enter)), None);
-    assert_eq!(views.root.input(), "Explain @app.rs ");
-    assert!(views.root.history().is_empty());
+    assert_eq!(views.workspace.root.input(), "Explain @app.rs ");
+    assert!(views.workspace.root.history().is_empty());
 }
 
 #[test]
@@ -115,16 +118,21 @@ fn enter_tab_and_ctrl_i_insert_only_and_ctrl_enter_submits_exact_literal_text() 
         let request = views.file_search_request().unwrap();
         assert!(views.file_search_completed(response(&request, &["docs/my file.md", "other.rs"])));
         assert_eq!(views.handle_event(accept), None);
-        assert_eq!(views.root.input(), "Explain @\"docs/my file.md\" suffix");
-        assert!(!views.root.is_busy());
-        assert!(views.root.history().is_empty());
+        assert_eq!(
+            views.workspace.root.input(),
+            "Explain @\"docs/my file.md\" suffix"
+        );
+        assert!(!views.workspace.root.is_busy());
+        assert!(views.workspace.root.history().is_empty());
         assert_eq!(
             views.handle_event(ctrl_enter()),
-            Some(UiAction::Submit {
-                behavior: zevria_foundation::RequestBehavior::Standard,
-                text: UserPrompt::from_text("Explain @\"docs/my file.md\" suffix"),
-                mode: SessionMode::Build,
-            })
+            Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                zevria_session_api::TurnCommand::Submit {
+                    behavior: zevria_foundation::RequestBehavior::Standard,
+                    text: UserPrompt::from_text("Explain @\"docs/my file.md\" suffix"),
+                    mode: SessionMode::Build,
+                }
+            )))
         );
         assert!(!views.file_search_completed(response(&request, &["late path"])));
     }
@@ -133,11 +141,13 @@ fn enter_tab_and_ctrl_i_insert_only_and_ctrl_enter_submits_exact_literal_text() 
     unresolved.file_search_completed(response(&request, &["must-not-be-inserted.rs"]));
     assert_eq!(
         unresolved.handle_event(ctrl_enter()),
-        Some(UiAction::Submit {
-            behavior: zevria_foundation::RequestBehavior::Standard,
-            text: UserPrompt::from_text("Explain @app"),
-            mode: SessionMode::Build,
-        })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Submit {
+                behavior: zevria_foundation::RequestBehavior::Standard,
+                text: UserPrompt::from_text("Explain @app"),
+                mode: SessionMode::Build,
+            }
+        )))
     );
 }
 
@@ -172,16 +182,18 @@ fn loading_empty_and_unavailable_rows_are_inert_and_diagnostics_never_become_his
             modified_key(KeyCode::Char('i'), KeyModifiers::CONTROL),
         ] {
             assert_eq!(views.handle_event(event), None);
-            assert_eq!(views.root.input(), "@none");
+            assert_eq!(views.workspace.root.input(), "@none");
         }
-        assert!(views.root.history().is_empty());
+        assert!(views.workspace.root.history().is_empty());
         assert_eq!(
             views.handle_event(ctrl_enter()),
-            Some(UiAction::Submit {
-                behavior: zevria_foundation::RequestBehavior::Standard,
-                text: "@none".into(),
-                mode: SessionMode::Build
-            })
+            Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                zevria_session_api::TurnCommand::Submit {
+                    behavior: zevria_foundation::RequestBehavior::Standard,
+                    text: "@none".into(),
+                    mode: SessionMode::Build
+                }
+            )))
         );
     }
 }
@@ -197,25 +209,25 @@ fn late_results_cannot_reopen_after_escape_clear_undo_or_restore_and_queries_coa
     assert!(!views.file_search_completed(response(&first, &["stale"])));
     assert!(views.file_search_completed(response(&second, &["abc.rs"])));
     views.handle_event(key(KeyCode::Esc));
-    assert_eq!(views.root.input(), "@ab");
-    assert!(views.root.interaction().is_insert());
-    assert!(!views.root.command_menu_active());
+    assert_eq!(views.workspace.root.input(), "@ab");
+    assert!(views.workspace.root.interaction().is_insert());
+    assert!(!views.workspace.root.command_menu_active());
     assert!(!views.file_search_completed(response(&second, &["stale"])));
     views.handle_event(key(KeyCode::Left));
     let moved = views.file_search_request().unwrap();
     assert_ne!(moved.completion.activation, second.completion.activation);
     views.handle_event(modified_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-    assert_eq!(views.root.input(), "");
+    assert_eq!(views.workspace.root.input(), "");
     assert!(!views.file_search_completed(response(&moved, &["stale"])));
     views.handle_event(modified_key(KeyCode::Char('z'), KeyModifiers::CONTROL));
     let undone = views.file_search_request().unwrap();
-    assert_eq!(views.root.input(), "@ab");
+    assert_eq!(views.workspace.root.input(), "@ab");
     assert_ne!(
         undone.completion.identity.generation,
         moved.completion.identity.generation
     );
     assert!(!views.file_search_completed(response(&moved, &["stale"])));
-    views.root.set_input_for_test("@restored", 9);
+    views.workspace.root.set_input_for_test("@restored", 9);
     assert!(!views.file_search_completed(response(&undone, &["stale"])));
 }
 
@@ -226,7 +238,7 @@ fn overlays_and_session_replacement_invalidate_requests_without_stealing_focus()
     views.open_session_picker(Vec::new());
     assert!(!views.file_search_completed(response(&first, &["stale"])));
     views.handle_event(key(KeyCode::Enter));
-    assert_eq!(views.root.input(), "@a");
+    assert_eq!(views.workspace.root.input(), "@a");
     views.handle_event(key(KeyCode::Esc));
     let reopened = views.file_search_request().unwrap();
     assert_ne!(reopened.completion.activation, first.completion.activation);
@@ -234,7 +246,7 @@ fn overlays_and_session_replacement_invalidate_requests_without_stealing_focus()
     assert!(views.file_search_completed(response(&reopened, &["active.rs"])));
     let mut replacement = fixture("@a");
     assert!(!replacement.file_search_completed(response(&reopened, &["wrong-session"])));
-    assert_eq!(replacement.root.input(), "@a");
+    assert_eq!(replacement.workspace.root.input(), "@a");
 }
 
 #[test]
@@ -243,21 +255,37 @@ fn navigation_clamps_and_refresh_preserves_highlighted_path_and_remeasures() {
     let request = views.file_search_request().unwrap();
     views.file_search_completed(response(&request, &["a.rs", "b.rs", "c.rs"]));
     rendered_views_text(&mut views, 100, 24);
-    assert!(views.root.render_parts().view.completion_page_rows() > 1);
+    assert!(
+        views
+            .workspace
+            .root
+            .render_parts()
+            .view
+            .completion_page_rows()
+            > 1
+    );
     views.handle_event(key(KeyCode::End));
-    assert_eq!(views.root.command_menu_selection(), 2);
+    assert_eq!(views.workspace.root.command_menu_selection(), 2);
     views.handle_event(key(KeyCode::Down));
-    assert_eq!(views.root.command_menu_selection(), 2);
+    assert_eq!(views.workspace.root.command_menu_selection(), 2);
     views.file_search_completed(response(&request, &["c.rs", "a.rs"]));
-    assert_eq!(views.root.command_menu_selection(), 0);
-    assert_eq!(views.root.render_parts().view.completion_page_rows(), 1);
+    assert_eq!(views.workspace.root.command_menu_selection(), 0);
+    assert_eq!(
+        views
+            .workspace
+            .root
+            .render_parts()
+            .view
+            .completion_page_rows(),
+        1
+    );
     views.handle_event(key(KeyCode::PageDown));
-    assert_eq!(views.root.command_menu_selection(), 1);
+    assert_eq!(views.workspace.root.command_menu_selection(), 1);
     views.handle_event(key(KeyCode::Home));
     views.handle_event(key(KeyCode::Up));
-    assert_eq!(views.root.command_menu_selection(), 0);
+    assert_eq!(views.workspace.root.command_menu_selection(), 0);
     views.handle_event(key(KeyCode::Enter));
-    assert_eq!(views.root.input(), "@c.rs ");
+    assert_eq!(views.workspace.root.input(), "@c.rs ");
 }
 
 #[test]
@@ -291,8 +319,8 @@ fn files_popup_hints_status_and_tiny_terminal_rendering_are_safe_and_pure() {
         }
     }
     assert_eq!(views.file_search_request(), Some(request));
-    assert_eq!(views.root.input(), "Explain @a");
-    assert!(views.root.history().is_empty());
+    assert_eq!(views.workspace.root.input(), "Explain @a");
+    assert!(views.workspace.root.history().is_empty());
 }
 
 #[test]
@@ -308,7 +336,7 @@ fn file_completion_inside_skill_and_ensemble_arguments_never_dispatches_on_accep
         let request = views.file_search_request().unwrap();
         views.file_search_completed(response(&request, &["app.rs"]));
         assert_eq!(views.handle_event(key(KeyCode::Enter)), None);
-        assert_eq!(views.root.input(), expected);
-        assert!(!views.root.is_busy());
+        assert_eq!(views.workspace.root.input(), expected);
+        assert!(!views.workspace.root.is_busy());
     }
 }

@@ -3,6 +3,7 @@ mod file_reference_tests;
 
 use super::*;
 use zevria_foundation::TurnId;
+use zevria_session_api::{EnsembleEvent, TurnEvent};
 use zevria_workflow::EnsembleRecord;
 use zevria_workflow::EnsembleStart;
 use zevria_workflow::EnsembleWorkflow;
@@ -162,19 +163,19 @@ fn runtime_review_snapshot_and_mirror_share_toned_outcome_notices() {
     for snapshot_first in [false, true] {
         let (start, _) = fixture(false);
         let mut views = SessionViews::new(App::new(), PathBuf::from("."));
-        views.apply(SessionEvent::EnsembleStarted {
+        views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
             turn_id: TurnId::new(1),
-            start: start.clone(),
+            start: Box::new(start.clone()),
             resumed: false,
-        });
+        }));
         let mut state = WorkerReviewState::new(start.agents[0].clone());
         queue_input(&mut state, WorkerControlId::new(), "literal feedback");
-        views.agents[0].apply_transcript_event(AgentRunEvent::Review {
+        views.workspace.agents[0].apply_transcript_event(AgentRunEvent::Review {
             event: Box::new(WorkerReviewEvent::InputAccepted {
-                input: state.pending[0].clone(),
+                input: state.inputs.pending[0].clone(),
             }),
         });
-        views.agents[0].apply_transcript_event(AgentRunEvent::Review {
+        views.workspace.agents[0].apply_transcript_event(AgentRunEvent::Review {
             event: Box::new(WorkerReviewEvent::Dispatched {
                 generation: 1,
                 attempt: 1,
@@ -200,16 +201,16 @@ fn runtime_review_snapshot_and_mirror_share_toned_outcome_notices() {
         if snapshot_first {
             publish(&mut views, &start, &state);
         }
-        views.apply(SessionEvent::AgentRunUpdated {
+        views.apply(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
             turn_id: TurnId::new(1),
             ensemble_run_id: start.run_id.clone(),
             agent_run_id: state.descriptor.id.clone(),
-            event: AgentRunEvent::Review {
+            event: Box::new(AgentRunEvent::Review {
                 event: Box::new(event),
-            },
-        });
+            }),
+        }));
         publish(&mut views, &start, &state);
-        let blocks = views.agents[0]
+        let blocks = views.workspace.agents[0]
             .app
             .history()
             .iter()
@@ -244,7 +245,7 @@ fn runtime_review_snapshot_and_mirror_share_toned_outcome_notices() {
             Some(PromptPhase::Failed)
         );
         assert!(
-            !views.agents[0]
+            !views.workspace.agents[0]
                 .app
                 .history()
                 .iter()
@@ -258,7 +259,7 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
 }
 
 fn queue_input(state: &mut WorkerReviewState, request_id: WorkerControlId, text: &str) {
-    let generation = state.accepted_generation + 1;
+    let generation = state.inputs.accepted_generation + 1;
     state
         .apply(&WorkerReviewEvent::InputAccepted {
             input: zevria_workflow::WorkerInput {
@@ -276,7 +277,7 @@ fn queue_input(state: &mut WorkerReviewState, request_id: WorkerControlId, text:
 }
 
 fn settle(state: &mut WorkerReviewState) {
-    let generation = state.accepted_generation;
+    let generation = state.inputs.accepted_generation;
     state
         .apply(&WorkerReviewEvent::Dispatched {
             generation,
@@ -294,14 +295,14 @@ fn settle(state: &mut WorkerReviewState) {
 }
 
 fn publish(views: &mut SessionViews, start: &EnsembleStart, state: &WorkerReviewState) {
-    views.apply(SessionEvent::WorkerReviewUpdated {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::WorkerReviewUpdated {
         target: WorkerControlTarget {
             turn_id: TurnId::new(1),
             run_id: start.run_id.clone(),
             worker_id: state.descriptor.id.clone(),
         },
         state: Box::new(state.clone()),
-    });
+    }));
 }
 
 #[test]
@@ -327,21 +328,21 @@ fn visible_selection_uses_workspace_header_geometry_in_root_worker_and_inspect_p
     terminal.draw(|frame| root.render(frame)).unwrap();
     let mut views = SessionViews::new(root, PathBuf::from("."));
     assert_eq!(
-        views.root.rendered_selection_window(),
+        views.workspace.root.rendered_selection_window(),
         None,
         "standalone geometry cannot include the workspace header"
     );
     let (start, _) = fixture(false);
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TurnId::new(1),
-        start: start.clone(),
+        start: Box::new(start.clone()),
         resumed: false,
-    });
+    }));
     let mut state = WorkerReviewState::new(start.agents[0].clone());
     queue_input(&mut state, WorkerControlId::new(), "initial");
     settle(&mut state);
     publish(&mut views, &start, &state);
-    views.agents[0].app.restore(entries());
+    views.workspace.agents[0].app.restore(entries());
     let child_id = SubtaskId::new("selection-inspect");
     views.restore_child(child_id.clone(), None, entries());
 
@@ -426,23 +427,23 @@ fn visible_selection_uses_workspace_header_geometry_in_root_worker_and_inspect_p
     }
     views.handle_event(key(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert_eq!(
-        views.root.rendered_selection_window(),
+        views.workspace.root.rendered_selection_window(),
         None,
         "returning to a previously rendered pane waits for redraw"
     );
-    escape_pair(&mut views.root);
-    assert!(views.root.interaction().is_normal());
+    escape_pair(&mut views.workspace.root);
+    assert!(views.workspace.root.interaction().is_normal());
 }
 
 #[test]
 fn pending_clipboard_completion_targets_the_originating_worker_not_the_visible_pane() {
     let (start, _) = fixture(true);
     let mut views = SessionViews::new(App::new(), PathBuf::from("."));
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TurnId::new(1),
-        start: start.clone(),
+        start: Box::new(start.clone()),
         resumed: false,
-    });
+    }));
     for descriptor in &start.agents {
         let mut state = WorkerReviewState::new(descriptor.clone());
         queue_input(&mut state, WorkerControlId::new(), "initial");
@@ -491,11 +492,11 @@ fn pending_clipboard_completion_targets_the_originating_worker_not_the_visible_p
 fn live_workers_have_independent_admission_and_drafts_through_real_navigation() {
     let (start, _) = fixture(true);
     let mut views = SessionViews::new(App::new(), PathBuf::from("."));
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TurnId::new(1),
-        start: start.clone(),
+        start: Box::new(start.clone()),
         resumed: false,
-    });
+    }));
     let mut states = start
         .agents
         .iter()
@@ -507,8 +508,8 @@ fn live_workers_have_independent_admission_and_drafts_through_real_navigation() 
             state
         })
         .collect::<Vec<_>>();
-    assert!(views.root.is_busy());
-    views.root.set_input_for_test("root draft", 4);
+    assert!(views.workspace.root.is_busy());
+    views.workspace.root.set_input_for_test("root draft", 4);
 
     // Select the first worker from the active root ensemble, without directly
     // setting focus or the visible pane.
@@ -531,8 +532,9 @@ fn live_workers_have_independent_admission_and_drafts_through_real_navigation() 
     assert!(views.visible_app().input().is_empty());
     views.handle_event(key(KeyCode::Char('i'), KeyModifiers::NONE));
     views.handle_event(Event::Paste("first\nfeedback".into()));
-    let Some(UiAction::WorkerControl(first)) =
-        views.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(first),
+    ))) = views.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
     else {
         panic!("first worker feedback")
     };
@@ -568,24 +570,24 @@ fn live_workers_have_independent_admission_and_drafts_through_real_navigation() 
 
     // Hidden worker acknowledgements and snapshots do not alter this draft or
     // borrow the active root turn's busy state.
-    views.apply(SessionEvent::WorkerControlResult {
-        result: WorkerControlResult {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult {
+        result: Box::new(WorkerControlResult {
             control: first.clone(),
             accepted: true,
             detail: "accepted".into(),
-        },
-    });
-    assert!(views.agents[0].app.input().is_empty());
-    assert!(!views.agents[0].app.render_parts().composer_locked);
+        }),
+    }));
+    assert!(views.workspace.agents[0].app.input().is_empty());
+    assert!(!views.workspace.agents[0].app.render_parts().composer_locked);
     queue_input(&mut states[0], first.request_id, "first\nfeedback");
     publish(&mut views, &start, &states[0]);
     settle(&mut states[0]);
     publish(&mut views, &start, &states[0]);
-    assert!(views.agents[0].app.interaction().is_normal());
+    assert!(views.workspace.agents[0].app.interaction().is_normal());
     assert!(views.visible_app().interaction().is_insert());
     assert_eq!(views.visible_app().input(), "second draft");
-    assert_eq!(views.root.input(), "root draft");
-    assert!(views.root.is_busy());
+    assert_eq!(views.workspace.root.input(), "root draft");
+    assert!(views.workspace.root.is_busy());
 
     views.handle_event(key(KeyCode::Char('o'), KeyModifiers::CONTROL));
     views.handle_event(key(KeyCode::Up, KeyModifiers::NONE));
@@ -618,8 +620,9 @@ fn live_workers_have_independent_admission_and_drafts_through_real_navigation() 
     assert_eq!(views.visible_app().input(), "second draft");
     assert!(views.visible_app().interaction().is_insert());
     assert!(!views.visible_app_mut().render_parts().composer_locked);
-    let Some(UiAction::WorkerControl(second)) =
-        views.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(second),
+    ))) = views.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
     else {
         panic!("second worker feedback")
     };
@@ -633,19 +636,20 @@ fn live_workers_have_independent_admission_and_drafts_through_real_navigation() 
             .is_none()
     );
     assert!(views.visible_app().input().is_empty());
-    let Some(UiAction::WorkerControl(cancel)) =
-        views.handle_event(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(cancel),
+    ))) = views.handle_event(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
     else {
         panic!("worker cancellation, never root")
     };
     assert_eq!(cancel.target, second.target);
     assert_eq!(cancel.action, WorkerControlAction::CancelPrompt);
-    assert!(views.root.is_busy());
-    assert_eq!(views.agents[0].app.input(), "/retry ");
+    assert!(views.workspace.root.is_busy());
+    assert_eq!(views.workspace.agents[0].app.input(), "/retry ");
 
-    views.apply(SessionEvent::TurnCancelled {
+    views.apply(SessionEvent::Turn(TurnEvent::Cancelled {
         turn_id: TurnId::new(1),
-    });
+    }));
     assert!(matches!(
         views.visible_app_mut().render_parts().chrome,
         crate::app::ComposerChrome::Inspect
@@ -653,7 +657,7 @@ fn live_workers_have_independent_admission_and_drafts_through_real_navigation() 
     views.handle_event(key(KeyCode::Char('i'), KeyModifiers::NONE));
     views.handle_event(Event::Paste("ended run".into()));
     assert!(views.visible_app().input().is_empty());
-    assert_eq!(views.agents[0].app.input(), "/retry ");
+    assert_eq!(views.workspace.agents[0].app.input(), "/retry ");
 }
 
 #[test]
@@ -664,8 +668,9 @@ fn worker_abandonment_restores_from_root_without_creating_a_missing_sidecar_pane
         root.restore(items.clone());
         let mut views = SessionViews::new(root, PathBuf::from("."));
         views.seed_child_creation_order(&items);
-        assert!(views.agents.is_empty());
-        let crate::app::HistoryEntry::Ensemble(ensemble) = &views.root.history()[0] else {
+        assert!(views.workspace.agents.is_empty());
+        let crate::app::HistoryEntry::Ensemble(ensemble) = &views.workspace.root.history()[0]
+        else {
             panic!("ensemble")
         };
         assert_eq!(ensemble.workers[0].status, AgentRunStatus::Abandoned);
@@ -676,7 +681,7 @@ fn worker_abandonment_restores_from_root_without_creating_a_missing_sidecar_pane
             100,
             crate::layout::EntrySelection::Block(1),
             &crate::app::EntryFolds::none(),
-            zevria_presentation::fold::FoldMode::Expanded,
+            crate::fold::FoldMode::Expanded,
         );
         assert_eq!(items.len(), ensemble.workers.len() + 1);
         assert!(!items[1].is_empty(), "excluded rows stay selectable");
@@ -696,13 +701,14 @@ fn worker_abandonment_restores_from_root_without_creating_a_missing_sidecar_pane
         }));
         assert!(!text.contains("0/0"));
         assert!(text.contains("abandoned"));
-        views.apply(SessionEvent::EnsembleStarted {
+        views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
             turn_id: TurnId::new(1),
-            start: start.clone(),
+            start: Box::new(start.clone()),
             resumed: true,
-        });
+        }));
         assert!(
             !views
+                .workspace
                 .agents
                 .iter()
                 .any(|pane| pane.id == start.agents[0].id),
@@ -725,8 +731,9 @@ fn worker_abandonment_restores_from_root_without_creating_a_missing_sidecar_pane
                 },
             },
         ]);
-        assert_eq!(views.agents.len(), start.agents.len());
+        assert_eq!(views.workspace.agents.len(), start.agents.len());
         let pane = views
+            .workspace
             .agents
             .iter()
             .find(|pane| pane.id == start.agents[0].id)
@@ -743,26 +750,26 @@ fn worker_abandonment_freezes_live_rows_and_panes_against_late_telemetry() {
     let (start, _) = fixture(false);
     let turn_id = TurnId::new(1);
     let mut views = SessionViews::new(App::new(), PathBuf::from("."));
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id,
-        start: start.clone(),
+        start: Box::new(start.clone()),
         resumed: false,
-    });
+    }));
     let mut state = WorkerReviewState::new(start.agents[0].clone());
     state
         .apply(&WorkerReviewEvent::Abandoned {
             request_id: WorkerControlId::new(),
         })
         .unwrap();
-    views.apply(SessionEvent::WorkerReviewUpdated {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::WorkerReviewUpdated {
         target: WorkerControlTarget {
             turn_id,
             run_id: start.run_id.clone(),
             worker_id: state.descriptor.id.clone(),
         },
         state: Box::new(state.clone()),
-    });
-    let before = views.agents[0].app.history().len();
+    }));
+    let before = views.workspace.agents[0].app.history().len();
     for event in [
         AgentRunEvent::Status {
             status: AgentRunStatus::Failed,
@@ -780,28 +787,28 @@ fn worker_abandonment_freezes_live_rows_and_panes_against_late_telemetry() {
             message_id: None,
         },
     ] {
-        views.apply(SessionEvent::AgentRunUpdated {
+        views.apply(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
             turn_id,
             ensemble_run_id: start.run_id.clone(),
             agent_run_id: state.descriptor.id.clone(),
-            event,
-        });
+            event: Box::new(event),
+        }));
     }
-    views.agents[0].apply_transcript_preview(AgentRunEvent::AgentMessage {
+    views.workspace.agents[0].apply_transcript_preview(AgentRunEvent::AgentMessage {
         text: "LATE PREVIEW".into(),
         message_id: None,
     });
     let mut outcome = state.evidence.clone();
     outcome.status = AgentRunStatus::Failed;
     outcome.report = "LATE REPORT".into();
-    views.apply(SessionEvent::AgentRunFinished {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished {
         turn_id,
         ensemble_run_id: start.run_id,
-        outcome,
-    });
-    assert_eq!(views.agents[0].status, AgentRunStatus::Abandoned);
-    assert_eq!(views.agents[0].app.history().len(), before);
-    let crate::app::HistoryEntry::Ensemble(ensemble) = &views.root.history()[0] else {
+        outcome: Box::new(outcome),
+    }));
+    assert_eq!(views.workspace.agents[0].status, AgentRunStatus::Abandoned);
+    assert_eq!(views.workspace.agents[0].app.history().len(), before);
+    let crate::app::HistoryEntry::Ensemble(ensemble) = &views.workspace.root.history()[0] else {
         panic!("ensemble")
     };
     assert_eq!(ensemble.workers[0].status, AgentRunStatus::Abandoned);

@@ -2,18 +2,12 @@
 //!
 //! Frontends own filtering, focus, geometry and navigation. This state owns the
 //! captured root mode/scope and all protocol identity, including cancellation.
-use std::{
-    collections::VecDeque,
-    sync::atomic::{AtomicU64, Ordering},
-};
 use zevria_foundation::SessionMode;
 use zevria_model::models::{
     ModelCandidate, ModelManagementRequest as Request, ModelManagementResult as Result,
     ModelSelection, ModelSelectionPreview, ModelSelectionScope, mode_role,
 };
 use zevria_session_api::{ManagementCommand, SessionCommand};
-
-static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(test)]
 #[path = "models_tests.rs"]
@@ -70,7 +64,7 @@ impl ModelPhase {
 #[derive(Default)]
 pub struct ModelPicker {
     pub phase: ModelPhase,
-    pub commands: VecDeque<SessionCommand>,
+    pub commands: crate::outbox::CommandOutbox,
     pub request_id: String,
     pub mode: Option<SessionMode>,
     pub scope: Option<ModelSelectionScope>,
@@ -80,6 +74,23 @@ pub struct ModelPicker {
     settlement_notice: Option<String>,
 }
 impl ModelPicker {
+    pub fn filter_indices(&self, query: &str) -> Vec<usize> {
+        let query = query.to_lowercase();
+        self.profiles
+            .iter()
+            .enumerate()
+            .filter_map(|(index, profile)| {
+                profile
+                    .context
+                    .profile
+                    .to_string()
+                    .to_lowercase()
+                    .contains(&query)
+                    .then_some(index)
+            })
+            .collect()
+    }
+
     pub fn is_open(&self) -> bool {
         !matches!(self.phase, ModelPhase::Settled)
     }
@@ -110,7 +121,7 @@ impl ModelPicker {
             phase: ModelPhase::Loading,
             mode: Some(mode),
             scope: Some(scope),
-            request_id: format!("model-{}", REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)),
+            request_id: crate::outbox::RequestIdAllocator::allocate("model-"),
             ..Self::default()
         };
         self.send(Request::List { mode, scope });

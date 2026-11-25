@@ -6,10 +6,11 @@ pub mod blocks;
 pub mod command;
 pub mod completion;
 pub mod conversation;
-pub mod fold;
+pub mod draft;
 pub mod jobs;
 pub mod mcp;
 pub mod models;
+pub mod outbox;
 pub mod projection;
 mod prompt_preview;
 pub mod session;
@@ -17,6 +18,8 @@ pub mod session_model;
 #[cfg(test)]
 mod session_model_tests;
 pub mod shell;
+pub mod skills;
+pub mod status;
 pub mod status_icon;
 pub mod subtasks;
 pub mod workflow;
@@ -56,3 +59,6 @@ mod notice_tests {
         assert_eq!(TURN_CANCELLED, "Turn cancelled");
     }
 }
+
+pub mod question;
+pub mod workspace;

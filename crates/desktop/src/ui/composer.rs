@@ -14,7 +14,7 @@ use gpui_kit::{prelude::*, *};
 use zevria_foundation::SessionMode;
 impl DesktopWindow {
     pub(super) fn submit(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        if self.controller.read(cx).model.models.is_open() {
+        if self.controller.read(cx).model.controls.models.is_open() {
             return;
         }
         let draft = self.composer.read(cx).value().to_string();
@@ -26,7 +26,7 @@ impl DesktopWindow {
         });
     }
     pub(super) fn completions(&self, cx: &App) -> Vec<(String, String)> {
-        if self.controller.read(cx).model.models.is_open() {
+        if self.controller.read(cx).model.controls.models.is_open() {
             return Vec::new();
         }
         let text = self.composer.read(cx).value();
@@ -37,6 +37,7 @@ impl DesktopWindow {
         self.controller
             .read(cx)
             .model
+            .controls
             .registry
             .matches(&text, cursor)
             .into_iter()
@@ -83,12 +84,12 @@ impl DesktopWindow {
         let mode = controller.model.root.next_mode();
         let editable = controller.phase == Phase::Live
             && controller.model.root.workflow.dialog().is_none()
-            && controller.model.question.is_none()
-            && !controller.model.models.is_open();
+            && controller.model.controls.question.is_none()
+            && !controller.model.controls.models.is_open();
         let orchestrate = controller.orchestrate;
         let mode_disabled = !editable || busy;
         let cancelling = controller.cancelling;
-        let recovery = controller.recovery.last().is_some();
+        let recovery = controller.draft_slot.recovery().last().is_some();
         let mut completions = div()
             .id("completions")
             .role(Role::ListBox)
@@ -267,7 +268,7 @@ impl DesktopWindow {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.controller.update(cx, |this, cx| {
                             if this.draft.is_empty()
-                                && let Some(draft) = this.recovery.pop()
+                                && let Some(draft) = this.draft_slot.recover()
                             {
                                 this.draft = draft;
                             }

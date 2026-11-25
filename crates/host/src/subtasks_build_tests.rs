@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::SubtaskEvent;
 
 #[path = "subtasks_cleanup_tests.rs"]
 mod cleanup_tests;
@@ -741,9 +742,9 @@ async fn production_build_rejects_builder_launch_before_workspace_or_child_provi
             !matches!(
                 update,
                 SessionUpdate::Lifecycle(
-                    SessionEvent::SubtaskLaunched { .. }
-                        | SessionEvent::SubtaskStatus { .. }
-                        | SessionEvent::SubtaskSession { .. }
+                    SessionEvent::Subtask(SubtaskEvent::Launched { .. })
+                        | SessionEvent::Subtask(SubtaskEvent::Status { .. })
+                        | SessionEvent::Subtask(SubtaskEvent::Session { .. })
                 )
             ),
             "denied launches must not publish a child lifecycle"

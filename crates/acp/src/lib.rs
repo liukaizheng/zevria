@@ -176,3 +176,5 @@ pub(crate) struct ClientState {
 
 #[cfg(test)]
 mod tests;
+
+pub mod elicitation_meta;

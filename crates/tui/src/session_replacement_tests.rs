@@ -10,6 +10,7 @@ use zevria_model::models::{
     ModelSelection,
 };
 use zevria_session_api::{ManagementCommand, ModeSelectionResult, session_event_channel};
+use zevria_session_api::{ManagementEvent, PlanEvent};
 use zevria_transcript::transcript::TranscriptItem;
 
 fn original_models() -> SessionModels {
@@ -85,7 +86,7 @@ fn pending_selection(views: &mut SessionViews) -> (String, Result) {
             mode: SessionMode::Plan,
             ..
         },
-    })) = views.overlays.models.commands.pop_front()
+    })) = views.workspace.controls.models.commands.pop_front()
     else {
         panic!("Plan catalog request");
     };
@@ -96,9 +97,9 @@ fn pending_selection(views: &mut SessionViews) -> (String, Result) {
         input_token_limit: 9000,
         retained_user_tokens: 100,
     };
-    views.apply(SessionEvent::ModelsResult {
+    views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
         request_id: request_id.clone(),
-        result: Result::Catalog {
+        result: Box::new(Result::Catalog {
             mode: SessionMode::Plan,
             scope,
             current: original_models().for_mode(SessionMode::Plan).clone(),
@@ -107,13 +108,13 @@ fn pending_selection(views: &mut SessionViews) -> (String, Result) {
                 reasoning_levels: vec![Level::Low, Level::High],
             }],
             revision: "catalog-revision".into(),
-        },
-    });
-    views.overlays.models.handle_key(KeyCode::Enter);
-    views.overlays.models.handle_key(KeyCode::End);
-    views.overlays.models.handle_key(KeyCode::Enter);
+        }),
+    }));
+    views.workspace.controls.models.handle_key(KeyCode::Enter);
+    views.workspace.controls.models.handle_key(KeyCode::End);
+    views.workspace.controls.models.handle_key(KeyCode::Enter);
     assert!(
-        matches!(views.overlays.models.commands.pop_front(), Some(SessionCommand::Manage(ManagementCommand::Models { request: Request::Select { target, .. }, .. })) if target == ModelSelection::new(context.profile.clone(), Level::High))
+        matches!(views.workspace.controls.models.commands.pop_front(), Some(SessionCommand::Manage(ManagementCommand::Models { request: Request::Select { target, .. }, .. })) if target == ModelSelection::new(context.profile.clone(), Level::High))
     );
     (
         request_id,
@@ -144,19 +145,22 @@ fn new_and_both_fresh_delivery_paths_snapshot_an_immediately_acknowledged_select
             )
             .unwrap();
         assert_eq!(
-            views.root.session_models().unwrap(),
+            views.workspace.root.session_models().unwrap(),
             original_models(),
             "pending draft is not a selection"
         );
-        let acknowledged = SessionEvent::ModelsResult { request_id, result };
+        let acknowledged = SessionEvent::Manage(ManagementEvent::ModelsResult {
+            request_id,
+            result: Box::new(result),
+        });
         let handoff = handoff();
         let outcome = if delivery == "drained-fresh" {
             let (events, mut updates) = session_event_channel(8);
             events.try_send(acknowledged).unwrap();
             events
-                .try_send(SessionEvent::FreshPlanHandoffRequested {
-                    handoff: handoff.clone(),
-                })
+                .try_send(SessionEvent::Plan(PlanEvent::FreshHandoffRequested {
+                    handoff: Box::new(handoff.clone()),
+                }))
                 .unwrap();
             let mut done = false;
             let outcome = drain_update_burst(&mut views, &mut updates, &mut done)
@@ -172,9 +176,10 @@ fn new_and_both_fresh_delivery_paths_snapshot_an_immediately_acknowledged_select
             );
             if delivery == "new" {
                 views
+                    .workspace
                     .root
                     .set_focus_for_test(crate::app::FocusState::Insert);
-                views.root.set_input_for_test("/new", 4);
+                views.workspace.root.set_input_for_test("/new", 4);
                 assert_eq!(
                     views.handle_event(Event::Key(KeyEvent::new(
                         KeyCode::Enter,
@@ -182,13 +187,15 @@ fn new_and_both_fresh_delivery_paths_snapshot_an_immediately_acknowledged_select
                     ))),
                     Some(UiAction::RunCommand(SlashCommand::New))
                 );
-                new_session_outcome(&views.root).unwrap()
+                new_session_outcome(&views.workspace.root).unwrap()
             } else {
                 apply_session_update(
                     &mut views,
-                    SessionUpdate::Lifecycle(SessionEvent::FreshPlanHandoffRequested {
-                        handoff: handoff.clone(),
-                    }),
+                    SessionUpdate::Lifecycle(SessionEvent::Plan(
+                        PlanEvent::FreshHandoffRequested {
+                            handoff: Box::new(handoff.clone()),
+                        },
+                    )),
                 )
                 .unwrap()
                 .unwrap()
@@ -207,14 +214,17 @@ fn new_and_both_fresh_delivery_paths_snapshot_an_immediately_acknowledged_select
                 }
             }
         );
-        assert_eq!(views.root.session_models().unwrap(), expected);
-        assert_eq!(views.root.status_for_test().reasoning, Some(Level::High));
+        assert_eq!(views.workspace.root.session_models().unwrap(), expected);
         assert_eq!(
-            views.root.status_for_test().profile,
+            views.workspace.root.status_for_test().reasoning,
+            Some(Level::High)
+        );
+        assert_eq!(
+            views.workspace.root.status_for_test().profile,
             Some(expected.for_mode(SessionMode::Plan).profile.clone())
         );
         // Acknowledgement did not rewrite the immutable restoration projection.
-        assert!(views.root.history().is_empty());
+        assert!(views.workspace.root.history().is_empty());
     }
 }
 
@@ -258,34 +268,37 @@ fn pending_cancelled_rejected_and_incorrectly_correlated_results_cannot_replace_
             (request_id.clone(), wrong_target),
             (request_id.clone(), wrong_level),
         ] {
-            views.apply(SessionEvent::ModelsResult {
+            views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
                 request_id: id,
-                result,
-            });
+                result: Box::new(result),
+            }));
             assert_eq!(
-                new_session_outcome(&views.root).unwrap(),
+                new_session_outcome(&views.workspace.root).unwrap(),
                 UiOutcome::New {
                     models: original_models()
                 }
             );
         }
-        views.apply(SessionEvent::ModelsResult {
+        views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
             request_id: request_id.clone(),
-            result: terminal,
-        });
+            result: Box::new(terminal),
+        }));
         // Even an otherwise matching result after a rejection/cancellation is stale.
-        views.apply(SessionEvent::ModelsResult {
+        views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
             request_id,
-            result: changed,
-        });
-        assert_eq!(views.root.session_models().unwrap(), original_models());
+            result: Box::new(changed),
+        }));
+        assert_eq!(
+            views.workspace.root.session_models().unwrap(),
+            original_models()
+        );
         let handoff = handoff();
         assert_eq!(
             apply_session_update(
                 &mut views,
-                SessionUpdate::Lifecycle(SessionEvent::FreshPlanHandoffRequested {
-                    handoff: handoff.clone()
-                })
+                SessionUpdate::Lifecycle(SessionEvent::Plan(PlanEvent::FreshHandoffRequested {
+                    handoff: Box::new(handoff.clone())
+                }))
             )
             .unwrap(),
             Some(UiOutcome::Fresh {
@@ -300,18 +313,23 @@ fn pending_cancelled_rejected_and_incorrectly_correlated_results_cannot_replace_
 fn mode_round_trips_display_the_committed_role_specific_profile_and_reasoning() {
     let mut views = views();
     let (request_id, result) = pending_selection(&mut views);
-    views.apply(SessionEvent::ModelsResult { request_id, result });
-    let models = views.root.session_models().unwrap();
+    views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
+        request_id,
+        result: Box::new(result),
+    }));
+    let models = views.workspace.root.session_models().unwrap();
     for mode in [
         SessionMode::Build,
         SessionMode::Plan,
         SessionMode::Build,
         SessionMode::Plan,
     ] {
-        let Some(UiAction::SetMode {
-            request_id,
-            mode: target,
-        }) = views.handle_event(Event::Key(KeyEvent::new(
+        let Some(UiAction::Session(zevria_session_api::SessionCommand::Manage(
+            ManagementCommand::SetMode {
+                request_id,
+                mode: target,
+            },
+        ))) = views.handle_event(Event::Key(KeyEvent::new(
             KeyCode::BackTab,
             KeyModifiers::SHIFT,
         )))
@@ -319,18 +337,18 @@ fn mode_round_trips_display_the_committed_role_specific_profile_and_reasoning() 
             panic!("idle mode switch");
         };
         assert_eq!(target, mode);
-        views.apply(SessionEvent::ModeResult {
+        views.apply(SessionEvent::Manage(ManagementEvent::ModeResult {
             request_id,
             result: ModeSelectionResult::Accepted {
                 mode,
                 changed: true,
             },
-        });
+        }));
         let selected = models.for_mode(mode);
-        let status = views.root.status_for_test();
+        let status = views.workspace.root.status_for_test();
         assert_eq!(status.profile, Some(selected.profile.clone()));
         assert_eq!(status.reasoning, Some(selected.reasoning_level));
-        assert_eq!(views.root.session_models().unwrap(), models);
+        assert_eq!(views.workspace.root.session_models().unwrap(), models);
     }
 }
 
@@ -351,20 +369,22 @@ fn incomplete_or_invalid_committed_state_errors_instead_of_using_telemetry_or_de
     ] {
         assert!(new_session_outcome(&root).is_err());
         let mut views = SessionViews::new(root, PathBuf::from("."));
-        let handoff = SessionUpdate::Lifecycle(SessionEvent::FreshPlanHandoffRequested {
-            handoff: handoff(),
-        });
+        let handoff =
+            SessionUpdate::Lifecycle(SessionEvent::Plan(PlanEvent::FreshHandoffRequested {
+                handoff: Box::new(handoff()),
+            }));
         assert!(apply_session_update(&mut views, handoff).is_err());
         let (events, mut updates) = session_event_channel(8);
         events
-            .try_send(SessionEvent::FreshPlanHandoffRequested {
-                handoff: self::handoff(),
-            })
+            .try_send(SessionEvent::Plan(PlanEvent::FreshHandoffRequested {
+                handoff: Box::new(self::handoff()),
+            }))
             .unwrap();
         assert!(drain_update_burst(&mut views, &mut updates, &mut false).is_err());
     }
     let mut views = views();
     views
+        .workspace
         .root
         .restore_model_contexts([zevria_model::ContextTokenSnapshot {
             profile: ModelProfileRef::new("telemetry-only", "not-a-selection"),
@@ -377,5 +397,8 @@ fn incomplete_or_invalid_committed_state_errors_instead_of_using_telemetry_or_de
             input_token_limit: 9000,
             context_window_tokens: 10000,
         }]);
-    assert_eq!(views.root.session_models().unwrap(), original_models());
+    assert_eq!(
+        views.workspace.root.session_models().unwrap(),
+        original_models()
+    );
 }

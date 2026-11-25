@@ -189,7 +189,16 @@ fn terminal_evidence_persists_through_streaming_projection_and_reopen_without_re
     let expected = AgentRunProjection::from_records(&records);
     assert_eq!(expected.report, "ordinary report");
     assert_eq!(expected.user_decisions.len(), 1);
-    assert!(expected.review.as_ref().unwrap().state.active.is_some());
+    assert!(
+        expected
+            .review
+            .as_ref()
+            .unwrap()
+            .state
+            .inputs
+            .active
+            .is_some()
+    );
     records.insert(
         records.len() - 1,
         AgentRunTranscriptRecord::Event {

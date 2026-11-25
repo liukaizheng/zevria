@@ -65,6 +65,38 @@ async fn prepare_content(
     result
 }
 
+/// Both prompt RPCs reserve ordering before spawning and use the same
+/// cancellation fence before and after engine admission.
+async fn run_input(
+    live: &LiveSession,
+    blocks: Vec<agent_client_protocol::schema::v1::ContentBlock>,
+    reservation: crate::session::InputPreparation,
+    cancellation: &agent_client_protocol::RequestCancellation,
+    operation: &str,
+    begin: impl FnOnce(
+        crate::session::InputPreparation,
+        zevria_content::UserPrompt,
+    ) -> Result<crate::session::PromptWait, AcpError>,
+) -> Result<agent_client_protocol::schema::v1::StopReason, AcpError> {
+    use agent_client_protocol::schema::v1::{ErrorCode, StopReason};
+    let prepared = prepare_content(blocks, &reservation, cancellation).await;
+    let mut response = match prepared.and_then(|content| begin(reservation, content)) {
+        Ok(wait) => wait.response,
+        Err(error) if error.code == ErrorCode::RequestCancelled => {
+            return Ok(StopReason::Cancelled);
+        }
+        Err(error) => return Err(error),
+    };
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            live.cancel();
+            response.await.unwrap_or(Ok(StopReason::Cancelled))
+        }
+        result = &mut response => result.unwrap_or_else(|_| Err(AcpError::internal_error().data(format!("{operation} result channel closed")))),
+    }
+}
+
 pub async fn serve_stdio(
     config: AcpConfig,
     startup_workspace: PathBuf,
@@ -152,24 +184,11 @@ pub(crate) async fn serve_on(
                 let task_connection = connection.clone();
                 connection.spawn(async move {
                     let result = async {
-                        let mcp_servers = validate_roots_and_parse_mcp(
-                            &request.cwd,
-                            &request.additional_directories,
-                            request.mcp_servers,
-                            state.profile,
-                        )?;
-                        let workspace = canonical_workspace(&request.cwd)?;
-                        let activated = state
-                            .activate(task_connection.clone(), workspace, SessionStart::New, mcp_servers)
-                            .await?;
-                        publish_startup(&activated.live, &activated.startup_notices)?;
-                        activated.live.emit_initial_plan()?;
-                        activated.live.start_event_loop(
-                            activated.events,
-                            activated.background_exit,
-                        );
-                        Ok(NewSessionResponse::new(activated.live.id().clone())
-                            .modes(session_modes(activated.live.mode(), state.profile)))
+                        let live = state.open_session(
+                            task_connection, &request.cwd, &request.additional_directories,
+                            request.mcp_servers, SessionStart::New, false,
+                        ).await?;
+                        Ok(NewSessionResponse::new(live.id().clone()).modes(session_modes(live.mode(), state.profile)))
                     }
                     .await;
                     responder.respond_with_result(result)
@@ -195,35 +214,11 @@ pub(crate) async fn serve_on(
                 let task_connection = connection.clone();
                 connection.spawn(async move {
                     let result = async {
-                        let mcp_servers = validate_roots_and_parse_mcp(
-                            &request.cwd,
-                            &request.additional_directories,
-                            request.mcp_servers,
-                            state.profile,
-                        )?;
-                        let workspace = canonical_workspace(&request.cwd)?;
-                        let session_id = request.session_id.to_string();
-                        let activated = state
-                            .activate(
-                                task_connection.clone(),
-                                workspace,
-                                SessionStart::Existing { session_id },
-                                mcp_servers,
-                            )
-                            .await?;
-                        let replay = replay_transcript(
-                            &activated.transcript_items,
-                            activated.live.workspace(),
-                        );
-                        activated.live.send_updates(replay)?;
-                        publish_startup(&activated.live, &activated.startup_notices)?;
-                        activated.live.emit_initial_plan()?;
-                        activated.live.start_event_loop(
-                            activated.events,
-                            activated.background_exit,
-                        );
-                        Ok(LoadSessionResponse::new()
-                            .modes(session_modes(activated.live.mode(), state.profile)))
+                        let live = state.open_session(
+                            task_connection, &request.cwd, &request.additional_directories,
+                            request.mcp_servers, SessionStart::Existing { session_id: request.session_id.to_string() }, true,
+                        ).await?;
+                        Ok(LoadSessionResponse::new().modes(session_modes(live.mode(), state.profile)))
                     }
                     .await;
                     responder.respond_with_result(result)
@@ -238,30 +233,11 @@ pub(crate) async fn serve_on(
                 let task_connection = connection.clone();
                 connection.spawn(async move {
                     let result = async {
-                        let mcp_servers = validate_roots_and_parse_mcp(
-                            &request.cwd,
-                            &request.additional_directories,
-                            request.mcp_servers,
-                            state.profile,
-                        )?;
-                        let workspace = canonical_workspace(&request.cwd)?;
-                        let session_id = request.session_id.to_string();
-                        let activated = state
-                            .activate(
-                                task_connection.clone(),
-                                workspace,
-                                SessionStart::Existing { session_id },
-                                mcp_servers,
-                            )
-                            .await?;
-                        publish_startup(&activated.live, &activated.startup_notices)?;
-                        activated.live.emit_initial_plan()?;
-                        activated.live.start_event_loop(
-                            activated.events,
-                            activated.background_exit,
-                        );
-                        Ok(ResumeSessionResponse::new()
-                            .modes(session_modes(activated.live.mode(), state.profile)))
+                        let live = state.open_session(
+                            task_connection, &request.cwd, &request.additional_directories,
+                            request.mcp_servers, SessionStart::Existing { session_id: request.session_id.to_string() }, false,
+                        ).await?;
+                        Ok(ResumeSessionResponse::new().modes(session_modes(live.mode(), state.profile)))
                     }
                     .await;
                     responder.respond_with_result(result)
@@ -321,30 +297,9 @@ pub(crate) async fn serve_on(
                 let reservation = live.reserve_input_preparation()?;
                 let cancellation = responder.cancellation();
                 connection.spawn(async move {
-                    let prepared = prepare_content(request.prompt, &reservation, &cancellation).await;
-                    let wait = match prepared.and_then(|text| reservation.begin_prompt(text, behavior)) {
-                        Ok(wait) => wait,
-                        Err(error) if error.code == agent_client_protocol::schema::v1::ErrorCode::RequestCancelled => {
-                            return responder.respond_with_result(Ok(PromptResponse::new(agent_client_protocol::schema::v1::StopReason::Cancelled)));
-                        }
-                        Err(error) => return responder.respond_with_result(Err(error)),
-                    };
-                    let mut response = Box::pin(wait.response);
-                    let result = tokio::select! {
-                        biased;
-                        () = cancellation.cancelled() => {
-                            live.cancel();
-                            match response.as_mut().await {
-                                Ok(result) => result.map(PromptResponse::new),
-                                Err(_) => Ok(PromptResponse::new(agent_client_protocol::schema::v1::StopReason::Cancelled)),
-                            }
-                        }
-                        outcome = response.as_mut() => match outcome {
-                            Ok(result) => result.map(PromptResponse::new),
-                            Err(_) => Err(AcpError::internal_error().data("prompt result channel closed")),
-                        },
-                    };
-                    responder.respond_with_result(result)
+                    let result = run_input(&live, request.prompt, reservation, &cancellation,
+                        "prompt", |reservation, text| reservation.begin_prompt(text, behavior)).await;
+                    responder.respond_with_result(result.map(PromptResponse::new))
                 })?;
                 Ok(())
             },
@@ -397,24 +352,9 @@ pub(crate) async fn serve_on(
                 let reservation = live.reserve_input_preparation()?;
                 let cancellation = responder.cancellation();
                 connection.spawn(async move {
-                    let prepared = prepare_content(request.args, &reservation, &cancellation).await;
-                    let wait = match prepared.and_then(|args| reservation.begin_skill(request.name, args)) {
-                        Ok(wait) => wait,
-                        Err(error) if error.code == agent_client_protocol::schema::v1::ErrorCode::RequestCancelled => {
-                            return responder.respond_with_result(Ok(crate::skills::SkillInvokeResponse { version: crate::skills::SKILLS_EXTENSION_VERSION, stop_reason: agent_client_protocol::schema::v1::StopReason::Cancelled }));
-                        }
-                        Err(error) => return responder.respond_with_result(Err(error)),
-                    };
-                    let mut response = Box::pin(wait.response);
-                    let outcome = tokio::select! {
-                        biased;
-                        () = cancellation.cancelled() => {
-                            live.cancel();
-                            response.as_mut().await.unwrap_or(Ok(agent_client_protocol::schema::v1::StopReason::Cancelled))
-                        }
-                        result = response.as_mut() => result.unwrap_or_else(|_| Err(AcpError::internal_error().data("skill invocation result channel closed"))),
-                    };
-                    responder.respond_with_result(outcome.map(|stop_reason| crate::skills::SkillInvokeResponse { version: crate::skills::SKILLS_EXTENSION_VERSION, stop_reason }))
+                    let result = run_input(&live, request.args, reservation, &cancellation,
+                        "skill invocation", |reservation, args| reservation.begin_skill(request.name, args)).await;
+                    responder.respond_with_result(result.map(|stop_reason| crate::skills::SkillInvokeResponse { version: crate::skills::SKILLS_EXTENSION_VERSION, stop_reason }))
                 })?;
                 Ok(())
             }, agent_client_protocol::on_receive_request!(),
@@ -472,6 +412,35 @@ struct ActivatedSession {
 }
 
 impl ServerState {
+    async fn open_session(
+        self: &Arc<Self>,
+        connection: ConnectionTo<agent_client_protocol::Client>,
+        cwd: &Path,
+        additional_directories: &[PathBuf],
+        servers: Vec<McpServer>,
+        start: SessionStart,
+        replay: bool,
+    ) -> Result<Arc<LiveSession>, AcpError> {
+        let mcp_servers =
+            validate_roots_and_parse_mcp(cwd, additional_directories, servers, self.profile)?;
+        let workspace = canonical_workspace(cwd)?;
+        let activated = self
+            .activate(connection, workspace, start, mcp_servers)
+            .await?;
+        if replay {
+            activated.live.send_updates(replay_transcript(
+                &activated.transcript_items,
+                activated.live.workspace(),
+            ))?;
+        }
+        publish_startup(&activated.live, &activated.startup_notices)?;
+        activated.live.emit_initial_plan()?;
+        activated
+            .live
+            .start_event_loop(activated.events, activated.background_exit);
+        Ok(activated.live)
+    }
+
     async fn activate(
         self: &Arc<Self>,
         connection: ConnectionTo<agent_client_protocol::Client>,

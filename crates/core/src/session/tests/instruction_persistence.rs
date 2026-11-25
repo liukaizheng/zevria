@@ -1,6 +1,7 @@
 //! Offline scratch sessions exercise the real engine and JSONL writer across reopen.
 use super::*;
 use zevria_instructions::DirectivePayload;
+use zevria_session_api::TurnEvent;
 
 struct Provider {
     normal: ScriptedProvider,
@@ -74,8 +75,8 @@ async fn run(engine: &mut SessionEngine<Provider>, command: SessionCommand) {
     assert!(
         !emitted.iter().any(|event| matches!(
             event,
-            SessionEvent::TurnRejected { .. }
-                | SessionEvent::TurnFailed { .. }
+            SessionEvent::Turn(TurnEvent::Rejected { .. })
+                | SessionEvent::Turn(TurnEvent::Failed { .. })
                 | SessionEvent::PersistenceChanged { error: Some(_), .. }
         )),
         "{emitted:?}"

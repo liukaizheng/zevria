@@ -217,7 +217,7 @@ fn item_spacing_preserves_authored_whitespace_and_grouped_internals() {
                 separator_before: false,
                 item_gap_before: false,
                 selected: false,
-                folded: zevria_presentation::fold::BlockFold::Expanded,
+                folded: crate::fold::BlockFold::Expanded,
                 reasoning_heading: matches!(block.kind, PresentationBlockKind::Reasoning { .. }),
                 appearance: TranscriptAppearance::Native,
             },

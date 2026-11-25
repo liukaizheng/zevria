@@ -30,134 +30,51 @@ pub enum CommandControlResult {
 /// Provider-neutral events consumed by frontends.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
-    /// Runtime-only display state, independent of turn acceptance and persistence.
-    CommandJobUpdated {
-        job: CommandJobSnapshot,
+    Turn(TurnEvent),
+    Subtask(SubtaskEvent),
+    Ensemble(EnsembleEvent),
+    Plan(PlanEvent),
+    Manage(ManagementEvent),
+    Job(JobEvent),
+    Question(QuestionEvent),
+    /// Transcript persistence health changed. A degraded session remains
+    /// inspectable but rejects new work until its complete in-memory history
+    /// can be atomically repaired.
+    PersistenceChanged {
+        path: PathBuf,
+        error: Option<String>,
     },
-    CommandControlResult {
-        request_id: String,
-        result: CommandControlResult,
-    },
-    /// Independent response presentation; never an executable call or text fence.
-    ResponseAttemptUpdated {
-        turn_id: TurnId,
-        attempt: crate::ResponseAttempt,
-    },
-    ModeResult {
-        request_id: String,
-        result: ModeSelectionResult,
-    },
-    /// An accepted workflow action explicitly selected a mode. Management uses
-    /// only ModeResult so stale/cancelled replies cannot act as workflow traffic.
-    ModeChanged {
-        mode: SessionMode,
-    },
-    ModelsResult {
-        request_id: String,
-        result: crate::models::ModelManagementResult,
-    },
-    SkillsResult {
-        request_id: String,
-        result: crate::skill::SkillManagementResult,
-    },
-    /// Bounded invalidation only. Clients query metadata pages separately.
-    SkillsChanged {
-        revision: String,
-        counts: crate::skill::SkillCatalogCounts,
-    },
-    McpResult {
-        request_id: String,
-        result: McpManagementResult,
-    },
-    McpChanged {
-        revision: String,
-        connected: usize,
-        total: usize,
-        tool_count: usize,
-    },
-    /// A manual or automatic checkpoint request is in flight.
-    CompactionStarted {
-        turn_id: TurnId,
-        trigger: CompactionTrigger,
-    },
-    /// A checkpoint was durably installed and now controls model history.
-    CompactionCompleted {
-        turn_id: TurnId,
-        trigger: CompactionTrigger,
-        backend: CompactionBackend,
-    },
-    /// Level-triggered root-only eligibility; never persisted or a stream fence.
-    JobContinuationChanged {
-        mode: Option<SessionMode>,
-    },
-    JobContinuationStarted {
-        turn_id: TurnId,
-        mode: SessionMode,
-        notice: CommandJobNotice,
-    },
-    CommandJobsReported {
-        turn_id: TurnId,
-        notice: CommandJobNotice,
-    },
+    /// Opt-in, non-fencing ordering barrier after dispatched turn work has
+    /// published all lifecycle events and no more turn work is queued. This
+    /// frontend-only metadata has no presentation content and is never persisted.
+    EngineIdle,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TurnEvent {
     /// The user message has been accepted into local history and transcript
     /// persistence has been attempted.
-    TurnStarted {
+    Started {
         turn_id: TurnId,
         message: Message,
         mode: SessionMode,
     },
-    /// One model/tool-loop dispatch is beginning. `call` is 1-based and
-    /// restarts for each turn's loop, counting invocations of the provider's
-    /// `complete` method, not individual tools or network requests. Provider
-    /// retries/continuations and compaction requests do not advance it.
-    ModelCallStarted {
+    /// The final assistant response for the user turn.
+    Completed {
         turn_id: TurnId,
-        call: usize,
+        message: Message,
+        attempt_id: Option<String>,
     },
-    /// The compact ensemble command and one descriptor per configured worker
-    /// have been durably accepted.
-    EnsembleStarted {
-        turn_id: TurnId,
-        start: EnsembleStart,
-        resumed: bool,
-    },
-    /// One normalized, inspectable ACP update. Worker transcript persistence
-    /// happens before this publication.
-    AgentRunUpdated {
-        turn_id: TurnId,
-        ensemble_run_id: EnsembleRunId,
-        agent_run_id: AgentRunId,
-        event: AgentRunEvent,
-    },
-    /// Reliable host review projection; never a lossy model preview.
-    WorkerReviewUpdated {
-        target: WorkerControlTarget,
-        state: Box<WorkerReviewState>,
-    },
-    WorkerControlResult {
-        result: WorkerControlResult,
-    },
-    /// Terminal provider-neutral worker outcome.
-    AgentRunFinished {
-        turn_id: TurnId,
-        ensemble_run_id: EnsembleRunId,
-        outcome: AgentRunOutcome,
-    },
-    /// Every worker is terminal and the bounded synthesis input is durable.
-    EnsembleReportsReady {
-        turn_id: TurnId,
-        run_id: EnsembleRunId,
-        agents: Vec<AgentRunSummary>,
-    },
-    /// Unified provider preview, including activity-only attempts.
-    AssistantStreamUpdated {
-        turn_id: TurnId,
-        snapshot: crate::AssistantStreamSnapshot,
-    },
-    /// Any previously displayed streaming snapshot must be removed.
-    StreamCleared {
-        turn_id: TurnId,
-    },
+    /// Recovery repaired terminal workflow records for an assistant response
+    /// that was already present in the restored transcript. Frontends should
+    /// unlock the turn without appending another message.
+    Recovered { turn_id: TurnId },
+    /// The user turn failed after retaining all completed local work.
+    Failed { turn_id: TurnId, error: String },
+    /// Refused before durable acceptance. No transcript error row exists.
+    Rejected { turn_id: TurnId, error: String },
+    /// The user cancelled the turn after retaining all completed work.
+    Cancelled { turn_id: TurnId },
     /// A completed assistant tool-call message.
     Intermediate {
         turn_id: TurnId,
@@ -170,63 +87,30 @@ pub enum SessionEvent {
         message: Message,
         metadata: Vec<ToolResultMetadata>,
     },
-    /// The final assistant response for the user turn.
-    TurnCompleted {
+    /// One model/tool-loop dispatch is beginning. `call` is 1-based and
+    /// restarts for each turn's loop, counting invocations of the provider's
+    /// `complete` method, not individual tools or network requests. Provider
+    /// retries/continuations and compaction requests do not advance it.
+    ModelCallStarted { turn_id: TurnId, call: usize },
+    /// Independent response presentation; never an executable call or text fence.
+    ResponseAttemptUpdated {
         turn_id: TurnId,
-        message: Message,
-        attempt_id: Option<String>,
+        attempt: Box<crate::ResponseAttempt>,
     },
-    /// Opt-in, non-fencing ordering barrier after dispatched turn work has
-    /// published all lifecycle events and no more turn work is queued. This
-    /// frontend-only metadata has no presentation content and is never persisted.
-    EngineIdle,
-    /// Recovery repaired terminal workflow records for an assistant response
-    /// that was already present in the restored transcript. Frontends should
-    /// unlock the turn without appending another message.
-    TurnRecovered {
+    /// A manual or automatic checkpoint request is in flight.
+    CompactionStarted {
         turn_id: TurnId,
+        trigger: CompactionTrigger,
     },
-    /// A semantic Build prompt backed by a typed handoff record rather than a
-    /// user-authored message.
-    PlanHandoffStarted {
+    /// A checkpoint was durably installed and now controls model history.
+    CompactionCompleted {
         turn_id: TurnId,
-        handoff: PlanHandoff,
+        trigger: CompactionTrigger,
+        backend: CompactionBackend,
     },
-    /// Authoritative Plan workflow snapshot after a live transition, not startup
-    /// readiness. Draft saves also emit this immediately after ToolResults.
-    /// Hosts seed restored state from `SessionEngine::plan_state`;
-    /// frontends never infer it from assistant messages or turn completion.
-    PlanStateChanged {
-        state: PlanWorkflowState,
-    },
-    /// The transcript remains canonical, but its convenience Markdown
-    /// projection could not be written after a draft save or publication.
-    /// Draft warnings are deduplicated per plan until a later write succeeds.
-    PlanProjectionWarning {
-        version: PlanVersion,
-        draft: Option<u32>,
-        path: PathBuf,
-        error: String,
-    },
-    /// The session manager must create a new session and deliver this through
-    /// `TurnCommand::StartFromPlan` without converting it to text.
-    FreshPlanHandoffRequested {
-        handoff: PlanHandoff,
-    },
-    /// The user turn failed after retaining all completed local work.
-    TurnFailed {
-        turn_id: TurnId,
-        error: String,
-    },
-    /// Refused before durable acceptance. No transcript error row exists.
-    TurnRejected {
-        turn_id: TurnId,
-        error: String,
-    },
-    /// The user cancelled the turn after retaining all completed work.
-    TurnCancelled {
-        turn_id: TurnId,
-    },
+    /// An accepted workflow action explicitly selected a mode. Management uses
+    /// only ModeResult so stale/cancelled replies cannot act as workflow traffic.
+    ModeChanged { mode: SessionMode },
     /// Token accounting for the most recently completed model response —
     /// including intra-turn tool-loop responses, so a frontend can show live
     /// prompt-cache effectiveness.
@@ -241,7 +125,7 @@ pub enum SessionEvent {
     /// Projected input accounting for the next complete provider request.
     ContextUsageUpdated {
         turn_id: TurnId,
-        snapshot: ContextTokenSnapshot,
+        snapshot: Box<ContextTokenSnapshot>,
     },
     /// Transient completion networking metadata, never assistant/model input.
     NetworkStatus {
@@ -254,7 +138,7 @@ pub enum SessionEvent {
     /// The provider lost its connection mid-turn and is reconnecting; the
     /// turn is still in flight. Frontends should show a transient status,
     /// not a failure.
-    TurnRetrying {
+    Retrying {
         turn_id: TurnId,
         call: usize,
         /// The upcoming attempt, including the initial request as attempt 1.
@@ -265,46 +149,165 @@ pub enum SessionEvent {
         retrying_for: std::time::Duration,
         error: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubtaskEvent {
     /// A subtask launch was queued; emitted by the launcher before the
     /// blocking tool call starts waiting, so the frontend row can open the
     /// live child immediately.
-    SubtaskLaunched {
+    Launched {
         turn_id: TurnId,
         /// The real outer tool call correlation, shared by all entries.
         call_id: String,
         /// Zero-based position in the launch_subtasks input array.
         entry_index: usize,
-        descriptor: SubtaskDescriptor,
+        descriptor: Box<SubtaskDescriptor>,
     },
     /// A forwarded event from one child subsession. Never touches the root
     /// pane's streaming or busy state.
-    SubtaskSession {
+    Session {
         id: SubtaskId,
         event: Box<SessionEvent>,
     },
     /// A subtask lifecycle transition (Starting → Running → terminal).
-    SubtaskStatus {
+    Status {
         turn_id: TurnId,
         id: SubtaskId,
         status: SubtaskStatus,
     },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnsembleEvent {
+    /// The compact ensemble command and one descriptor per configured worker
+    /// have been durably accepted.
+    Started {
+        turn_id: TurnId,
+        start: Box<EnsembleStart>,
+        resumed: bool,
+    },
+    /// One normalized, inspectable ACP update. Worker transcript persistence
+    /// happens before this publication.
+    AgentRunUpdated {
+        turn_id: TurnId,
+        ensemble_run_id: EnsembleRunId,
+        agent_run_id: AgentRunId,
+        event: Box<AgentRunEvent>,
+    },
+    /// Reliable host review projection; never a lossy model preview.
+    WorkerReviewUpdated {
+        target: WorkerControlTarget,
+        state: Box<WorkerReviewState>,
+    },
+    WorkerControlResult {
+        result: Box<WorkerControlResult>,
+    },
+    /// Terminal provider-neutral worker outcome.
+    AgentRunFinished {
+        turn_id: TurnId,
+        ensemble_run_id: EnsembleRunId,
+        outcome: Box<AgentRunOutcome>,
+    },
+    /// Every worker is terminal and the bounded synthesis input is durable.
+    ReportsReady {
+        turn_id: TurnId,
+        run_id: EnsembleRunId,
+        agents: Vec<AgentRunSummary>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanEvent {
+    /// A semantic Build prompt backed by a typed handoff record rather than a
+    /// user-authored message.
+    HandoffStarted {
+        turn_id: TurnId,
+        handoff: Box<PlanHandoff>,
+    },
+    /// Authoritative Plan workflow snapshot after a live transition, not startup
+    /// readiness. Draft saves also emit this immediately after ToolResults.
+    /// Hosts seed restored state from `SessionEngine::plan_state`;
+    /// frontends never infer it from assistant messages or turn completion.
+    StateChanged { state: Box<PlanWorkflowState> },
+    /// The transcript remains canonical, but its convenience Markdown
+    /// projection could not be written after a draft save or publication.
+    /// Draft warnings are deduplicated per plan until a later write succeeds.
+    ProjectionWarning {
+        version: PlanVersion,
+        draft: Option<u32>,
+        path: PathBuf,
+        error: String,
+    },
+    /// The session manager must create a new session and deliver this through
+    /// `TurnCommand::StartFromPlan` without converting it to text.
+    FreshHandoffRequested { handoff: Box<PlanHandoff> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ManagementEvent {
+    ModeResult {
+        request_id: String,
+        result: ModeSelectionResult,
+    },
+    ModelsResult {
+        request_id: String,
+        result: Box<crate::models::ModelManagementResult>,
+    },
+    SkillsResult {
+        request_id: String,
+        result: Box<crate::skill::SkillManagementResult>,
+    },
+    /// Bounded invalidation only. Clients query metadata pages separately.
+    SkillsChanged {
+        revision: String,
+        counts: crate::skill::SkillCatalogCounts,
+    },
+    McpResult {
+        request_id: String,
+        result: Box<McpManagementResult>,
+    },
+    McpChanged {
+        revision: String,
+        connected: usize,
+        total: usize,
+        tool_count: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum JobEvent {
+    /// Runtime-only display state, independent of turn acceptance and persistence.
+    Updated { job: Box<CommandJobSnapshot> },
+    ControlResult {
+        request_id: String,
+        result: Box<CommandControlResult>,
+    },
+    /// Level-triggered root-only eligibility; never persisted or a stream fence.
+    ContinuationChanged { mode: Option<SessionMode> },
+    ContinuationStarted {
+        turn_id: TurnId,
+        mode: SessionMode,
+        notice: Box<CommandJobNotice>,
+    },
+    Reported {
+        turn_id: TurnId,
+        notice: Box<CommandJobNotice>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum QuestionEvent {
     /// A blocking model tool is waiting for structured user input.
-    QuestionAsked {
+    Asked {
         turn_id: TurnId,
         request: QuestionRequest,
     },
     /// A previously announced question stopped waiting. Frontends must match
     /// both identities so a delayed close cannot remove a newer modal.
-    QuestionClosed {
+    Closed {
         turn_id: TurnId,
         request_id: QuestionRequestId,
-    },
-    /// Transcript persistence health changed. A degraded session remains
-    /// inspectable but rejects new work until its complete in-memory history
-    /// can be atomically repaired.
-    PersistenceChanged {
-        path: PathBuf,
-        error: Option<String>,
     },
 }
 
@@ -317,8 +320,23 @@ pub enum SessionEvent {
 pub struct SessionStreamState {
     pub revision: u64,
     pub turn_id: TurnId,
-    pub message: Option<Message>,
-    pub attempt: Option<crate::ResponseAttempt>,
+    pub message: Option<Arc<Message>>,
+    pub attempt: Option<Arc<crate::ResponseAttempt>>,
+}
+
+impl SessionStreamState {
+    pub fn new(turn_id: TurnId, snapshot: crate::AssistantStreamSnapshot) -> Self {
+        Self {
+            revision: 0,
+            turn_id,
+            message: snapshot.message.map(Arc::new),
+            attempt: snapshot.attempt.map(Arc::new),
+        }
+    }
+
+    pub fn clear(turn_id: TurnId) -> Self {
+        Self::new(turn_id, crate::AssistantStreamSnapshot::default())
+    }
 }
 
 /// One lossy delivery of changed root and child streaming states.
@@ -350,7 +368,7 @@ pub struct AgentRunStreamState {
     pub turn_id: TurnId,
     pub ensemble_run_id: EnsembleRunId,
     pub agent_run_id: AgentRunId,
-    pub event: AgentRunEvent,
+    pub event: Arc<AgentRunEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -361,7 +379,6 @@ pub(super) struct AgentRunPreviewKey {
 
 /// The single ordered update contract exposed to session consumers.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(clippy::large_enum_variant)] // Keep lifecycle matching ergonomic on the TUI hot path.
 pub enum SessionUpdate {
     /// Lossless, bounded, backpressured session lifecycle traffic.
     Lifecycle(SessionEvent),
@@ -369,10 +386,26 @@ pub enum SessionUpdate {
     Streams(SessionStreamBatch),
 }
 
+impl From<SessionEvent> for SessionUpdate {
+    fn from(event: SessionEvent) -> Self {
+        Self::Lifecycle(event)
+    }
+}
+
+impl From<SessionStreamState> for SessionUpdate {
+    fn from(state: SessionStreamState) -> Self {
+        Self::Streams(SessionStreamBatch {
+            root: Some(state),
+            ..SessionStreamBatch::default()
+        })
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct SequencedSessionEvent {
     pub(super) sequence: u64,
     pub(super) event: SessionEvent,
+    is_hosted_activity_update: bool,
 }
 
 /// Full latest-value storage behind the watch channel. This stays private so
@@ -408,7 +441,6 @@ pub struct SessionEventReceiver {
     pub(super) root_emitted: u64,
     pub(super) subtask_emitted: HashMap<SubtaskId, u64>,
     pub(super) agent_run_emitted: HashMap<AgentRunPreviewKey, u64>,
-    hosted_actions: std::collections::HashSet<(AgentRunId, String)>,
 }
 
 pub fn session_event_channel(capacity: usize) -> (SessionEventSender, SessionEventReceiver) {
@@ -437,128 +469,90 @@ pub fn session_event_channel(capacity: usize) -> (SessionEventSender, SessionEve
             root_emitted: 0,
             subtask_emitted: HashMap::new(),
             agent_run_emitted: HashMap::new(),
-            hosted_actions: Default::default(),
         },
     )
 }
 
 impl SessionEventSender {
-    // Tokio's send error deliberately returns the complete event to its
-    // caller. Plan snapshots make that value substantial, but preserving it
-    // is part of this channel API rather than accidental error payload bloat.
-    #[allow(clippy::result_large_err)]
     pub async fn send(
         &self,
         event: SessionEvent,
-    ) -> Result<(), mpsc::error::SendError<SessionEvent>> {
-        match event {
-            SessionEvent::AssistantStreamUpdated { turn_id, snapshot } => {
-                self.stream_snapshot(turn_id, snapshot);
-                Ok(())
-            }
-            SessionEvent::StreamCleared { turn_id } => {
-                self.stream_cleared(turn_id);
-                Ok(())
-            }
-            SessionEvent::AgentRunUpdated {
-                turn_id,
-                ensemble_run_id,
-                agent_run_id,
-                event: event @ (AgentRunEvent::AgentMessage { .. } | AgentRunEvent::Thought { .. }),
-            } => {
-                self.agent_run_preview(turn_id, ensemble_run_id, agent_run_id, event);
-                Ok(())
-            }
-            event => {
-                let agent_run_boundary = agent_run_preview_boundary(&event).cloned();
-                // Capacity is reserved before sequencing, so waiting on
-                // lifecycle backpressure cannot reserve an ordering slot.
-                let permit = match self.lifecycle.reserve().await {
-                    Ok(permit) => permit,
-                    Err(_) => return Err(mpsc::error::SendError(event)),
-                };
-                self.publish_next(|sequence| {
-                    let existing = hosted_activity_update(
-                        &event,
-                        &mut self
-                            .hosted_actions
-                            .lock()
-                            .expect("hosted activity index poisoned"),
-                    );
-                    if let Some(agent_run_id) = &agent_run_boundary
-                        && !existing
-                    {
-                        // A lossless semantic update ends only the active
-                        // coalescing segment. Retain its latest value until
-                        // the receiver has delivered it; otherwise a burst
-                        // can overwrite an unread thought before lifecycle
-                        // traffic is reduced.
-                        self.streams.send_if_modified(|snapshot| {
-                            snapshot.active_agent_runs.remove(agent_run_id).is_some()
-                        });
-                    }
-                    permit.send(SequencedSessionEvent { sequence, event });
-                });
-                Ok(())
-            }
-        }
+    ) -> Result<(), mpsc::error::SendError<Box<SessionEvent>>> {
+        let Some(event) = self.route_preview(event) else {
+            return Ok(());
+        };
+        // Reserve capacity before sequencing; backpressure cannot hold an
+        // ordering slot open or consume a sequence on failure.
+        let Ok(permit) = self.lifecycle.reserve().await else {
+            return Err(mpsc::error::SendError(Box::new(event)));
+        };
+        self.publish_lifecycle(permit, event);
+        Ok(())
     }
 
-    #[allow(clippy::result_large_err)]
     pub fn try_send(
         &self,
         event: SessionEvent,
-    ) -> Result<(), mpsc::error::TrySendError<SessionEvent>> {
+    ) -> Result<(), mpsc::error::TrySendError<Box<SessionEvent>>> {
+        let Some(event) = self.route_preview(event) else {
+            return Ok(());
+        };
+        let permit = match self.lifecycle.try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                return Err(mpsc::error::TrySendError::Full(Box::new(event)));
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                return Err(mpsc::error::TrySendError::Closed(Box::new(event)));
+            }
+        };
+        self.publish_lifecycle(permit, event);
+        Ok(())
+    }
+
+    fn route_preview(&self, event: SessionEvent) -> Option<SessionEvent> {
         match event {
-            SessionEvent::AssistantStreamUpdated { turn_id, snapshot } => {
-                self.stream_snapshot(turn_id, snapshot);
-                Ok(())
-            }
-            SessionEvent::StreamCleared { turn_id } => {
-                self.stream_cleared(turn_id);
-                Ok(())
-            }
-            SessionEvent::AgentRunUpdated {
+            SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
                 turn_id,
                 ensemble_run_id,
                 agent_run_id,
-                event: event @ (AgentRunEvent::AgentMessage { .. } | AgentRunEvent::Thought { .. }),
-            } => {
-                self.agent_run_preview(turn_id, ensemble_run_id, agent_run_id, event);
-                Ok(())
+                event,
+            }) if matches!(
+                *event,
+                AgentRunEvent::AgentMessage { .. } | AgentRunEvent::Thought { .. }
+            ) =>
+            {
+                self.agent_run_preview(turn_id, ensemble_run_id, agent_run_id, *event);
+                None
             }
-            event => {
-                let agent_run_boundary = agent_run_preview_boundary(&event).cloned();
-                // Like `send`, a failed reservation consumes no sequence.
-                let permit = match self.lifecycle.try_reserve() {
-                    Ok(permit) => permit,
-                    Err(mpsc::error::TrySendError::Full(())) => {
-                        return Err(mpsc::error::TrySendError::Full(event));
-                    }
-                    Err(mpsc::error::TrySendError::Closed(())) => {
-                        return Err(mpsc::error::TrySendError::Closed(event));
-                    }
-                };
-                self.publish_next(|sequence| {
-                    let existing = hosted_activity_update(
-                        &event,
-                        &mut self
-                            .hosted_actions
-                            .lock()
-                            .expect("hosted activity index poisoned"),
-                    );
-                    if let Some(agent_run_id) = &agent_run_boundary
-                        && !existing
-                    {
-                        self.streams.send_if_modified(|snapshot| {
-                            snapshot.active_agent_runs.remove(agent_run_id).is_some()
-                        });
-                    }
-                    permit.send(SequencedSessionEvent { sequence, event });
-                });
-                Ok(())
-            }
+            event => Some(event),
         }
+    }
+
+    fn publish_lifecycle(
+        &self,
+        permit: mpsc::Permit<'_, SequencedSessionEvent>,
+        event: SessionEvent,
+    ) {
+        self.publish_next(|sequence| {
+            let is_hosted_activity_update = hosted_activity_update(
+                &event,
+                &mut self
+                    .hosted_actions
+                    .lock()
+                    .expect("hosted activity index poisoned"),
+            );
+            if !is_hosted_activity_update && let Some(id) = agent_run_preview_boundary(&event) {
+                // End the active segment without dropping its unread preview.
+                self.streams
+                    .send_if_modified(|snapshot| snapshot.active_agent_runs.remove(id).is_some());
+            }
+            permit.send(SequencedSessionEvent {
+                sequence,
+                event,
+                is_hosted_activity_update,
+            });
+        });
     }
 
     pub fn stream_updated(&self, turn_id: TurnId, message: Message) {
@@ -566,28 +560,18 @@ impl SessionEventSender {
     }
 
     pub fn stream_snapshot(&self, turn_id: TurnId, value: crate::AssistantStreamSnapshot) {
-        self.publish_next(|sequence| {
-            self.streams.send_modify(|snapshot| {
-                snapshot.root = Some(SessionStreamState {
-                    revision: sequence,
-                    turn_id,
-                    message: value.message,
-                    attempt: value.attempt,
-                });
-            });
-        });
+        self.publish_root_stream(SessionStreamState::new(turn_id, value));
     }
 
     pub fn stream_cleared(&self, turn_id: TurnId) {
+        self.publish_root_stream(SessionStreamState::clear(turn_id));
+    }
+
+    fn publish_root_stream(&self, mut state: SessionStreamState) {
         self.publish_next(|sequence| {
-            self.streams.send_modify(|snapshot| {
-                snapshot.root = Some(SessionStreamState {
-                    revision: sequence,
-                    turn_id,
-                    message: None,
-                    attempt: None,
-                });
-            });
+            state.revision = sequence;
+            self.streams
+                .send_modify(|snapshot| snapshot.root = Some(state));
         });
     }
 
@@ -619,7 +603,10 @@ impl SessionEventSender {
                     .is_some_and(|previous| agent_preview_segments_match(&previous.event, &event));
                 let (key, previous) = if continues_segment {
                     let key = active.expect("a continuing segment has an active key");
-                    let previous = snapshot.agent_runs.remove(&key).map(|state| state.event);
+                    let previous = snapshot
+                        .agent_runs
+                        .remove(&key)
+                        .map(|state| Arc::unwrap_or_clone(state.event));
                     (key, previous)
                 } else {
                     let key = AgentRunPreviewKey {
@@ -639,7 +626,7 @@ impl SessionEventSender {
                         turn_id,
                         ensemble_run_id,
                         agent_run_id,
-                        event,
+                        event: Arc::new(event),
                     },
                 );
             });
@@ -771,25 +758,27 @@ impl SessionEventReceiver {
     }
 
     pub(super) fn lifecycle_update(&mut self, event: SequencedSessionEvent) -> SessionUpdate {
-        let existing = hosted_activity_update(&event.event, &mut self.hosted_actions);
         match &event.event {
-            SessionEvent::SubtaskStatus { id, status, .. } if status.is_terminal() => {
+            SessionEvent::Subtask(SubtaskEvent::Status { id, status, .. })
+                if status.is_terminal() =>
+            {
                 self.subtask_fences.remove(id);
                 self.subtask_emitted.remove(id);
                 self.stream_cleanup
                     .send_if_modified(|snapshot| snapshot.subtasks.remove(id).is_some());
             }
-            SessionEvent::SubtaskSession { event, .. } if !fences_turn_preview(event) => {}
-            SessionEvent::SubtaskSession { id, .. } | SessionEvent::SubtaskStatus { id, .. } => {
+            SessionEvent::Subtask(SubtaskEvent::Session { event, .. })
+                if !fences_turn_preview(event) => {}
+            SessionEvent::Subtask(SubtaskEvent::Session { id, .. })
+            | SessionEvent::Subtask(SubtaskEvent::Status { id, .. }) => {
                 let fence = self.subtask_fences.entry(id.clone()).or_default();
                 *fence = (*fence).max(event.sequence);
             }
-            SessionEvent::AgentRunUpdated {
-                event: AgentRunEvent::ResponseDisplay { .. },
-                ..
-            } => {}
-            SessionEvent::AgentRunUpdated { .. } if existing => {}
-            SessionEvent::AgentRunUpdated { agent_run_id, .. } => {
+            SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated { event: update, .. })
+                if matches!(**update, AgentRunEvent::ResponseDisplay { .. }) => {}
+            SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated { .. })
+                if event.is_hosted_activity_update => {}
+            SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated { agent_run_id, .. }) => {
                 let fence = self
                     .agent_run_fences
                     .entry(agent_run_id.clone())
@@ -797,7 +786,7 @@ impl SessionEventReceiver {
                 *fence = (*fence).max(event.sequence);
                 self.prune_agent_previews(agent_run_id, event.sequence);
             }
-            SessionEvent::AgentRunFinished { outcome, .. } => {
+            SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished { outcome, .. }) => {
                 let id = &outcome.descriptor.id;
                 self.agent_run_fences.remove(id);
                 self.agent_run_emitted
@@ -896,30 +885,34 @@ impl SessionEventReceiver {
 fn fences_turn_preview(event: &SessionEvent) -> bool {
     matches!(
         event,
-        SessionEvent::TurnStarted { .. }
-            | SessionEvent::ModelCallStarted { .. }
-            | SessionEvent::Intermediate { .. }
-            | SessionEvent::ToolResults { .. }
-            | SessionEvent::TurnCompleted { .. }
-            | SessionEvent::TurnFailed { .. }
-            | SessionEvent::TurnCancelled { .. }
-            | SessionEvent::TurnRejected { .. }
-            | SessionEvent::TurnRecovered { .. }
-            | SessionEvent::CompactionStarted { .. }
-            | SessionEvent::CompactionCompleted { .. }
-            | SessionEvent::PlanHandoffStarted { .. }
-            | SessionEvent::JobContinuationStarted { .. }
-            | SessionEvent::CommandJobsReported { .. }
-            | SessionEvent::EnsembleStarted { .. }
-            | SessionEvent::EnsembleReportsReady { .. }
-            | SessionEvent::TurnRetrying { .. }
+        SessionEvent::Turn(TurnEvent::Started { .. })
+            | SessionEvent::Turn(TurnEvent::ModelCallStarted { .. })
+            | SessionEvent::Turn(TurnEvent::Intermediate { .. })
+            | SessionEvent::Turn(TurnEvent::ToolResults { .. })
+            | SessionEvent::Turn(TurnEvent::Completed { .. })
+            | SessionEvent::Turn(TurnEvent::Failed { .. })
+            | SessionEvent::Turn(TurnEvent::Cancelled { .. })
+            | SessionEvent::Turn(TurnEvent::Rejected { .. })
+            | SessionEvent::Turn(TurnEvent::Recovered { .. })
+            | SessionEvent::Turn(TurnEvent::CompactionStarted { .. })
+            | SessionEvent::Turn(TurnEvent::CompactionCompleted { .. })
+            | SessionEvent::Plan(PlanEvent::HandoffStarted { .. })
+            | SessionEvent::Job(JobEvent::ContinuationStarted { .. })
+            | SessionEvent::Job(JobEvent::Reported { .. })
+            | SessionEvent::Ensemble(EnsembleEvent::Started { .. })
+            | SessionEvent::Ensemble(EnsembleEvent::ReportsReady { .. })
+            | SessionEvent::Turn(TurnEvent::Retrying { .. })
     )
 }
 
 pub(super) fn agent_run_boundary(event: &SessionEvent) -> Option<&AgentRunId> {
     match event {
-        SessionEvent::AgentRunUpdated { agent_run_id, .. } => Some(agent_run_id),
-        SessionEvent::AgentRunFinished { outcome, .. } => Some(&outcome.descriptor.id),
+        SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated { agent_run_id, .. }) => {
+            Some(agent_run_id)
+        }
+        SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished { outcome, .. }) => {
+            Some(&outcome.descriptor.id)
+        }
         _ => None,
     }
 }
@@ -931,14 +924,14 @@ pub(super) fn agent_run_boundary(event: &SessionEvent) -> Option<&AgentRunId> {
 /// [`agent_run_boundary`]; this helper controls only preview accumulation.
 pub(super) fn agent_run_preview_boundary(event: &SessionEvent) -> Option<&AgentRunId> {
     match event {
-        SessionEvent::AgentRunUpdated {
-            event: AgentRunEvent::ResponseDisplay { .. },
-            ..
-        } => None,
-        SessionEvent::AgentRunUpdated {
-            event: AgentRunEvent::Protocol { .. },
-            ..
-        } => None,
+        SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated { event, .. })
+            if matches!(
+                **event,
+                AgentRunEvent::ResponseDisplay { .. } | AgentRunEvent::Protocol { .. }
+            ) =>
+        {
+            None
+        }
         event => agent_run_boundary(event),
     }
 }
@@ -948,12 +941,12 @@ fn hosted_activity_update(
     known: &mut std::collections::HashSet<(AgentRunId, String)>,
 ) -> bool {
     let (agent_run_id, event) = match event {
-        SessionEvent::AgentRunUpdated {
+        SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
             agent_run_id,
             event,
             ..
-        } => (agent_run_id, event),
-        SessionEvent::AgentRunFinished { outcome, .. } => {
+        }) => (agent_run_id, event.as_ref()),
+        SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished { outcome, .. }) => {
             known.retain(|(agent, _)| agent != &outcome.descriptor.id);
             return false;
         }
@@ -1191,13 +1184,13 @@ impl ProgressReporter {
         if !self.suppressed {
             let _ = self
                 .events
-                .send(SessionEvent::NetworkStatus {
+                .send(SessionEvent::Turn(TurnEvent::NetworkStatus {
                     turn_id: self.turn.id,
                     call: self.call,
                     attempt,
                     transport,
                     status,
-                })
+                }))
                 .await;
         }
     }
@@ -1259,10 +1252,10 @@ impl ProgressReporter {
         if !self.suppressed {
             let _ = self
                 .events
-                .send(SessionEvent::ResponseAttemptUpdated {
+                .send(SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated {
                     turn_id: self.turn.id,
-                    attempt,
-                })
+                    attempt: Box::new(attempt),
+                }))
                 .await;
         }
     }
@@ -1308,14 +1301,14 @@ impl ProgressReporter {
         }
         let _ = self
             .events
-            .send(SessionEvent::UsageUpdated {
+            .send(SessionEvent::Turn(TurnEvent::UsageUpdated {
                 turn_id: self.turn.id,
                 usage,
                 profile: self.profile.clone(),
                 model_role: self.model_role,
                 input_token_limit: self.input_token_limit,
                 context_window_tokens: self.context_window_tokens,
-            })
+            }))
             .await;
     }
 
@@ -1333,14 +1326,14 @@ impl ProgressReporter {
         }
         let _ = self
             .events
-            .send(SessionEvent::TurnRetrying {
+            .send(SessionEvent::Turn(TurnEvent::Retrying {
                 turn_id: self.turn.id,
                 call: self.call,
                 attempt,
                 retry_after,
                 retrying_for,
                 error,
-            })
+            }))
             .await;
     }
 }

@@ -2,15 +2,17 @@ use super::*;
 use crate::runtime::{dispatch_turn_action, drain_update_burst};
 use zevria_host::{SessionStart, runtime::start_session, test_support::BlockedPromptCount};
 use zevria_presentation::PREPARING_PROMPT;
+use zevria_session_api::TurnEvent;
 use zevria_session_api::{SessionCommand, SessionUpdate};
 
 const PROMPT: &str = "Show the draft before durable admission";
 
 fn submit(views: &mut SessionViews, text: &str) -> UiAction {
     views
+        .workspace
         .root
         .set_focus_for_test(crate::app::FocusState::Insert);
-    views.root.set_input_for_test(text, text.len());
+    views.workspace.root.set_input_for_test(text, text.len());
     views
         .handle_event(Event::Key(KeyEvent::new(
             KeyCode::Enter,
@@ -66,8 +68,8 @@ async fn first_frame_echoes_the_prompt_while_provider_count_is_blocked() {
         "{pending}"
     );
     assert!(!pending.contains("You · #1"));
-    assert_eq!(views.root.input(), "");
-    assert!(views.root.history().is_empty());
+    assert_eq!(views.workspace.root.input(), "");
+    assert!(views.workspace.root.history().is_empty());
     assert!(
         !path.exists(),
         "the pending transcript is still unmaterialized"
@@ -81,7 +83,7 @@ async fn first_frame_echoes_the_prompt_while_provider_count_is_blocked() {
     tokio::time::timeout(deadline, async {
         loop {
             if let SessionUpdate::Lifecycle(event) = updates.recv().await.unwrap() {
-                let started = matches!(event, SessionEvent::TurnStarted { .. });
+                let started = matches!(event, SessionEvent::Turn(TurnEvent::Started { .. }));
                 views.apply(event);
                 if started {
                     break;
@@ -97,7 +99,7 @@ async fn first_frame_echoes_the_prompt_while_provider_count_is_blocked() {
     assert!(accepted.contains("You · #1"));
     assert_eq!(accepted.matches(PROMPT).count(), 1);
     assert!(matches!(
-        views.root.history(),
+        views.workspace.root.history(),
         [HistoryEntry::Conversation(_)]
     ));
     assert_eq!(
@@ -121,26 +123,26 @@ fn transport_loss_settles_unaccepted_prompts_through_draft_recovery() {
         if failed_send {
             drop(receiver);
             dispatch_turn_action(&mut views, &commands, &mut done, action).unwrap();
-            assert_eq!(views.root.input(), PROMPT);
+            assert_eq!(views.workspace.root.input(), PROMPT);
         } else {
             dispatch_turn_action(&mut views, &commands, &mut done, action).unwrap();
             assert!(frame(&mut views).contains(PREPARING_PROMPT));
-            views.root.set_input_for_test("newer draft", 11);
+            views.workspace.root.set_input_for_test("newer draft", 11);
             let (events, mut updates) = zevria_session_api::session_event_channel(4);
             drop(events);
             drain_update_burst(&mut views, &mut updates, &mut done).unwrap();
-            assert_eq!(views.root.input(), "newer draft");
-            views.root.set_input_for_test("", 0);
-            views.root.handle_event(Event::Key(KeyEvent::new(
+            assert_eq!(views.workspace.root.input(), "newer draft");
+            views.workspace.root.set_input_for_test("", 0);
+            views.workspace.root.handle_event(Event::Key(KeyEvent::new(
                 KeyCode::Char('r'),
                 KeyModifiers::NONE,
             )));
-            assert_eq!(views.root.input(), PROMPT);
+            assert_eq!(views.workspace.root.input(), PROMPT);
         }
-        assert!(done && !views.root.is_busy());
+        assert!(done && !views.workspace.root.is_busy());
         assert!(!frame(&mut views).contains(PREPARING_PROMPT));
         assert!(
-            matches!(views.root.history(), [HistoryEntry::Error(error)] if error.contains("session engine stopped"))
+            matches!(views.workspace.root.history(), [HistoryEntry::Error(error)] if error.contains("session engine stopped"))
         );
     }
 }

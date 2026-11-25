@@ -1,6 +1,7 @@
 use super::*;
 use std::sync::Arc;
 use zevria_instructions::skill::*;
+use zevria_session_api::{ManagementEvent, TurnEvent};
 
 fn skill_context(description: &str) -> SkillContext {
     let mut metadata = SkillMetadata::new(description);
@@ -47,7 +48,7 @@ fn ordinary_matching_text_stays_ordinary_for_core_model_selection() {
         enter_insert(&mut app);
         app.set_input_for_test(prompt, prompt.len());
         assert!(
-            matches!(app.handle_event(ctrl_enter()), Some(UiAction::Submit { text, .. }) if text == zevria_content::UserPrompt::from_text(prompt))
+            matches!(app.handle_event(ctrl_enter()), Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(zevria_session_api::TurnCommand::Submit { text, .. }))) if text == zevria_content::UserPrompt::from_text(prompt))
         );
     }
     assert!(context.pins.is_empty());
@@ -61,7 +62,10 @@ fn tui_explicit_invocation_is_name_only_and_leading_space_stays_literal() {
     app.set_input_for_test("$re", 3);
     app.handle_event(key(KeyCode::Tab));
     app.set_input_for_test("$review arguments", "$review arguments".len());
-    let Some(UiAction::InvokeSkill { name, args, mode }) = app.handle_event(ctrl_enter()) else {
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+        zevria_session_api::TurnCommand::InvokeSkill { name, args, mode },
+    ))) = app.handle_event(ctrl_enter())
+    else {
         panic!("bound typed skill")
     };
     assert_eq!(name.as_str(), "review");
@@ -71,7 +75,7 @@ fn tui_explicit_invocation_is_name_only_and_leading_space_stays_literal() {
     enter_insert(&mut literal);
     literal.set_input_for_test(" $review arguments", " $review arguments".len());
     assert!(
-        matches!(literal.handle_event(ctrl_enter()), Some(UiAction::Submit { text, .. }) if text == zevria_content::UserPrompt::from_text("$review arguments"))
+        matches!(literal.handle_event(ctrl_enter()), Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(zevria_session_api::TurnCommand::Submit { text, .. }))) if text == zevria_content::UserPrompt::from_text("$review arguments"))
     );
 }
 
@@ -89,7 +93,10 @@ fn tui_catalog_refresh_updates_completions_without_binding_a_draft() {
         })
         .unwrap();
     app.replace_skill_entries(page.completions);
-    let Some(UiAction::InvokeSkill { name, .. }) = app.handle_event(ctrl_enter()) else {
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+        zevria_session_api::TurnCommand::InvokeSkill { name, .. },
+    ))) = app.handle_event(ctrl_enter())
+    else {
         panic!("bound skill")
     };
     assert_eq!(name.as_str(), "review");
@@ -118,7 +125,10 @@ fn tui_fresh_completion_after_reload_is_name_only() {
     );
     app.set_input_for_test("$re", 3);
     app.handle_event(key(KeyCode::Tab));
-    let Some(UiAction::InvokeSkill { name, .. }) = app.handle_event(ctrl_enter()) else {
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+        zevria_session_api::TurnCommand::InvokeSkill { name, .. },
+    ))) = app.handle_event(ctrl_enter())
+    else {
         panic!("bound skill")
     };
     assert_eq!(
@@ -158,7 +168,7 @@ fn completion_refresh_preserves_the_highlighted_name() {
     );
     app.handle_event(key(KeyCode::Tab));
     assert!(
-        matches!(app.handle_event(ctrl_enter()), Some(UiAction::InvokeSkill { name, .. }) if name.as_str() == "review")
+        matches!(app.handle_event(ctrl_enter()), Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(zevria_session_api::TurnCommand::InvokeSkill { name, .. }))) if name.as_str() == "review")
     );
 }
 
@@ -172,19 +182,19 @@ fn manager_ignores_stale_browser_views_and_coalesces_completion_refreshes() {
                 request_id,
                 request,
             },
-        )) = manager.commands.pop_front()
+        )) = manager.inspector.commands.pop_front()
         else {
             panic!("management request")
         };
         (request_id, request)
     };
     let response = |request_id, context: &SkillContext, request: &SkillManagementRequest| {
-        SessionEvent::SkillsResult {
+        SessionEvent::Manage(ManagementEvent::SkillsResult {
             request_id,
-            result: SkillManagementResult::View {
+            result: Box::new(SkillManagementResult::View {
                 view: context.management_view(request).unwrap(),
-            },
-        }
+            }),
+        })
     };
     let mut manager = crate::skills::SkillManager::default();
     manager.show();
@@ -197,7 +207,7 @@ fn manager_ignores_stale_browser_views_and_coalesces_completion_refreshes() {
     let (current_id, current_request) = pop(&mut manager);
     manager.key(KeyCode::Char(' '));
     assert!(
-        manager.commands.is_empty(),
+        manager.inspector.commands.is_empty(),
         "loading data is not actionable"
     );
     manager.event(&response(current_id, &new, &current_request));
@@ -209,12 +219,12 @@ fn manager_ignores_stale_browser_views_and_coalesces_completion_refreshes() {
     );
 
     let mut manager = crate::skills::SkillManager::default();
-    manager.refresh();
+    manager.inspector.refresh();
     let (stale_id, stale_request) = pop(&mut manager);
-    manager.event(&SessionEvent::SkillsChanged {
+    manager.event(&SessionEvent::Manage(ManagementEvent::SkillsChanged {
         revision: new.catalog.revision().into(),
         counts: new.management_counts(),
-    });
+    }));
     assert!(
         manager
             .event(&response(stale_id, &old, &stale_request))
@@ -225,12 +235,12 @@ fn manager_ignores_stale_browser_views_and_coalesces_completion_refreshes() {
         manager.event(&response(current_id, &new, &current_request)),
         Some(new.completions())
     );
-    assert!(manager.commands.is_empty());
-    manager.event(&SessionEvent::ModeChanged {
+    assert!(manager.inspector.commands.is_empty());
+    manager.event(&SessionEvent::Turn(TurnEvent::ModeChanged {
         mode: SessionMode::Plan,
-    });
+    }));
     assert_eq!(
-        manager.commands.len(),
+        manager.inspector.commands.len(),
         1,
         "mode capability changes refresh completion eligibility"
     );
@@ -252,7 +262,10 @@ fn tui_recalled_skill_edit_sends_name_and_leaves_snapshot_choice_to_engine() {
     app.select_for_test(cursor(0, 0));
     ctrl_e(&mut app);
     app.set_input_for_test("$review changed args", "$review changed args".len());
-    let Some(UiAction::EditTranscript(edit)) = app.handle_event(ctrl_enter()) else {
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+        zevria_session_api::TurnCommand::EditTranscript(edit),
+    ))) = app.handle_event(ctrl_enter())
+    else {
         panic!("typed tail edit")
     };
     assert!(
@@ -285,16 +298,16 @@ fn skill_navigation_reveals_selected_rows_and_keeps_detail_scroll_local() {
             request_id,
             request,
         },
-    )) = manager.commands.pop_front()
+    )) = manager.inspector.commands.pop_front()
     else {
         panic!("metadata request")
     };
-    manager.event(&SessionEvent::SkillsResult {
+    manager.event(&SessionEvent::Manage(ManagementEvent::SkillsResult {
         request_id,
-        result: SkillManagementResult::View {
+        result: Box::new(SkillManagementResult::View {
             view: context.management_view(&request).unwrap(),
-        },
-    });
+        }),
+    }));
     let mut terminal = Terminal::new(TestBackend::new(45, 7)).unwrap();
     for index in 0..20 {
         if index > 0 {
@@ -355,7 +368,7 @@ fn skill_navigation_reveals_selected_rows_and_keeps_detail_scroll_local() {
         text.contains("> skill-18"),
         "unmeasured paging falls back to one entry: {text}"
     );
-    assert!(manager.commands.is_empty());
+    assert!(manager.inspector.commands.is_empty());
 }
 
 #[test]
@@ -368,17 +381,17 @@ fn tui_skills_manager_is_bodyless_and_sends_correlated_revision_bound_mutations(
             request_id,
             request,
         },
-    )) = manager.commands.pop_front()
+    )) = manager.inspector.commands.pop_front()
     else {
         panic!("metadata request")
     };
     let mut page = context.management_view(&request).unwrap();
     page.global_location = Some("/temporary-home/.zevria/skills".into());
     page.project_location = Some("/temporary-workspace/.zevria/skills".into());
-    manager.event(&SessionEvent::SkillsResult {
+    manager.event(&SessionEvent::Manage(ManagementEvent::SkillsResult {
         request_id,
-        result: SkillManagementResult::View { view: page },
-    });
+        result: Box::new(SkillManagementResult::View { view: page }),
+    }));
     let mut terminal = Terminal::new(TestBackend::new(160, 20)).unwrap();
     terminal
         .draw(|frame| manager.render(frame, frame.area()))
@@ -399,19 +412,22 @@ fn tui_skills_manager_is_bodyless_and_sends_correlated_revision_bound_mutations(
             request_id,
             request,
         },
-    )) = manager.commands.pop_front()
+    )) = manager.inspector.commands.pop_front()
     else {
         panic!("toggle request")
     };
     assert!(
         matches!(request, SkillManagementRequest::SetEnabled { expected_revision, enabled: false, .. } if expected_revision == context.catalog.revision())
     );
-    manager.event(&SessionEvent::SkillsResult {
+    manager.event(&SessionEvent::Manage(ManagementEvent::SkillsResult {
         request_id,
-        result: SkillManagementResult::error("busy", "request was not queued"),
-    });
+        result: Box::new(SkillManagementResult::error(
+            "busy",
+            "request was not queued",
+        )),
+    }));
     assert!(
-        manager.commands.is_empty(),
+        manager.inspector.commands.is_empty(),
         "busy mutations are not automatically retried"
     );
     manager.key(KeyCode::Esc);
@@ -443,16 +459,16 @@ fn skill_vim_and_control_pages_use_the_shared_list_selection() {
             request_id,
             request,
         },
-    )) = manager.commands.pop_front()
+    )) = manager.inspector.commands.pop_front()
     else {
         panic!("list request")
     };
-    manager.event(&SessionEvent::SkillsResult {
+    manager.event(&SessionEvent::Manage(ManagementEvent::SkillsResult {
         request_id,
-        result: SkillManagementResult::View {
+        result: Box::new(SkillManagementResult::View {
             view: context.management_view(&request).unwrap(),
-        },
-    });
+        }),
+    }));
     let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
     terminal
         .draw(|frame| manager.render(frame, frame.area()))
@@ -472,7 +488,7 @@ fn skill_vim_and_control_pages_use_the_shared_list_selection() {
                 request: SkillManagementRequest::SetEnabled { name, .. },
                 ..
             },
-        )) = manager.commands.pop_front()
+        )) = manager.inspector.commands.pop_front()
         else {
             panic!("toggle selected skill")
         };

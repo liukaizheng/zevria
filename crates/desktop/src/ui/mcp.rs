@@ -35,7 +35,7 @@ impl McpPanelView {
 
 impl DesktopWindow {
     pub(super) fn sync_mcp_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let visible = self.controller.read(cx).model.mcp.open;
+        let visible = self.controller.read(cx).model.controls.mcp.open;
         if visible != self.mcp_ui.visible {
             self.mcp_ui.visible = visible;
             if visible {
@@ -53,7 +53,7 @@ impl DesktopWindow {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let controller = self.controller.read(cx);
-        let mcp = &controller.model.mcp;
+        let mcp = &controller.model.controls.mcp;
         if !mcp.open {
             self.mcp_ui.inputs.clear();
             self.mcp_ui.draft_key = None;
@@ -84,7 +84,7 @@ impl DesktopWindow {
                     .label("Back")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.controller.update(cx, |controller, cx| {
-                            controller.model.mcp.back();
+                            controller.model.controls.mcp.back();
                             controller.flush_mcp_commands(cx);
                         });
                     })),
@@ -99,7 +99,11 @@ impl DesktopWindow {
                     .disabled(!change)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.controller.update(cx, |controller, cx| {
-                            controller.model.mcp.reload(controller.model.root.is_busy());
+                            controller
+                                .model
+                                .controls
+                                .mcp
+                                .reload(controller.model.root.is_busy());
                             controller.flush_mcp_commands(cx);
                         });
                     })),
@@ -111,7 +115,7 @@ impl DesktopWindow {
                     .label("Close")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.controller.update(cx, |controller, cx| {
-                            controller.model.mcp.close();
+                            controller.model.controls.mcp.close();
                             cx.notify();
                         });
                     })),
@@ -127,7 +131,7 @@ impl DesktopWindow {
             .on_key_down(cx.listener(|this, key: &KeyDownEvent, _, cx| {
                 if key.keystroke.key == "escape" {
                     this.controller.update(cx, |controller, cx| {
-                        controller.model.mcp.back();
+                        controller.model.controls.mcp.back();
                         controller.flush_mcp_commands(cx);
                     });
                     cx.stop_propagation();
@@ -274,7 +278,7 @@ impl DesktopWindow {
                             .disabled(section == tab)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.controller.update(cx, |controller, cx| {
-                                    controller.model.mcp.tab = tab;
+                                    controller.model.controls.mcp.tab = tab;
                                     cx.notify();
                                 })
                             })),
@@ -333,7 +337,7 @@ impl DesktopWindow {
                                     .label(prompt.name)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.controller.update(cx, |controller, cx| {
-                                            controller.model.mcp.draft_prompt(index);
+                                            controller.model.controls.mcp.draft_prompt(index);
                                             cx.notify();
                                         })
                                     })),
@@ -374,7 +378,11 @@ impl DesktopWindow {
                                         .label(name.to_string())
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.controller.update(cx, |controller, cx| {
-                                                controller.model.mcp.inspect(inspect.clone());
+                                                controller
+                                                    .model
+                                                    .controls
+                                                    .mcp
+                                                    .inspect(inspect.clone());
                                                 controller.flush_mcp_commands(cx);
                                             });
                                         })),
@@ -402,7 +410,7 @@ impl DesktopWindow {
                                         .disabled(!change || server.origin == McpServerOrigin::Acp)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.controller.update(cx, |controller, cx| {
-                                                controller.model.mcp.toggle(
+                                                controller.model.controls.mcp.toggle(
                                                     controller.model.root.is_busy(),
                                                     toggle.clone(),
                                                 );
@@ -418,7 +426,7 @@ impl DesktopWindow {
                                         .disabled(!change || !server.enabled)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.controller.update(cx, |controller, cx| {
-                                                controller.model.mcp.reconnect(
+                                                controller.model.controls.mcp.reconnect(
                                                     controller.model.root.is_busy(),
                                                     name.clone(),
                                                 );

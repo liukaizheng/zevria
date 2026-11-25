@@ -1,6 +1,7 @@
 //! Pane lifetime, global surfaces, restoration and engine/input routing.
 
-use crate::app::overlays::OverlayController;
+use crate::app::overlays::{OverlayController, SurfaceSnapshot};
+use zevria_session_api::{EnsembleEvent, JobEvent, ManagementEvent, SubtaskEvent, TurnEvent};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -35,7 +36,7 @@ use zevria_workflow::EnsembleRunId;
 use crate::agent_transcript::AgentTranscriptReducer;
 use crate::app::{App, AppEffect, ConfiguredModelProfiles, UiAction};
 use crate::chrome::paint_rule;
-use crate::input::{Action, InputEvent, PaneId, UserInput};
+use crate::input::{Action, InputEvent, PaneId, SurfaceKind, UserInput};
 use crate::picker::SessionPicker;
 use crate::question::QuestionDialog;
 use crate::status::ExternalContextUsage;
@@ -63,7 +64,7 @@ mod worker_tests;
 use crate::runtime::drain_update_burst;
 
 /// One child subsession pane.
-struct ChildPane {
+pub(crate) struct ChildPane {
     id: SubtaskId,
     creation_ordinal: u64,
     kind: SubtaskKind,
@@ -76,7 +77,7 @@ struct ChildPane {
 }
 
 /// One live or restored provider-neutral ACP worker pane.
-struct AgentPane {
+pub(crate) struct AgentPane {
     id: AgentRunId,
     creation_ordinal: u64,
     ensemble_run_id: EnsembleRunId,
@@ -229,14 +230,17 @@ impl ChildPane {
 
 /// The root pane plus live/historical child panes and their navigation state.
 pub struct SessionViews {
-    pub(crate) root: App,
+    pub(crate) workspace: zevria_presentation::workspace::WorkspaceModel<
+        App,
+        ChildPane,
+        AgentPane,
+        OverlayController,
+    >,
     model_profiles: Arc<ConfiguredModelProfiles>,
     workspace_header: WorkspaceHeader,
     pub(crate) startup_workspace: PathBuf,
     pub(crate) file_service_id: crate::workspace_files::ServiceId,
     file_owner: Option<PaneId>,
-    children: Vec<ChildPane>,
-    agents: Vec<AgentPane>,
     /// `None` shows the root; `Some` selects an inspect-only child pane.
     visible: Option<VisiblePane>,
     /// The most recently entered child, re-opened by `Ctrl-I`.
@@ -249,18 +253,31 @@ pub struct SessionViews {
     restored_agent_ordinals: HashMap<AgentRunId, u64>,
     abandoned_workers: HashMap<(EnsembleRunId, AgentRunId), zevria_workflow::WorkerControlId>,
     baseline_workers: HashMap<EnsembleRunId, AgentRunId>,
-    pub(crate) overlays: OverlayController,
 }
 
 impl SessionViews {
+    fn surface_snapshot(&self, pane: &App) -> SurfaceSnapshot {
+        self.workspace.controls.snapshot(
+            pane.surface(),
+            self.workspace.root.jobs_inspector().is_open(),
+        )
+    }
+
+    pub(crate) fn overlay_owns(&self, kind: SurfaceKind) -> bool {
+        self.workspace
+            .controls
+            .owns(kind, self.workspace.root.jobs_inspector().is_open())
+    }
+
     /// Root follow-ups drain from any pane, but not while a modal captures input.
     pub(crate) fn dispatch_queued_root_work(&mut self) -> Option<UiAction> {
-        if self.overlays.snapshot(self.root.surface()).owner.captures {
+        if self.surface_snapshot(&self.workspace.root).owner.captures {
             return None;
         }
-        self.root
+        self.workspace
+            .root
             .dispatch_next_queued()
-            .or_else(|| self.root.dispatch_job_continuation())
+            .or_else(|| self.workspace.root.dispatch_job_continuation())
     }
 
     pub fn new(mut root: App, startup_workspace: PathBuf) -> Self {
@@ -272,14 +289,15 @@ impl SessionViews {
         root.invalidate_rendered_geometry();
         let model_profiles = root.shared_model_profiles();
         Self {
-            root,
+            workspace: zevria_presentation::workspace::WorkspaceModel::new(
+                root,
+                OverlayController::default(),
+            ),
             model_profiles,
             workspace_header: WorkspaceHeader::new(startup_workspace.clone()),
             startup_workspace,
             file_service_id: crate::workspace_files::ServiceId::default(),
             file_owner: None,
-            children: Vec::new(),
-            agents: Vec::new(),
             visible: None,
             last_entered: None,
             next_creation_ordinal: 0,
@@ -287,7 +305,6 @@ impl SessionViews {
             restored_agent_ordinals: HashMap::new(),
             abandoned_workers: HashMap::new(),
             baseline_workers: HashMap::new(),
-            overlays: OverlayController::default(),
         }
     }
 
@@ -300,8 +317,8 @@ impl SessionViews {
     ) -> Self {
         let mut views = Self::new(root, startup_workspace);
         views.seed_child_creation_order(&input.items);
-        views.root.restore_session(input);
-        views.model_profiles = views.root.shared_model_profiles();
+        views.workspace.root.restore_session(input);
+        views.model_profiles = views.workspace.root.shared_model_profiles();
         views
     }
 
@@ -315,7 +332,7 @@ impl SessionViews {
             for (run_id, states) in runs {
                 if let Some(state) = states
                     .iter()
-                    .find(|state| state.baseline.is_some() && !state.abandoned)
+                    .find(|state| state.proposals.baseline.is_some() && !state.is_abandoned())
                 {
                     self.baseline_workers
                         .insert(run_id, state.descriptor.id.clone());
@@ -325,7 +342,7 @@ impl SessionViews {
         for item in items {
             match item.ensemble_record() {
                 Some(zevria_workflow::EnsembleRecord::Started { start }) => {
-                    if let Some(worker_id) = self.root.ensemble_baseline(&start.run_id) {
+                    if let Some(worker_id) = self.workspace.root.ensemble_baseline(&start.run_id) {
                         self.baseline_workers
                             .insert(start.run_id.clone(), worker_id.clone());
                     }
@@ -376,8 +393,8 @@ impl SessionViews {
                         self.seed_subtask_ordinal(&subtask.id);
                         self.install_subtask_metadata(subtask, entry.status);
                         let index = self.ensure_child(&subtask.id);
-                        self.children[index].historical = true;
-                        self.children[index].refresh_pane_metadata();
+                        self.workspace.children[index].historical = true;
+                        self.workspace.children[index].refresh_pane_metadata();
                     }
                 }
             }
@@ -417,14 +434,14 @@ impl SessionViews {
                 && pane_index.is_none()
             {
                 let index = self.ensure_agent(&header.ensemble_run_id, &header.descriptor);
-                self.agents[index].historical = true;
-                self.agents[index].app.freeze_worker();
+                self.workspace.agents[index].historical = true;
+                self.workspace.agents[index].app.freeze_worker();
                 pane_index = Some(index);
             }
             let Some(index) = pane_index else {
                 continue;
             };
-            let pane = &mut self.agents[index];
+            let pane = &mut self.workspace.agents[index];
             match record {
                 AgentRunTranscriptRecord::Header { .. } => {}
                 AgentRunTranscriptRecord::Event { event } => {
@@ -455,7 +472,7 @@ impl SessionViews {
         let Some(index) = pane_index else {
             return Ok(());
         };
-        let pane = &mut self.agents[index];
+        let pane = &mut self.workspace.agents[index];
         if let Some(request_id) = self
             .abandoned_workers
             .get(&(pane.ensemble_run_id.clone(), pane.id.clone()))
@@ -484,15 +501,15 @@ impl SessionViews {
     ) {
         let index = self.ensure_child(&id);
         if let Some(metadata) = metadata {
-            let pane = &mut self.children[index];
+            let pane = &mut self.workspace.children[index];
             pane.kind = metadata.kind;
             pane.title = metadata.title;
             pane.workspace = metadata.workspace;
             pane.app.set_inspect_model_role(pane.kind.model_role());
         }
-        self.children[index].historical = true;
-        self.children[index].app.restore(items);
-        self.children[index].refresh_pane_metadata();
+        self.workspace.children[index].historical = true;
+        self.workspace.children[index].app.restore(items);
+        self.workspace.children[index].refresh_pane_metadata();
         self.refresh_subtasks();
     }
 
@@ -502,7 +519,7 @@ impl SessionViews {
         status: SubtaskStatus,
     ) {
         let index = self.ensure_child(&metadata.id);
-        let pane = &mut self.children[index];
+        let pane = &mut self.workspace.children[index];
         pane.title = metadata.title.clone();
         pane.kind = metadata.kind;
         pane.workspace = metadata.workspace.clone();
@@ -514,12 +531,17 @@ impl SessionViews {
     }
 
     fn ensure_child(&mut self, id: &SubtaskId) -> usize {
-        if let Some(index) = self.children.iter().position(|child| &child.id == id) {
+        if let Some(index) = self
+            .workspace
+            .children
+            .iter()
+            .position(|child| &child.id == id)
+        {
             return index;
         }
         let app = App::subtask_inspect("")
             .with_shared_model_profiles(Arc::clone(&self.model_profiles))
-            .with_inspect_reasoning_from(&self.root);
+            .with_inspect_reasoning_from(&self.workspace.root);
         let creation_ordinal = self
             .restored_subtask_ordinals
             .get(id)
@@ -536,8 +558,8 @@ impl SessionViews {
             status: None,
         };
         pane.refresh_pane_metadata();
-        self.children.push(pane);
-        self.children.len() - 1
+        self.workspace.children.push(pane);
+        self.workspace.children.len() - 1
     }
 
     fn ensure_agent(
@@ -545,12 +567,17 @@ impl SessionViews {
         ensemble_run_id: &EnsembleRunId,
         descriptor: &AgentRunDescriptor,
     ) -> usize {
-        if let Some(index) = self.agents.iter().position(|pane| pane.id == descriptor.id) {
+        if let Some(index) = self
+            .workspace
+            .agents
+            .iter()
+            .position(|pane| pane.id == descriptor.id)
+        {
             return index;
         }
         let app = App::acp_inspect("")
             .with_shared_model_profiles(Arc::clone(&self.model_profiles))
-            .with_inspect_reasoning_from(&self.root);
+            .with_inspect_reasoning_from(&self.workspace.root);
         let creation_ordinal = self
             .restored_agent_ordinals
             .get(&descriptor.id)
@@ -570,24 +597,25 @@ impl SessionViews {
             baseline: self
                 .baseline_workers
                 .get(ensemble_run_id)
-                .or_else(|| self.root.ensemble_baseline(ensemble_run_id))
+                .or_else(|| self.workspace.root.ensemble_baseline(ensemble_run_id))
                 == Some(&descriptor.id),
         };
         pane.refresh_pane_metadata();
-        self.agents.push(pane);
-        self.agents.len() - 1
+        self.workspace.agents.push(pane);
+        self.workspace.agents.len() - 1
     }
 
     /// Reconcile the visible input owner before requesting or applying results.
     /// Hidden, retired, frozen, and overlay-owned drafts cannot receive searches.
     pub(crate) fn file_search_request(&mut self) -> Option<crate::workspace_files::SearchRequest> {
-        let owner = self.overlays.snapshot(self.visible_app().surface()).owner;
+        let owner = self.surface_snapshot(self.visible_app()).owner;
         let pane = (!owner.captures).then_some(owner.id.pane);
         if self.file_owner != pane {
             if let Some(previous) = self.file_owner {
-                if self.root.surface().id.pane == previous {
-                    self.root.suspend_file_completion();
+                if self.workspace.root.surface().id.pane == previous {
+                    self.workspace.root.suspend_file_completion();
                 } else if let Some(agent) = self
+                    .workspace
                     .agents
                     .iter_mut()
                     .find(|agent| agent.app.surface().id.pane == previous)
@@ -625,6 +653,7 @@ impl SessionViews {
         match self.visible {
             None => Some(ClipboardOrigin::Root),
             Some(VisiblePane::Agent(id)) => self
+                .workspace
                 .agents
                 .iter()
                 .find(|pane| pane.app.surface().id.pane == id)
@@ -641,8 +670,9 @@ impl SessionViews {
         result: crate::clipboard::ClipboardResult,
     ) {
         let app = match origin {
-            ClipboardOrigin::Root => Some(&mut self.root),
+            ClipboardOrigin::Root => Some(&mut self.workspace.root),
             ClipboardOrigin::Agent(run, id) => self
+                .workspace
                 .agents
                 .iter_mut()
                 .find(|pane| pane.ensemble_run_id == run && pane.id == id && !pane.historical)
@@ -657,6 +687,7 @@ impl SessionViews {
         match self.visible {
             Some(VisiblePane::Subtask(id)) => {
                 &mut self
+                    .workspace
                     .children
                     .iter_mut()
                     .find(|pane| pane.app.surface().id.pane == id)
@@ -665,13 +696,14 @@ impl SessionViews {
             }
             Some(VisiblePane::Agent(id)) => {
                 &mut self
+                    .workspace
                     .agents
                     .iter_mut()
                     .find(|pane| pane.app.surface().id.pane == id)
                     .expect("live pane identity")
                     .app
             }
-            None => &mut self.root,
+            None => &mut self.workspace.root,
         }
     }
 
@@ -680,16 +712,18 @@ impl SessionViews {
             // Tail rewrites may already have removed the outgoing worker.
             let outgoing = match self.visible {
                 Some(VisiblePane::Subtask(index)) => self
+                    .workspace
                     .children
                     .iter_mut()
                     .find(|pane| pane.app.surface().id.pane == index)
                     .map(|pane| &mut pane.app),
                 Some(VisiblePane::Agent(index)) => self
+                    .workspace
                     .agents
                     .iter_mut()
                     .find(|pane| pane.app.surface().id.pane == index)
                     .map(|pane| &mut pane.app),
-                None => Some(&mut self.root),
+                None => Some(&mut self.workspace.root),
             };
             if let Some(app) = outgoing {
                 app.close_composer_edit_group();
@@ -704,6 +738,7 @@ impl SessionViews {
         match self.visible {
             Some(VisiblePane::Subtask(id)) => {
                 &self
+                    .workspace
                     .children
                     .iter()
                     .find(|pane| pane.app.surface().id.pane == id)
@@ -712,13 +747,14 @@ impl SessionViews {
             }
             Some(VisiblePane::Agent(id)) => {
                 &self
+                    .workspace
                     .agents
                     .iter()
                     .find(|pane| pane.app.surface().id.pane == id)
                     .expect("live pane identity")
                     .app
             }
-            None => &self.root,
+            None => &self.workspace.root,
         }
     }
 
@@ -729,12 +765,13 @@ impl SessionViews {
 
     pub(crate) fn clock_required(&self) -> bool {
         self.visible_app().is_busy()
-            || self.overlays.jobs.is_open()
-            || (self.overlays.subtasks.is_open() && self.overlays.subtasks.has_active_rows())
+            || self.workspace.root.jobs_inspector().is_open()
+            || (self.workspace.controls.subtasks.is_open()
+                && self.workspace.controls.subtasks.has_active_rows())
     }
 
     fn subtask_rows(&self) -> Vec<SubtaskRow> {
-        let mut children = self.children.iter().collect::<Vec<_>>();
+        let mut children = self.workspace.children.iter().collect::<Vec<_>>();
         children.sort_unstable_by_key(|pane| pane.creation_ordinal);
         children
             .into_iter()
@@ -750,31 +787,44 @@ impl SessionViews {
             .collect()
     }
 
+    pub(crate) fn show_jobs(&mut self) {
+        self.workspace
+            .controls
+            .show_jobs(self.workspace.root.jobs_inspector_mut());
+    }
+
     pub(crate) fn show_subtasks(&mut self) {
+        self.workspace.root.jobs_inspector_mut().close();
         self.visible_app_mut().close_composer_edit_group();
-        self.overlays.show_subtasks(self.subtask_rows());
+        self.workspace.controls.show_subtasks(self.subtask_rows());
     }
 
     fn refresh_subtask_rows(&mut self) {
-        if self.overlays.subtasks.is_open() {
-            self.overlays.subtasks.replace_rows(self.subtask_rows());
+        if self.workspace.controls.subtasks.is_open() {
+            self.workspace
+                .controls
+                .subtasks
+                .replace_rows(self.subtask_rows());
         }
     }
 
     fn refresh_subtasks(&mut self) {
-        self.root
-            .set_active_subtasks(active_count(self.children.iter().map(|pane| pane.status)));
+        self.workspace.root.set_active_subtasks(active_count(
+            self.workspace.children.iter().map(|pane| pane.status),
+        ));
         self.refresh_subtask_rows();
     }
 
     /// Open the modal session picker over whatever pane is visible.
     pub fn open_session_picker(&mut self, sessions: Vec<SessionSummary>) {
-        self.overlays.show_sessions(SessionPicker::new(sessions));
+        self.workspace
+            .controls
+            .show_sessions(SessionPicker::new(sessions));
     }
 
     /// Surface a frontend-side failure as a root-pane notice.
     pub fn show_root_error(&mut self, error: String) {
-        self.root.push_error(error);
+        self.workspace.root.push_error(error);
     }
 
     /// Draw the currently visible pane and global workspace chrome, then any
@@ -782,7 +832,7 @@ impl SessionViews {
     pub fn render(&mut self, frame: &mut ratatui::Frame) {
         self.refresh_subtask_rows();
         let accent = self.visible_app().status_accent().color();
-        let snapshot = self.overlays.snapshot(self.visible_app().surface());
+        let snapshot = self.surface_snapshot(self.visible_app());
         let owner = snapshot.owner;
         let layout =
             self.visible_app_mut()
@@ -798,18 +848,28 @@ impl SessionViews {
                     .bg(theme().surfaces.canvas),
             );
         }
-        self.overlays.render(&snapshot, frame, layout.modal_body);
+        self.workspace.controls.render(
+            &snapshot,
+            self.workspace.root.jobs_inspector(),
+            frame,
+            layout.modal_body,
+        );
     }
 
     pub(crate) fn open_model_picker(&mut self, scope: ModelSelectionScope) {
-        if self.overlays.models.is_open() {
+        if self.workspace.controls.models.is_open() {
             return;
         }
-        if self.visible.is_none()
-            && !self.overlays.snapshot(self.root.surface()).owner.captures
-            && let Some(mode) = self.root.begin_model_management()
+        if zevria_presentation::workspace::model_picker_gate(
+            self.visible.is_none(),
+            false,
+            self.workspace.controls.question().is_some(),
+        )
+        .is_ok()
+            && !self.surface_snapshot(&self.workspace.root).owner.captures
+            && let Some(mode) = self.workspace.root.begin_model_management()
         {
-            self.overlays.show_models(mode, scope);
+            self.workspace.controls.show_models(mode, scope);
         } else {
             self.show_root_error("Model selection requires an idle interactive root session with no pending Plan approval.".into());
         }
@@ -830,13 +890,13 @@ impl SessionViews {
             ))
             .is_err()
         {
-            self.apply_root_event(SessionEvent::ModeResult {
+            self.apply_root_event(SessionEvent::Manage(ManagementEvent::ModeResult {
                 request_id,
                 result: zevria_session_api::ModeSelectionResult::Rejected {
                     code: "engine_stopped".into(),
                     message: "The session engine stopped before accepting mode selection.".into(),
                 },
-            });
+            }));
         }
     }
 
@@ -847,61 +907,69 @@ impl SessionViews {
     }
 
     fn apply_event(&mut self, event: SessionEvent) {
-        if let Some(notice) = self.overlays.jobs.event(&event) {
-            self.show_root_error(notice);
-        }
-        if matches!(event, SessionEvent::CommandControlResult { .. }) {
+        if matches!(
+            &event,
+            SessionEvent::Job(JobEvent::Updated { .. } | JobEvent::ControlResult { .. })
+        ) {
+            let anchor = self
+                .workspace
+                .controls
+                .jobs
+                .selection_anchor(self.workspace.root.jobs_inspector());
+            self.apply_root_event(event);
+            self.workspace
+                .controls
+                .jobs
+                .reconcile(self.workspace.root.jobs_inspector(), anchor);
             return;
         }
-        if let SessionEvent::ModelsResult { request_id, result } = &event {
-            if self.overlays.models.accept(request_id, result) {
-                self.root.install_validated_model_result(result);
-                if let Some(notice) = self.overlays.models.take_settlement_notice() {
-                    self.root.push_error(notice);
+        if let SessionEvent::Manage(ManagementEvent::ModelsResult { request_id, result }) = &event {
+            if self.workspace.controls.models.accept(request_id, result) {
+                self.workspace.root.install_validated_model_result(result);
+                if let Some(notice) = self.workspace.controls.models.take_settlement_notice() {
+                    self.workspace.root.push_error(notice);
                 }
-                self.model_profiles = self.root.shared_model_profiles();
-                if !self.overlays.models.is_open() {
-                    self.root.finish_model_management();
+                self.model_profiles = self.workspace.root.shared_model_profiles();
+                if !self.workspace.controls.models.is_open() {
+                    self.workspace.root.finish_model_management();
                 }
             }
             return;
         }
-        if let Some(entries) = self.overlays.skills.event(&event) {
-            self.root.replace_skill_entries(entries);
+        if let Some(entries) = self.workspace.controls.skills.event(&event) {
+            self.workspace.root.replace_skill_entries(entries);
         }
-        if self.overlays.mcp.inspector.event(&event) {
-            self.root
-                .replace_mcp_prompts(&self.overlays.mcp.inspector.prompts);
+        if self.workspace.controls.mcp.inspector.event(&event) {
+            self.workspace
+                .root
+                .replace_mcp_prompts(&self.workspace.controls.mcp.inspector.prompts);
             return;
         }
-        let refresh_workspace_header = matches!(&event, SessionEvent::ToolResults { .. });
-        let terminal_turn = match &event {
-            SessionEvent::TurnCompleted { turn_id, .. }
-            | SessionEvent::TurnRecovered { turn_id, .. }
-            | SessionEvent::TurnFailed { turn_id, .. }
-            | SessionEvent::TurnRejected { turn_id, .. }
-            | SessionEvent::TurnCancelled { turn_id } => Some(*turn_id),
-            _ => None,
-        }
-        .filter(|turn_id| self.root.accepts_terminal(*turn_id));
+        let refresh_workspace_header =
+            matches!(&event, SessionEvent::Turn(TurnEvent::ToolResults { .. }));
+        let terminal_turn = zevria_presentation::workspace::accepted_terminal_turn(&event, |id| {
+            self.workspace.root.accepts_terminal(id)
+        });
         if terminal_turn.is_some() {
-            for pane in &mut self.agents {
+            for pane in &mut self.workspace.agents {
                 pane.app.freeze_worker();
             }
         }
         if terminal_turn.is_some_and(|turn_id| {
-            self.overlays
+            self.workspace
+                .controls
                 .question()
                 .is_some_and(|question| question.turn_id() == turn_id)
         }) {
-            self.overlays.set_question(None);
+            self.workspace.controls.set_question(None);
         }
-        let child_count = self.children.len();
+        let child_count = self.workspace.children.len();
         let mut refresh_subtasks = matches!(
             &event,
-            SessionEvent::SubtaskLaunched { .. } | SessionEvent::SubtaskStatus { .. }
+            SessionEvent::Subtask(SubtaskEvent::Launched { .. })
+                | SessionEvent::Subtask(SubtaskEvent::Status { .. })
         );
-        if let SessionEvent::ToolResults { metadata, .. } = &event {
+        if let SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) = &event {
             for entry in metadata.iter().flat_map(|metadata| metadata.subtasks()) {
                 if let Some(launch) = &entry.launch {
                     self.install_subtask_metadata(launch, entry.status);
@@ -910,32 +978,32 @@ impl SessionViews {
             }
         }
         match event {
-            SessionEvent::QuestionAsked { turn_id, request } => {
+            SessionEvent::Question(event) => {
+                use zevria_presentation::workspace::{QuestionRoute, route_question};
+                let active = self
+                    .workspace
+                    .controls
+                    .question()
+                    .map(|question| (question.turn_id(), question.request_id()));
                 // Resolve correlation before capturing focus. A delayed
                 // question cannot reopen after its turn or steal management.
-                if self.root.accepts_progress(turn_id) {
-                    self.overlays
-                        .set_question(Some(QuestionDialog::new(turn_id, request)));
+                match route_question(event, active, |id| self.workspace.root.accepts_progress(id)) {
+                    QuestionRoute::Open { turn_id, request } => self
+                        .workspace
+                        .controls
+                        .set_question(Some(QuestionDialog::new(turn_id, request))),
+                    QuestionRoute::Close => self.workspace.controls.set_question(None),
+                    QuestionRoute::Ignore => {}
                 }
             }
-            SessionEvent::QuestionClosed {
-                turn_id,
-                request_id,
-            } => {
-                if self.overlays.question().is_some_and(|question| {
-                    question.turn_id() == turn_id && question.request_id() == &request_id
-                }) {
-                    self.overlays.set_question(None);
-                }
-            }
-            SessionEvent::SubtaskLaunched {
+            SessionEvent::Subtask(SubtaskEvent::Launched {
                 turn_id,
                 call_id,
                 entry_index,
                 mut descriptor,
-            } => {
+            }) => {
                 let index = self.ensure_child(&descriptor.id);
-                let pane = &mut self.children[index];
+                let pane = &mut self.workspace.children[index];
                 if pane.status.is_none() {
                     pane.status = Some(SubtaskStatus::Starting);
                 }
@@ -947,62 +1015,67 @@ impl SessionViews {
                 pane.workspace = descriptor.workspace.clone();
                 pane.app.set_inspect_model_role(pane.kind.model_role());
                 pane.refresh_pane_metadata();
-                self.apply_root_event(SessionEvent::SubtaskLaunched {
+                self.apply_root_event(SessionEvent::Subtask(SubtaskEvent::Launched {
                     turn_id,
                     call_id,
                     entry_index,
                     descriptor,
-                });
+                }));
             }
-            SessionEvent::SubtaskSession { id, event } => {
+            SessionEvent::Subtask(SubtaskEvent::Session { id, event }) => {
                 let index = self.ensure_child(&id);
-                let effects = self.children[index].app.reduce(*event);
+                let effects = self.workspace.children[index].app.reduce(*event);
                 debug_assert!(
                     effects.is_empty(),
                     "inspect panes cannot prune root workers"
                 );
             }
-            SessionEvent::SubtaskStatus {
+            SessionEvent::Subtask(SubtaskEvent::Status {
                 turn_id,
                 id,
                 status,
-            } => {
+            }) => {
                 let index = self.ensure_child(&id);
-                if self.children[index].status.is_none_or(|previous| {
-                    !previous.is_terminal() && status != SubtaskStatus::Starting
-                }) {
-                    self.children[index].status = Some(status);
+                if self.workspace.children[index]
+                    .status
+                    .is_none_or(|previous| {
+                        !previous.is_terminal() && status != SubtaskStatus::Starting
+                    })
+                {
+                    self.workspace.children[index].status = Some(status);
                 }
-                let status = self.children[index].status.expect("child status installed");
-                self.children[index].refresh_pane_metadata();
-                self.apply_root_event(SessionEvent::SubtaskStatus {
+                let status = self.workspace.children[index]
+                    .status
+                    .expect("child status installed");
+                self.workspace.children[index].refresh_pane_metadata();
+                self.apply_root_event(SessionEvent::Subtask(SubtaskEvent::Status {
                     turn_id,
                     id,
                     status,
-                });
+                }));
             }
-            SessionEvent::EnsembleStarted {
+            SessionEvent::Ensemble(EnsembleEvent::Started {
                 turn_id,
                 start,
                 resumed,
-            } => {
-                self.apply_root_event(SessionEvent::EnsembleStarted {
+            }) => {
+                self.apply_root_event(SessionEvent::Ensemble(EnsembleEvent::Started {
                     turn_id,
                     start: start.clone(),
                     resumed,
-                });
+                }));
                 for descriptor in &start.agents {
                     if self
                         .abandoned_workers
                         .contains_key(&(start.run_id.clone(), descriptor.id.clone()))
-                        && !self.agents.iter().any(|pane| {
+                        && !self.workspace.agents.iter().any(|pane| {
                             pane.id == descriptor.id && pane.ensemble_run_id == start.run_id
                         })
                     {
                         continue;
                     }
                     let index = self.ensure_agent(&start.run_id, descriptor);
-                    let pane = &mut self.agents[index];
+                    let pane = &mut self.workspace.agents[index];
                     pane.historical = false;
                     pane.status = if self
                         .abandoned_workers
@@ -1017,8 +1090,8 @@ impl SessionViews {
                     pane.refresh_pane_metadata();
                 }
             }
-            SessionEvent::WorkerControlResult { result } => {
-                if let Some(pane) = self.agents.iter_mut().find(|pane| {
+            SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { result }) => {
+                if let Some(pane) = self.workspace.agents.iter_mut().find(|pane| {
                     pane.id == result.control.target.worker_id
                         && pane.ensemble_run_id == result.control.target.run_id
                 }) {
@@ -1046,15 +1119,15 @@ impl SessionViews {
                     }
                 }
             }
-            SessionEvent::WorkerReviewUpdated { target, state } => {
-                let live = self.root.active_turn_id() == Some(target.turn_id);
-                if let Some(pane) = self.agents.iter_mut().find(|pane| {
+            SessionEvent::Ensemble(EnsembleEvent::WorkerReviewUpdated { target, state }) => {
+                let live = self.workspace.root.active_turn_id() == Some(target.turn_id);
+                if let Some(pane) = self.workspace.agents.iter_mut().find(|pane| {
                     pane.id == target.worker_id
                         && pane.ensemble_run_id == target.run_id
                         && !pane.historical
                 }) {
                     pane.status = state.status();
-                    if state.abandoned {
+                    if state.is_abandoned() {
                         // Root authority also freezes panes when no worker audit
                         // mirror made it to disk. Keep preceding transcript text.
                         let change = pane
@@ -1062,13 +1135,13 @@ impl SessionViews {
                             .abandon(pane.app.conversation_projection_mut());
                         pane.app.apply_conversation_change(change);
                     }
-                    if !state.abandoned
+                    if !state.is_abandoned()
                         && state.quiescent()
-                        && let Some(snapshot) = &state.retained
+                        && let Some(snapshot) = &state.proposals.retained
                     {
                         pane.reconcile_plan(&snapshot.plan);
                     }
-                    if !state.abandoned {
+                    if !state.is_abandoned() {
                         let anchor = pane.app.presentation_selection_anchor();
                         pane.transcript
                             .apply_review_snapshot(pane.app.conversation_projection_mut(), &state);
@@ -1081,19 +1154,22 @@ impl SessionViews {
                     }
                     pane.refresh_pane_metadata();
                 }
-                self.apply_root_event(SessionEvent::WorkerReviewUpdated { target, state });
+                self.apply_root_event(SessionEvent::Ensemble(EnsembleEvent::WorkerReviewUpdated {
+                    target,
+                    state,
+                }));
             }
-            SessionEvent::AgentRunUpdated {
+            SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
                 turn_id,
                 ensemble_run_id,
                 agent_run_id,
                 event,
-            } => {
-                let status = match &event {
+            }) => {
+                let status = match &*event {
                     AgentRunEvent::Status { status, .. } => Some(*status),
                     _ => None,
                 };
-                let root_status = if let AgentRunEvent::Status { status, detail } = &event {
+                let root_status = if let AgentRunEvent::Status { status, detail } = &*event {
                     Some(AgentRunEvent::Status {
                         status: *status,
                         detail: detail.clone(),
@@ -1101,44 +1177,45 @@ impl SessionViews {
                 } else {
                     None
                 };
-                if let Some(pane) = self
-                    .agents
-                    .iter_mut()
-                    .find(|pane| pane.id == agent_run_id && pane.ensemble_run_id == ensemble_run_id)
+                if let Some(pane) =
+                    self.workspace.agents.iter_mut().find(|pane| {
+                        pane.id == agent_run_id && pane.ensemble_run_id == ensemble_run_id
+                    })
                 {
                     if pane.status != AgentRunStatus::Abandoned {
                         let refresh =
-                            status.is_some() || matches!(&event, AgentRunEvent::Usage { .. });
+                            status.is_some() || matches!(&*event, AgentRunEvent::Usage { .. });
                         if let Some(status) = status {
                             pane.status = status;
                         }
-                        pane.apply_transcript_event(event);
+                        pane.apply_transcript_event(*event);
                         if refresh {
                             pane.refresh_pane_metadata();
                         }
                     }
                 }
                 if let Some(event) = root_status {
-                    self.apply_root_event(SessionEvent::AgentRunUpdated {
+                    self.apply_root_event(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
                         turn_id,
                         ensemble_run_id,
                         agent_run_id,
-                        event,
-                    });
+                        event: Box::new(event),
+                    }));
                 }
             }
-            SessionEvent::AgentRunFinished {
+            SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished {
                 turn_id,
                 ensemble_run_id,
                 outcome,
-            } => {
-                if let Some(index) = self.agents.iter().position(|pane| {
+            }) => {
+                if let Some(index) = self.workspace.agents.iter().position(|pane| {
                     pane.id == outcome.descriptor.id && pane.ensemble_run_id == ensemble_run_id
                 }) {
                     let reviewed = self
+                        .workspace
                         .root
                         .reviewed_worker_status(&ensemble_run_id, &outcome.descriptor.id);
-                    let pane = &mut self.agents[index];
+                    let pane = &mut self.workspace.agents[index];
                     if let Some(usage) = &outcome.usage {
                         pane.usage = Some(external_context_usage(usage));
                     }
@@ -1146,11 +1223,13 @@ impl SessionViews {
                         // Review authority includes revocation and current
                         // generations. A late outcome must not freeze a newer
                         // draft/round or replay an old confirmation into it.
-                        self.apply_root_event(SessionEvent::AgentRunFinished {
-                            turn_id,
-                            ensemble_run_id,
-                            outcome,
-                        });
+                        self.apply_root_event(SessionEvent::Ensemble(
+                            EnsembleEvent::AgentRunFinished {
+                                turn_id,
+                                ensemble_run_id,
+                                outcome,
+                            },
+                        ));
                         return;
                     }
                     pane.status = outcome.status;
@@ -1169,15 +1248,15 @@ impl SessionViews {
                     }
                     pane.refresh_pane_metadata();
                 }
-                self.apply_root_event(SessionEvent::AgentRunFinished {
+                self.apply_root_event(SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished {
                     turn_id,
                     ensemble_run_id,
                     outcome,
-                });
+                }));
             }
             event => self.apply_root_event(event),
         }
-        if refresh_subtasks || self.children.len() != child_count {
+        if refresh_subtasks || self.workspace.children.len() != child_count {
             self.refresh_subtasks();
         }
         if refresh_workspace_header {
@@ -1186,18 +1265,19 @@ impl SessionViews {
     }
 
     fn apply_root_event(&mut self, event: SessionEvent) {
-        let sync_agents = matches!(
-            &event,
-            SessionEvent::EnsembleStarted { .. }
-                | SessionEvent::EnsembleReportsReady { .. }
-                | SessionEvent::AgentRunFinished { .. }
-                | SessionEvent::WorkerReviewUpdated { .. }
-                | SessionEvent::AgentRunUpdated {
-                    event: AgentRunEvent::Status { .. },
-                    ..
-                }
-        );
-        let effects = self.root.reduce(event);
+        let sync_agents = match &event {
+            SessionEvent::Ensemble(
+                EnsembleEvent::Started { .. }
+                | EnsembleEvent::ReportsReady { .. }
+                | EnsembleEvent::AgentRunFinished { .. }
+                | EnsembleEvent::WorkerReviewUpdated { .. },
+            ) => true,
+            SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated { event, .. }) => {
+                matches!(event.as_ref(), AgentRunEvent::Status { .. })
+            }
+            _ => false,
+        };
+        let effects = self.workspace.root.reduce(event);
         let sync_agents = sync_agents || !effects.is_empty();
         self.consume_root_effects(effects);
         if !sync_agents {
@@ -1205,8 +1285,8 @@ impl SessionViews {
         }
         // A single root ID drives every badge, including panes without a live
         // review binding. Sidecar text never changes current selection.
-        for pane in &mut self.agents {
-            let selected = self.root.ensemble_baseline(&pane.ensemble_run_id);
+        for pane in &mut self.workspace.agents {
+            let selected = self.workspace.root.ensemble_baseline(&pane.ensemble_run_id);
             if let Some(id) = selected {
                 self.baseline_workers
                     .insert(pane.ensemble_run_id.clone(), id.clone());
@@ -1215,6 +1295,7 @@ impl SessionViews {
             }
             pane.baseline = selected == Some(&pane.id);
             if let Some(status) = self
+                .workspace
                 .root
                 .reviewed_worker_status(&pane.ensemble_run_id, &pane.id)
             {
@@ -1241,7 +1322,8 @@ impl SessionViews {
             return;
         }
         let run_ids: HashSet<_> = run_ids.into_iter().collect();
-        self.agents
+        self.workspace
+            .agents
             .retain(|pane| !run_ids.contains(&pane.ensemble_run_id));
         self.baseline_workers.retain(|id, _| !run_ids.contains(id));
         self.set_visible(self.visible.filter(|pane| self.contains_pane(*pane)));
@@ -1251,64 +1333,41 @@ impl SessionViews {
     fn contains_pane(&self, pane: VisiblePane) -> bool {
         match pane {
             VisiblePane::Subtask(id) => self
+                .workspace
                 .children
                 .iter()
                 .any(|pane| pane.app.surface().id.pane == id),
             VisiblePane::Agent(id) => self
+                .workspace
                 .agents
                 .iter()
                 .any(|pane| pane.app.surface().id.pane == id),
         }
     }
 
-    pub fn apply_streams(&mut self, batch: &SessionStreamBatch) {
-        let child_count = self.children.len();
-        if let Some(stream) = &batch.root {
-            self.apply_root_event(if stream.message.is_some() || stream.attempt.is_some() {
-                SessionEvent::AssistantStreamUpdated {
-                    turn_id: stream.turn_id,
-                    snapshot: zevria_content::AssistantStreamSnapshot {
-                        message: stream.message.clone(),
-                        attempt: stream.attempt.clone(),
-                    },
-                }
-            } else {
-                SessionEvent::StreamCleared {
-                    turn_id: stream.turn_id,
-                }
-            });
+    pub fn apply_streams(&mut self, batch: SessionStreamBatch) {
+        let child_count = self.workspace.children.len();
+        if let Some(stream) = batch.root {
+            let effects = self.workspace.root.apply_stream(stream);
+            self.consume_root_effects(effects);
         }
-        for (id, stream) in &batch.subtasks {
-            let index = self.ensure_child(id);
-            let effects = self.children[index].app.reduce(
-                if stream.message.is_some() || stream.attempt.is_some() {
-                    SessionEvent::AssistantStreamUpdated {
-                        turn_id: stream.turn_id,
-                        snapshot: zevria_content::AssistantStreamSnapshot {
-                            message: stream.message.clone(),
-                            attempt: stream.attempt.clone(),
-                        },
-                    }
-                } else {
-                    SessionEvent::StreamCleared {
-                        turn_id: stream.turn_id,
-                    }
-                },
-            );
+        for (id, stream) in batch.subtasks {
+            let index = self.ensure_child(&id);
+            let effects = self.workspace.children[index].app.apply_stream(stream);
             debug_assert!(
                 effects.is_empty(),
                 "inspect panes cannot prune root workers"
             );
         }
-        if self.children.len() != child_count {
+        if self.workspace.children.len() != child_count {
             self.refresh_subtasks();
         }
-        for stream in &batch.agent_runs {
-            if let Some(index) = self.agents.iter().position(|pane| {
+        for stream in batch.agent_runs {
+            if let Some(index) = self.workspace.agents.iter().position(|pane| {
                 pane.id == stream.agent_run_id && pane.ensemble_run_id == stream.ensemble_run_id
             }) {
-                let pane = &mut self.agents[index];
-                pane.apply_transcript_preview(stream.event.clone());
+                let pane = &mut self.workspace.agents[index];
+                pane.apply_transcript_preview(std::sync::Arc::unwrap_or_clone(stream.event));
                 pane.refresh_pane_metadata();
             }
         }
@@ -1326,7 +1385,7 @@ impl SessionViews {
         let input = match crate::input::normalize(event) {
             InputEvent::User(input) => input,
             InputEvent::Resize => {
-                self.overlays.invalidate_geometry();
+                self.workspace.controls.invalidate_geometry();
                 self.visible_app_mut().invalidate_rendered_geometry();
                 return None;
             }
@@ -1339,19 +1398,27 @@ impl SessionViews {
             }
             InputEvent::Ignored => return None,
         };
-        let owner = self.overlays.snapshot(self.visible_app().surface()).owner;
+        let owner = self.surface_snapshot(self.visible_app()).owner;
         if owner.captures {
             self.visible_app_mut().close_composer_edit_group();
-            let action = if self.overlays.owns(owner.id.kind) {
-                let action = self.overlays.handle_input(
+            let action = if self.overlay_owns(owner.id.kind) {
+                let busy = self.workspace.root.is_busy();
+                let mode = self.workspace.root.mcp_mode();
+                let action = self.workspace.controls.handle_input(
                     owner,
                     input,
-                    self.root.is_busy(),
-                    self.root.mcp_mode(),
+                    self.workspace.root.jobs_inspector_mut(),
+                    busy,
+                    mode,
                 );
                 match action {
-                    Some(UiAction::InvokeMcpPrompt(command)) => {
-                        self.root.begin_overlay_mcp_prompt(command)
+                    Some(UiAction::Session(SessionCommand::Turn(command)))
+                        if matches!(
+                            command,
+                            zevria_session_api::TurnCommand::InvokeMcpPrompt { .. }
+                        ) =>
+                    {
+                        self.workspace.root.begin_overlay_mcp_prompt(command)
                     }
                     other => other,
                 }
@@ -1366,7 +1433,9 @@ impl SessionViews {
                 Some(Action::Help) => {
                     let eligibility = self.visible_app().hint_eligibility();
                     self.visible_app_mut().close_composer_edit_group();
-                    self.overlays.show_help(owner.context(), &eligibility);
+                    self.workspace
+                        .controls
+                        .show_help(owner.context(), &eligibility);
                     return None;
                 }
                 Some(Action::ModelPicker) => {
@@ -1374,7 +1443,7 @@ impl SessionViews {
                     return None;
                 }
                 Some(Action::JobsOverlay) => {
-                    self.overlays.show_jobs();
+                    self.show_jobs();
                     return None;
                 }
                 Some(Action::SubtasksOverlay) => {
@@ -1409,7 +1478,7 @@ impl SessionViews {
                 None
             }
             Some(UiAction::JobControl { id, terminate }) => {
-                let inspector = &mut self.overlays.jobs.inspector;
+                let inspector = self.workspace.root.jobs_inspector_mut();
                 let notice = if terminate {
                     inspector.terminate(id)
                 } else {
@@ -1425,16 +1494,21 @@ impl SessionViews {
     }
 
     fn open_child(&mut self, id: &SubtaskId) {
-        if let Some(index) = self.children.iter().position(|child| &child.id == id) {
-            let pane = VisiblePane::Subtask(self.children[index].app.surface().id.pane);
+        if let Some(index) = self
+            .workspace
+            .children
+            .iter()
+            .position(|child| &child.id == id)
+        {
+            let pane = VisiblePane::Subtask(self.workspace.children[index].app.surface().id.pane);
             self.set_visible(Some(pane));
             self.last_entered = Some(pane);
         }
     }
 
     fn open_agent(&mut self, id: &AgentRunId) {
-        if let Some(index) = self.agents.iter().position(|pane| &pane.id == id) {
-            let pane = VisiblePane::Agent(self.agents[index].app.surface().id.pane);
+        if let Some(index) = self.workspace.agents.iter().position(|pane| &pane.id == id) {
+            let pane = VisiblePane::Agent(self.workspace.agents[index].app.surface().id.pane);
             self.set_visible(Some(pane));
             self.last_entered = Some(pane);
         }
@@ -1446,6 +1520,7 @@ impl SessionViews {
             .filter(|pane| self.contains_pane(*pane))
             .or_else(|| {
                 let child = self
+                    .workspace
                     .children
                     .iter()
                     .enumerate()
@@ -1457,6 +1532,7 @@ impl SessionViews {
                         )
                     });
                 let agent = self
+                    .workspace
                     .agents
                     .iter()
                     .enumerate()
@@ -1483,13 +1559,14 @@ impl SessionViews {
 
     #[cfg(test)]
     pub(crate) fn root(&self) -> &App {
-        &self.root
+        &self.workspace.root
     }
 
     #[cfg(test)]
     pub(crate) fn visible_child_id(&self) -> Option<&SubtaskId> {
         match self.visible {
             Some(VisiblePane::Subtask(id)) => self
+                .workspace
                 .children
                 .iter()
                 .find(|pane| pane.app.surface().id.pane == id)
@@ -1500,7 +1577,8 @@ impl SessionViews {
 
     #[cfg(test)]
     pub(crate) fn child(&self, id: &SubtaskId) -> Option<&App> {
-        self.children
+        self.workspace
+            .children
             .iter()
             .find(|child| &child.id == id)
             .map(|child| &child.app)
@@ -1510,6 +1588,7 @@ impl SessionViews {
     pub(crate) fn visible_agent_id(&self) -> Option<&AgentRunId> {
         match self.visible {
             Some(VisiblePane::Agent(id)) => self
+                .workspace
                 .agents
                 .iter()
                 .find(|pane| pane.app.surface().id.pane == id)
@@ -1520,7 +1599,8 @@ impl SessionViews {
 
     #[cfg(test)]
     pub(crate) fn agent(&self, id: &AgentRunId) -> Option<&App> {
-        self.agents
+        self.workspace
+            .agents
             .iter()
             .find(|agent| &agent.id == id)
             .map(|agent| &agent.app)

@@ -4,6 +4,7 @@ use zevria_model::models::{
     ModelCandidate, ModelManagementRequest as Request, ModelManagementResult as Result,
     ModelSelection, ModelSettingsService, SessionModels,
 };
+use zevria_session_api::ManagementEvent;
 
 #[derive(Default)]
 struct Settings {
@@ -130,12 +131,13 @@ async fn manage(engine: &mut SessionEngine<Provider>, request: Request) -> Resul
         1,
         "management must not emit turn/maintenance events"
     );
-    let SessionEvent::ModelsResult { request_id, result } = events.into_iter().next().unwrap()
+    let SessionEvent::Manage(ManagementEvent::ModelsResult { request_id, result }) =
+        events.into_iter().next().unwrap()
     else {
         panic!("reasoning result")
     };
     assert_eq!(request_id, "reasoning");
-    result
+    *result
 }
 fn select(mode: SessionMode, scope: Scope, level: Level, revision: &str) -> Request {
     Request::Select {
@@ -400,11 +402,11 @@ async fn cancelled_effort_selection_never_saves_or_installs_with_nonempty_histor
                 .unwrap();
             assert!(matches!(
                 collect_events(&mut receiver).await.as_slice(),
-                [SessionEvent::ModelsResult {
-                    result: Result::Cancelled,
+                [SessionEvent::Manage(ManagementEvent::ModelsResult {
+                    result,
                     ..
-                }]
-            ));
+                })]
+             if matches!(result.as_ref(), Result::Cancelled)));
             assert_eq!(std::fs::read(engine.conversation.path()).unwrap(), before);
             assert_eq!(engine.conversation.input_identity(), identity.as_ref());
             assert_eq!(engine.provider.installs, 0);
@@ -540,15 +542,15 @@ async fn model_change_installs_only_its_explicit_role_selection() {
             .await
             .into_iter()
             .any(|event| matches!(
-                event,
-                SessionEvent::ModelsResult {
-                    result: ModelManagementResult::Changed {
-                        reasoning_level: Level::Medium,
-                        ..
-                    },
-                    ..
-                }
-            ))
+               event,
+               SessionEvent::Manage(ManagementEvent::ModelsResult {
+                   result,
+                   ..
+               })
+            if matches!(result.as_ref(), ModelManagementResult::Changed {
+                       reasoning_level: Level::Medium,
+                       ..
+                   })))
     );
     let saved = engine.conversation.session_models().unwrap();
     assert_eq!(saved.reasoning_for_mode(SessionMode::Build), Level::Medium);
@@ -585,11 +587,16 @@ async fn busy_reasoning_is_rejected_not_queued() {
             request,
         }));
         let event = running
-            .until(|event| matches!(event, SessionEvent::ModelsResult { .. }))
+            .until(|event| {
+                matches!(
+                    event,
+                    SessionEvent::Manage(ManagementEvent::ModelsResult { .. })
+                )
+            })
             .await;
         assert!(
-            matches!(event, SessionEvent::ModelsResult { result: Result::Rejected { code, message, .. }, .. }
-            if code == "busy" && message.contains("request was not queued"))
+            matches!(event, SessionEvent::Manage(ManagementEvent::ModelsResult { result, .. })
+             if matches!(result.as_ref(), Result::Rejected { code, message, .. } if code == "busy" && message.contains("request was not queued")))
         );
     }
     call.response.send(Ok(Message::assistant("done"))).unwrap();

@@ -120,6 +120,7 @@ impl StreamSegments {
         message_replaced || thought_replaced
     }
 
+    #[cfg(test)]
     pub(crate) fn display_snapshot(
         &mut self,
         turn_id: TurnId,
@@ -128,16 +129,32 @@ impl StreamSegments {
         self.display_snapshot_at(turn_id, snapshot, Instant::now())
     }
 
+    #[cfg(test)]
     pub(crate) fn display_snapshot_at(
         &mut self,
         turn_id: TurnId,
         snapshot: zevria_content::AssistantStreamSnapshot,
         now: Instant,
     ) -> Vec<SessionUpdate> {
+        self.display_stream_at(
+            turn_id,
+            snapshot.message.as_ref(),
+            snapshot.attempt.map(Arc::new),
+            now,
+        )
+    }
+
+    pub(crate) fn display_stream_at(
+        &mut self,
+        turn_id: TurnId,
+        message: Option<&Message>,
+        attempt: Option<Arc<zevria_content::ResponseAttempt>>,
+        now: Instant,
+    ) -> Vec<SessionUpdate> {
         let mut updates = Vec::new();
         let mut structural = false;
         let mut same_revision = false;
-        if let Some(attempt) = &snapshot.attempt {
+        if let Some(attempt) = attempt.as_deref() {
             if let Some(&highest) = self.seen_attempts.get(&attempt.id)
                 && highest >= attempt.revision
             {
@@ -161,25 +178,15 @@ impl StreamSegments {
                 }
             }
         }
-        let projection = snapshot
-            .message
-            .as_ref()
-            .map(MessageProjection::from_message)
-            .or_else(|| {
-                (!same_revision)
-                    .then(|| {
-                        snapshot
-                            .attempt
-                            .as_ref()
-                            .map(MessageProjection::from_attempt)
-                    })
-                    .flatten()
-            });
+        let projection = message.map(MessageProjection::from_message).or_else(|| {
+            (!same_revision)
+                .then(|| attempt.as_deref().map(MessageProjection::from_attempt))
+                .flatten()
+        });
         let replaced = projection
             .is_some_and(|projection| self.project(turn_id, projection, false, now, &mut updates));
-        let revised = !same_revision && snapshot.attempt.is_some();
-        if revised && let Some(attempt) = snapshot.attempt {
-            let attempt = Arc::new(attempt);
+        let revised = !same_revision && attempt.is_some();
+        if revised && let Some(attempt) = attempt {
             if attempt.outcome == ResponseAttemptOutcome::Completed {
                 self.completed_attempt = Some(attempt.clone());
             }

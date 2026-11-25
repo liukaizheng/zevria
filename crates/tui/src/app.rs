@@ -40,8 +40,6 @@ use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use rig_core::message::Message;
 use zevria_foundation::ModelProfileRef;
 use zevria_foundation::ModelRole;
-use zevria_foundation::QuestionRequestId;
-use zevria_foundation::QuestionResponse;
 use zevria_foundation::SessionMode;
 use zevria_foundation::TurnId;
 use zevria_foundation::subtask::SubtaskId;
@@ -53,7 +51,6 @@ use zevria_transcript::transcript::TranscriptItem;
 use zevria_workflow::AgentRunId;
 use zevria_workflow::AgentRunStatus;
 use zevria_workflow::EnsembleRunId;
-use zevria_workflow::EnsembleWorkflow;
 use zevria_workflow::PlanDecision;
 use zevria_workflow::PlanVersion;
 
@@ -63,8 +60,8 @@ use crate::completion::{
     FileSearchStatus,
 };
 use crate::composer::ComposerState;
+pub(crate) use crate::fold::{EntryFolds, FoldKey, FoldState, SpanRole, TurnFold};
 use crate::input::{InputEvent, Surface, SurfaceKind, UserInput};
-pub(crate) use zevria_presentation::fold::{EntryFolds, FoldKey, FoldState, SpanRole, TurnFold};
 use zevria_workflow::ensemble_review::*;
 
 pub(crate) use conversation::{
@@ -97,52 +94,14 @@ const SCROLL_STEP: usize = 1;
 /// Side effect requested by the pure [`App`] input reducer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiAction {
-    ContinueAfterJobs {
-        mode: SessionMode,
-    },
-    WorkerControl(WorkerControl),
+    Session(zevria_session_api::SessionCommand),
     JobControl {
         id: zevria_foundation::CommandJobId,
         terminate: bool,
     },
-    SetMode {
-        request_id: String,
-        mode: SessionMode,
-    },
     ReadClipboard {
         generation: u64,
         cursor: usize,
-    },
-    Submit {
-        text: zevria_content::UserPrompt,
-        mode: SessionMode,
-        behavior: zevria_foundation::RequestBehavior,
-    },
-    EditTranscript(TranscriptEdit),
-    InvokeMcpPrompt(zevria_session_api::TurnCommand),
-    InvokeSkill {
-        name: zevria_instructions::SkillName,
-        args: zevria_content::UserPrompt,
-        mode: SessionMode,
-    },
-    RevisePlanWithMessage {
-        expected: PlanVersion,
-        text: zevria_content::UserPrompt,
-    },
-    RevisePlanWithSkill {
-        expected: PlanVersion,
-        name: zevria_instructions::SkillName,
-        args: zevria_content::UserPrompt,
-    },
-    Compact {
-        mode: SessionMode,
-    },
-    CancelTurn {
-        turn_id: Option<TurnId>,
-    },
-    AnswerQuestion {
-        request_id: QuestionRequestId,
-        response: QuestionResponse,
     },
     Copy {
         text: String,
@@ -153,17 +112,9 @@ pub enum UiAction {
     OpenAgentRun {
         id: AgentRunId,
     },
-    RunEnsemble {
-        workflow: EnsembleWorkflow,
-        prompt: zevria_content::UserPrompt,
-    },
     RunCommand(SlashCommand),
     ResumeSession {
         path: PathBuf,
-    },
-    ResolvePlan {
-        expected: PlanVersion,
-        decision: PlanDecision,
     },
     Quit,
 }
@@ -199,6 +150,14 @@ pub struct App {
 }
 
 impl App {
+    pub(crate) fn jobs_inspector(&self) -> &zevria_presentation::jobs::JobsInspector {
+        self.model.jobs_inspector()
+    }
+
+    pub(crate) fn jobs_inspector_mut(&mut self) -> &mut zevria_presentation::jobs::JobsInspector {
+        self.model.jobs_inspector_mut()
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -281,9 +240,11 @@ impl App {
         if !self.pane.is_worker() {
             return None;
         }
-        self.worker
-            .admit(action, &self.composer)
-            .map(UiAction::WorkerControl)
+        self.worker.admit(action, &self.composer).map(|control| {
+            UiAction::Session(zevria_session_api::SessionCommand::Control(
+                zevria_session_api::ControlCommand::Worker(control),
+            ))
+        })
     }
 
     fn confirm_worker(&mut self, command: bool) -> Option<UiAction> {
@@ -355,6 +316,7 @@ impl App {
                     .bound
                     .as_ref()?
                     .1
+                    .proposals
                     .confirmation
                     .as_ref()?
                     .revision
@@ -404,13 +366,13 @@ impl App {
     ) {
         let mut title = title.into();
         if let Some((_, state)) = &self.worker.bound {
-            if let Some(snapshot) = &state.retained {
+            if let Some(snapshot) = &state.proposals.retained {
                 title.push_str(&format!(" · proposal r{}", snapshot.revision.revision));
             }
-            if !state.pending.is_empty() {
-                title.push_str(&format!(" · {} queued", state.pending.len()));
+            if !state.inputs.pending.is_empty() {
+                title.push_str(&format!(" · {} queued", state.inputs.pending.len()));
             }
-            if !state.connected && !state.sealed && !state.abandoned {
+            if !state.connection.connected && !state.is_sealed() && !state.is_abandoned() {
                 title.push_str(" · disconnected");
             }
         }
@@ -506,7 +468,9 @@ impl App {
             );
             return None;
         }
-        Some(UiAction::InvokeMcpPrompt(command))
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            command,
+        )))
     }
 
     pub fn with_skills(mut self, skills: Vec<SkillMeta>) -> Self {
@@ -972,7 +936,11 @@ impl App {
             Some(turn_id) => {
                 self.queue.pause(QueuePause::Cancelled);
                 self.view.invalidate_rendered_geometry();
-                Some(UiAction::CancelTurn { turn_id })
+                Some(UiAction::Session(
+                    zevria_session_api::SessionCommand::Control(
+                        zevria_session_api::ControlCommand::CancelTurn { turn_id },
+                    ),
+                ))
             }
             None if self.can_clear_queue() => {
                 let count = self.queue.clear();
@@ -1085,11 +1053,35 @@ impl App {
 
     /// Deterministic lifecycle reduction with an externally observed clock.
     pub(crate) fn reduce_at(&mut self, event: SessionEvent, now: Instant) -> Vec<AppEffect> {
+        self.apply_model_update(now, |model| model.reduce(event))
+    }
+
+    pub(crate) fn apply_stream(
+        &mut self,
+        state: zevria_session_api::SessionStreamState,
+    ) -> Vec<AppEffect> {
+        self.apply_stream_at(state, Instant::now())
+    }
+
+    pub(crate) fn apply_stream_at(
+        &mut self,
+        state: zevria_session_api::SessionStreamState,
+        now: Instant,
+    ) -> Vec<AppEffect> {
+        self.apply_model_update(now, |model| model.apply_stream(state))
+    }
+
+    fn apply_model_update(
+        &mut self,
+        now: Instant,
+        update: impl FnOnce(&mut SessionModel) -> Reduction,
+    ) -> Vec<AppEffect> {
         self.view.capture_conversation_anchor();
         self.view.invalidate_rendered_geometry();
         self.observe_clock(now);
         let anchor = self.presentation_selection_anchor();
-        let effects = self.reduce_event(event);
+        let reduction = update(&mut self.model);
+        let effects = self.apply_reduction(reduction);
         self.restore_presentation_selection(anchor);
         self.view
             .reconcile_anchor_identity(&self.model.conversation);
@@ -1098,22 +1090,16 @@ impl App {
         effects
     }
 
-    fn reduce_event(&mut self, event: SessionEvent) -> Vec<AppEffect> {
-        let reduction = self.model.reduce(event);
-        self.apply_reduction(reduction)
-    }
-
     pub(crate) fn has_pending_prompt(&self) -> bool {
         self.model.pending_prompt().is_some()
     }
 
     pub(crate) fn engine_disconnected(&mut self) {
-        if self.has_pending_prompt() || self.mode_selection_pending() {
-            self.view.capture_conversation_anchor();
-            self.view.invalidate_rendered_geometry();
-            let reduction = self.model.disconnected();
-            self.apply_reduction(reduction);
-        }
+        // An idle session can still have an open jobs inspector and pending job requests.
+        self.view.capture_conversation_anchor();
+        self.view.invalidate_rendered_geometry();
+        let reduction = self.model.disconnected();
+        self.apply_reduction(reduction);
     }
 
     fn apply_reduction(&mut self, reduction: Reduction) -> Vec<AppEffect> {

@@ -5,6 +5,7 @@ use crate::session::kernel::records::{RecordError, TurnAnchor, recoverable};
 use crate::session::workflow::prompt::PromptTurnInput;
 use zevria_foundation::policy::{SessionMode, TurnId};
 use zevria_model::telemetry::TokenUsage;
+use zevria_session_api::TurnEvent;
 use zevria_session_api::command::TurnCommand;
 use zevria_session_api::event::{SessionEvent, SessionEventSender};
 use zevria_session_api::provider::ModelProvider;
@@ -353,16 +354,18 @@ impl<P: ModelProvider> SessionEngine<P> {
                     .raise_floor(TurnId::new(turn.id.get().saturating_add(1)));
                 self.provider.reset();
                 let _ = events
-                    .send(SessionEvent::TurnCancelled { turn_id: turn.id })
+                    .send(SessionEvent::Turn(TurnEvent::Cancelled {
+                        turn_id: turn.id,
+                    }))
                     .await;
             }
             Rejection::Rejected(error) => {
                 tracing::warn!(%error, "turn rejected before acceptance");
                 let _ = events
-                    .send(SessionEvent::TurnRejected {
+                    .send(SessionEvent::Turn(TurnEvent::Rejected {
                         turn_id: turn.id,
                         error,
-                    })
+                    }))
                     .await;
             }
         }
@@ -407,16 +410,16 @@ impl<P: ModelProvider> SessionEngine<P> {
                 if let Some(error) = persistence {
                     self.persistence_failed(&error, events).await?;
                 }
-                SessionEvent::TurnFailed {
+                SessionEvent::Turn(TurnEvent::Failed {
                     turn_id: turn.id,
                     error: error.to_string(),
-                }
+                })
             }
             Failure::Cancelled => {
                 if let Some(error) = recoverable(self.record_completed(terminal))? {
                     self.persistence_failed(&error, events).await?;
                 }
-                SessionEvent::TurnCancelled { turn_id: turn.id }
+                SessionEvent::Turn(TurnEvent::Cancelled { turn_id: turn.id })
             }
             Failure::Fatal(_) => unreachable!(),
         };

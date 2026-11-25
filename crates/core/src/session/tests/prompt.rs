@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{PlanEvent, TurnEvent};
 
 #[path = "image_counting.rs"]
 mod image_counting;
@@ -46,11 +47,11 @@ async fn image_only_messages_and_skill_arguments_are_durable_before_provider_fai
             .await
             .unwrap();
         let updates = collect_events(&mut receiver).await;
-        assert!(updates.iter().any(|event| matches!(event, SessionEvent::TurnStarted { message, .. } if zevria_content::prompt::message_has_images(message))));
+        assert!(updates.iter().any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Started { message, .. }) if zevria_content::prompt::message_has_images(message))));
         assert!(
             updates
                 .iter()
-                .any(|event| matches!(event, SessionEvent::TurnFailed { .. }))
+                .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Failed { .. })))
         );
         assert!(
             engine.provider.input_count_calls.load(Ordering::SeqCst) > 0,
@@ -255,29 +256,28 @@ async fn ready_message_revision_commits_before_feedback_and_runs_only_in_plan_mo
         drop(requests);
         let updates = collect_events(&mut receiver).await;
         let started = updates.iter().position(|event| matches!(event,
-            SessionEvent::TurnStarted { mode: SessionMode::Plan, message, .. }
+            SessionEvent::Turn(TurnEvent::Started { mode: SessionMode::Plan, message, .. })
                 if message == &Message::user(if text.starts_with('/') || text.starts_with('$') {
                     format!(" {text}")
                 } else { text.to_string() })
         )).unwrap();
         let planning = updates.iter().position(|event| matches!(event,
-            SessionEvent::PlanStateChanged { state: PlanWorkflowState::Planning { previous: Some(previous), draft: None, .. } }
-                if previous == &artifact
-        )).unwrap();
+            SessionEvent::Plan(PlanEvent::StateChanged { state })
+                 if matches!(state.as_ref(), PlanWorkflowState::Planning { previous: Some(previous), draft: None, .. } if previous == &artifact))).unwrap();
         assert!(started < planning);
         assert!(updates[..started].iter().any(|event| matches!(
             event,
-            SessionEvent::ModeChanged {
+            SessionEvent::Turn(TurnEvent::ModeChanged {
                 mode: SessionMode::Plan
-            }
+            })
         )));
         assert!(!updates.iter().any(|event| matches!(
             event,
-            SessionEvent::PlanHandoffStarted { .. }
-                | SessionEvent::FreshPlanHandoffRequested { .. }
-                | SessionEvent::ModeChanged {
+            SessionEvent::Plan(PlanEvent::HandoffStarted { .. })
+                | SessionEvent::Plan(PlanEvent::FreshHandoffRequested { .. })
+                | SessionEvent::Turn(TurnEvent::ModeChanged {
                     mode: SessionMode::Build
-                }
+                })
         )));
     }
 }
@@ -357,14 +357,16 @@ async fn ready_message_revision_rejections_preserve_plan_and_durable_history() {
         assert!(
             !updates.iter().any(|event| matches!(
                 event,
-                SessionEvent::TurnStarted { .. } | SessionEvent::PlanStateChanged { .. }
+                SessionEvent::Turn(TurnEvent::Started { .. })
+                    | SessionEvent::Plan(PlanEvent::StateChanged { .. })
             )),
             "{case}: {updates:?}"
         );
         assert!(
             updates.iter().any(|event| matches!(
                 event,
-                SessionEvent::TurnRejected { .. } | SessionEvent::TurnCancelled { .. }
+                SessionEvent::Turn(TurnEvent::Rejected { .. })
+                    | SessionEvent::Turn(TurnEvent::Cancelled { .. })
             )),
             "{case}: {updates:?}"
         );
@@ -425,7 +427,7 @@ async fn skill_revision_is_not_committed_when_prompt_admission_fails() {
     ));
     assert!(engine.provider.requests.lock().unwrap().is_empty());
     assert!(
-        matches!(collect_events(&mut receiver).await.as_slice(), [SessionEvent::TurnRejected { error, .. }] if error.contains("irreducible instruction-state"))
+        matches!(collect_events(&mut receiver).await.as_slice(), [SessionEvent::Turn(TurnEvent::Rejected { error, .. })] if error.contains("irreducible instruction-state"))
     );
 }
 
@@ -534,14 +536,16 @@ async fn ready_skill_revision_rejections_preserve_plan_history_and_pins() {
         assert!(
             !events.iter().any(|e| matches!(
                 e,
-                SessionEvent::TurnStarted { .. } | SessionEvent::PlanStateChanged { .. }
+                SessionEvent::Turn(TurnEvent::Started { .. })
+                    | SessionEvent::Plan(PlanEvent::StateChanged { .. })
             )),
             "{case}: {events:?}"
         );
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                SessionEvent::TurnRejected { .. } | SessionEvent::TurnCancelled { .. }
+                SessionEvent::Turn(TurnEvent::Rejected { .. })
+                    | SessionEvent::Turn(TurnEvent::Cancelled { .. })
             )),
             "{case}: {events:?}"
         );
@@ -591,7 +595,7 @@ async fn cancelled_child_admission_uses_parent_identity_without_a_transcript_row
         .await
         .unwrap();
     assert!(
-        matches!(collect_events(&mut receiver).await.as_slice(), [SessionEvent::TurnCancelled { turn_id }] if *turn_id == turn.id)
+        matches!(collect_events(&mut receiver).await.as_slice(), [SessionEvent::Turn(TurnEvent::Cancelled { turn_id })] if *turn_id == turn.id)
     );
     assert!(
         engine
@@ -667,7 +671,7 @@ async fn finalized_provider_work_is_retained_when_failure_races_cancellation() {
     );
     assert!(matches!(&items[4], TranscriptItem::Error { error } if error.contains("inspection")));
     assert!(
-        matches!(collect_events(&mut receiver).await.as_slice(), [SessionEvent::TurnFailed { error, .. }] if error.contains("inspection"))
+        matches!(collect_events(&mut receiver).await.as_slice(), [SessionEvent::Turn(TurnEvent::Failed { error, .. })] if error.contains("inspection"))
     );
     assert_eq!(
         zevria_transcript::transcript::load(engine.conversation.path()).unwrap(),

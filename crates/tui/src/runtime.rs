@@ -14,6 +14,7 @@ use std::{
 };
 use tokio::sync::mpsc::{UnboundedSender, error::TryRecvError};
 use zevria_model::models::{ModelSelectionScope, SessionModels};
+use zevria_session_api::PlanEvent;
 use zevria_session_api::{SessionCommand, SessionEvent, SessionEventReceiver, SessionUpdate};
 use zevria_transcript::transcript::SessionSummary;
 use zevria_workflow::PlanHandoff;
@@ -96,60 +97,22 @@ fn buffer_or_interrupt(buffered: &mut VecDeque<Event>, event: Event) -> bool {
 
 fn send_turn_action(
     commands: &UnboundedSender<SessionCommand>,
-    action: UiAction,
+    command: zevria_session_api::TurnCommand,
 ) -> anyhow::Result<()> {
     use zevria_session_api::TurnCommand;
-    let (command, operation) = match action {
-        UiAction::ContinueAfterJobs { mode } => (
-            TurnCommand::ContinueAfterJobs { mode },
-            "the background job continuation",
-        ),
-        UiAction::Submit {
-            text,
-            mode,
-            behavior,
-        } => (
-            TurnCommand::Submit {
-                text,
-                mode,
-                behavior,
-            },
-            "the prompt",
-        ),
-        UiAction::EditTranscript(edit) => {
-            (TurnCommand::EditTranscript(edit), "the transcript edit")
+    let operation = match &command {
+        TurnCommand::ContinueAfterJobs { .. } => "the background job continuation",
+        TurnCommand::Submit { .. } => "the prompt",
+        TurnCommand::EditTranscript(_) => "the transcript edit",
+        TurnCommand::InvokeMcpPrompt { .. } => "the MCP prompt",
+        TurnCommand::InvokeSkill { .. } => "the skill invocation",
+        TurnCommand::RevisePlanWithMessage { .. } | TurnCommand::RevisePlanWithSkill { .. } => {
+            "the Plan revision"
         }
-        UiAction::InvokeMcpPrompt(command) => (command, "the MCP prompt"),
-        UiAction::InvokeSkill { name, args, mode } => (
-            TurnCommand::InvokeSkill { name, args, mode },
-            "the skill invocation",
-        ),
-        UiAction::RevisePlanWithMessage { expected, text } => (
-            TurnCommand::RevisePlanWithMessage { expected, text },
-            "the Plan revision",
-        ),
-        UiAction::RevisePlanWithSkill {
-            expected,
-            name,
-            args,
-        } => (
-            TurnCommand::RevisePlanWithSkill {
-                expected,
-                name,
-                args,
-            },
-            "the Plan revision",
-        ),
-        UiAction::Compact { mode } => (TurnCommand::Compact { mode }, "compaction"),
-        UiAction::RunEnsemble { workflow, prompt } => (
-            TurnCommand::RunEnsemble { workflow, prompt },
-            "the ensemble command",
-        ),
-        UiAction::ResolvePlan { expected, decision } => (
-            TurnCommand::ResolvePlan { expected, decision },
-            "the Plan decision",
-        ),
-        _ => unreachable!("only turn actions use the turn transport"),
+        TurnCommand::Compact { .. } => "compaction",
+        TurnCommand::RunEnsemble { .. } => "the ensemble command",
+        TurnCommand::ResolvePlan { .. } => "the Plan decision",
+        _ => "the turn command",
     };
     commands
         .send(SessionCommand::Turn(command))
@@ -162,14 +125,17 @@ pub(crate) fn dispatch_turn_action(
     engine_done: &mut bool,
     action: UiAction,
 ) -> anyhow::Result<()> {
-    if *engine_done && views.root.has_pending_prompt() {
-        views.root.engine_disconnected();
+    if *engine_done && views.workspace.root.has_pending_prompt() {
+        views.workspace.root.engine_disconnected();
         return Ok(());
     }
-    match send_turn_action(commands, action) {
-        Err(_) if views.root.has_pending_prompt() => {
+    let UiAction::Session(SessionCommand::Turn(command)) = action else {
+        anyhow::bail!("queued work must be a turn command");
+    };
+    match send_turn_action(commands, command) {
+        Err(_) if views.workspace.root.has_pending_prompt() => {
             *engine_done = true;
-            views.root.engine_disconnected();
+            views.workspace.root.engine_disconnected();
             Ok(())
         }
         result => result,
@@ -226,26 +192,43 @@ pub async fn run_ui(
     let mut pending_paste: Option<(u64, ClipboardOrigin, u64, usize, Instant)> = None;
     let mut clock = tokio::time::interval(Duration::from_millis(250));
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    views.overlays.skills.refresh();
+    views.workspace.controls.skills.inspector.refresh();
 
     loop {
-        views.overlays.jobs.inspector.tick(Instant::now());
-        while let Some(command) = views.overlays.jobs.inspector.commands.pop_front() {
+        views
+            .workspace
+            .root
+            .jobs_inspector_mut()
+            .tick(Instant::now());
+        while let Some(command) = views
+            .workspace
+            .root
+            .jobs_inspector_mut()
+            .commands
+            .pop_front()
+        {
             commands
                 .send(command)
                 .map_err(|_| anyhow::anyhow!("session engine stopped before job control"))?;
         }
-        while let Some(command) = views.overlays.models.commands.pop_front() {
+        while let Some(command) = views.workspace.controls.models.commands.pop_front() {
             commands
                 .send(command)
                 .map_err(|_| anyhow::anyhow!("session engine stopped before model management"))?;
         }
-        while let Some(command) = views.overlays.skills.commands.pop_front() {
+        while let Some(command) = views
+            .workspace
+            .controls
+            .skills
+            .inspector
+            .commands
+            .pop_front()
+        {
             commands
                 .send(command)
                 .map_err(|_| anyhow::anyhow!("session engine stopped before skill management"))?;
         }
-        while let Some(command) = views.overlays.mcp.inspector.commands.pop_front() {
+        while let Some(command) = views.workspace.controls.mcp.inspector.commands.pop_front() {
             commands
                 .send(command)
                 .map_err(|_| anyhow::anyhow!("session engine stopped before MCP management"))?;
@@ -304,7 +287,7 @@ pub async fn run_ui(
                 None => {
                     engine_done = true;
                     dirty = true;
-                    views.root.engine_disconnected();
+                    views.workspace.root.engine_disconnected();
                 }
             },
             maybe_event = events.next() => match maybe_event {
@@ -321,57 +304,36 @@ pub async fn run_ui(
                                 }
                             }
                         }
-                        Some(UiAction::SetMode { request_id, mode }) => {
-                            views.send_mode_selection(commands, request_id, mode);
-                        }
-                        Some(action @ (UiAction::ContinueAfterJobs { .. } | UiAction::Submit { .. }
-                            | UiAction::EditTranscript(_)
-                            | UiAction::InvokeSkill { .. }
-                            | UiAction::InvokeMcpPrompt(_)
-                            | UiAction::RevisePlanWithMessage { .. }
-                            | UiAction::RevisePlanWithSkill { .. }
-                            | UiAction::Compact { .. }
-                            | UiAction::RunEnsemble { .. }
-                            | UiAction::ResolvePlan { .. })) => {
-                            dispatch_turn_action(&mut views, commands, &mut engine_done, action)?;
-                        }
-                        Some(UiAction::WorkerControl(control)) => {
-                            commands.send(SessionCommand::Control(zevria_session_api::ControlCommand::Worker(control)))
-                                .map_err(|_| anyhow::anyhow!("the session engine stopped before accepting worker control"))?;
-                        }
-                        Some(UiAction::CancelTurn { turn_id }) => {
-                            if commands.send(SessionCommand::Control(zevria_session_api::ControlCommand::CancelTurn { turn_id })).is_err() {
-                                if !views.root.has_pending_prompt() {
-                                    anyhow::bail!("the session engine stopped before accepting cancellation");
+                        Some(UiAction::Session(command)) => {
+                            use zevria_session_api::{ControlCommand, ManagementCommand};
+                            match command {
+                                SessionCommand::Manage(ManagementCommand::SetMode { request_id, mode }) => {
+                                    views.send_mode_selection(commands, request_id, mode);
                                 }
-                                engine_done = true;
-                                views.root.engine_disconnected();
+                                command @ SessionCommand::Turn(_) => {
+                                    dispatch_turn_action(&mut views, commands, &mut engine_done, UiAction::Session(command))?;
+                                }
+                                command @ SessionCommand::Control(ControlCommand::CancelTurn { .. }) => {
+                                    if commands.send(command).is_err() {
+                                        if !views.workspace.root.has_pending_prompt() {
+                                            anyhow::bail!("the session engine stopped before accepting cancellation");
+                                        }
+                                        engine_done = true;
+                                        views.workspace.root.engine_disconnected();
+                                    }
+                                }
+                                command => commands.send(command).map_err(|_| anyhow::anyhow!("the session engine stopped before accepting the command"))?,
                             }
-                        }
-                        Some(UiAction::AnswerQuestion {
-                            request_id,
-                            response,
-                        }) => {
-                            commands
-                                .send(SessionCommand::Control(zevria_session_api::ControlCommand::AnswerQuestion {
-                                    request_id,
-                                    response,
-                                }))
-                                .map_err(|_| {
-                                    anyhow::anyhow!(
-                                        "the session engine stopped before accepting the question response"
-                                    )
-                                })?;
                         }
                         Some(UiAction::Copy { text }) => copy_to_clipboard(&text)?,
                         Some(UiAction::RunCommand(command)) => match command {
-                            SlashCommand::Confirm | SlashCommand::Unconfirm | SlashCommand::Baseline | SlashCommand::Unbaseline | SlashCommand::Retry | SlashCommand::CancelPrompt | SlashCommand::Abandon => { views.root.push_error("Worker commands are available only in a live Plan worker pane.".into()); }
+                            SlashCommand::Confirm | SlashCommand::Unconfirm | SlashCommand::Baseline | SlashCommand::Unbaseline | SlashCommand::Retry | SlashCommand::CancelPrompt | SlashCommand::Abandon => { views.workspace.root.push_error("Worker commands are available only in a live Plan worker pane.".into()); }
                             SlashCommand::Resume => open_resume_picker(&mut views, context),
-                            SlashCommand::New => return new_session_outcome(&views.root),
-                            SlashCommand::Skills => views.overlays.show_skills(),
-                            SlashCommand::Mcp => views.overlays.show_mcp(),
+                            SlashCommand::New => return new_session_outcome(&views.workspace.root),
+                            SlashCommand::Skills => views.workspace.controls.show_skills(),
+                            SlashCommand::Mcp => views.workspace.controls.show_mcp(),
                             SlashCommand::Prompt => unreachable!("MCP prompts are classified separately"),
-                            SlashCommand::Jobs => views.overlays.show_jobs(),
+                            SlashCommand::Jobs => views.show_jobs(),
                             SlashCommand::Subtasks => views.show_subtasks(),
                             SlashCommand::Model | SlashCommand::ModelSession => {
                                 let scope = if command == SlashCommand::ModelSession {
@@ -421,18 +383,18 @@ fn apply_session_update(
     update: SessionUpdate,
 ) -> anyhow::Result<Option<UiOutcome>> {
     match update {
-        SessionUpdate::Lifecycle(SessionEvent::FreshPlanHandoffRequested { handoff }) => {
-            Ok(Some(UiOutcome::Fresh {
-                handoff,
-                models: views.root.session_models()?,
-            }))
-        }
+        SessionUpdate::Lifecycle(SessionEvent::Plan(PlanEvent::FreshHandoffRequested {
+            handoff,
+        })) => Ok(Some(UiOutcome::Fresh {
+            handoff: *handoff,
+            models: views.workspace.root.session_models()?,
+        })),
         SessionUpdate::Lifecycle(event) => {
             views.apply(event);
             Ok(None)
         }
         SessionUpdate::Streams(batch) => {
-            views.apply_streams(&batch);
+            views.apply_streams(batch);
             Ok(None)
         }
     }
@@ -453,7 +415,7 @@ pub(crate) fn drain_update_burst(
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
                 *engine_done = true;
-                views.root.engine_disconnected();
+                views.workspace.root.engine_disconnected();
                 break;
             }
         }

@@ -1,6 +1,24 @@
 //! Claude plan-handoff validation and artifact lifecycle.
 
-use super::*;
+use super::failure::acp_error;
+use super::logging::RunLog;
+use super::permission::artifact_mutation_permission_option;
+use crate::config::EnsembleAgentConfig;
+use agent_client_protocol::schema::v1::{
+    ContentBlock, Error as AcpError, Meta, RequestPermissionRequest,
+    SessionUpdate as AcpSessionUpdate, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
+    ToolKind,
+};
+use anyhow::Context as _;
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::watch;
+use zevria_workflow::{AgentRunEvent, AgentStructuredPlan, CLAUDE_PLAN_HANDOFF_PLAN_ID};
+
+pub(super) const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
+
 use zevria_workflow::{NativePlanCapture, NativePlanSource};
 
 #[path = "artifact_snapshot.rs"]

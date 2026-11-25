@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{EnsembleEvent, PlanEvent, TurnEvent};
 
 fn pending_engine() -> (tempfile::TempDir, SessionEngine<ScriptedProvider>) {
     let directory = tempfile::tempdir().unwrap();
@@ -69,7 +70,7 @@ async fn pending_prompt_and_skill_acceptance_materialize_before_events_and_provi
                 collect_events(&mut receiver)
                     .await
                     .iter()
-                    .any(|event| matches!(event, SessionEvent::TurnStarted { .. }))
+                    .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Started { .. })))
             );
             let _ = engine.run_turn(&accepted, &events, &turn).await;
             assert!(path.is_file());
@@ -163,7 +164,7 @@ async fn rejected_and_pre_cancelled_input_and_guidance_never_materialize() {
         collect_events(&mut receiver)
             .await
             .iter()
-            .all(|event| !matches!(event, SessionEvent::TurnStarted { .. }))
+            .all(|event| !matches!(event, SessionEvent::Turn(TurnEvent::Started { .. })))
     );
     engine
         .handle_command(
@@ -230,7 +231,7 @@ async fn pending_orchestrated_acceptance_is_durable_before_dispatch_and_survives
         collect_events(&mut receiver)
             .await
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnStarted { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Started { .. })))
     );
     turn.cancellation().cancel();
     let _ = engine.run_turn(&accepted, &events, &turn).await;
@@ -275,7 +276,7 @@ async fn pending_plan_handoff_and_ensemble_start_publish_before_acceptance_effec
                 assert!(engine.provider.requests.lock().unwrap().is_empty());
                 assert!(matches!(
                     updates.as_slice(),
-                    [SessionEvent::TurnRejected { .. }]
+                    [SessionEvent::Turn(TurnEvent::Rejected { .. })]
                 ));
                 assert_eq!(std::fs::read(&path).unwrap(), b"other history");
                 assert!(!engine.conversation.ensure_durable().unwrap());
@@ -287,9 +288,9 @@ async fn pending_plan_handoff_and_ensemble_start_publish_before_acceptance_effec
                     engine.conversation.items()
                 );
                 assert!(updates.iter().any(|event| if ensemble {
-                    matches!(event, SessionEvent::EnsembleStarted { .. })
+                    matches!(event, SessionEvent::Ensemble(EnsembleEvent::Started { .. }))
                 } else {
-                    matches!(event, SessionEvent::PlanHandoffStarted { .. })
+                    matches!(event, SessionEvent::Plan(PlanEvent::HandoffStarted { .. }))
                 }));
                 assert!(!engine.conversation.has_real_user_prompt());
                 assert!(engine.conversation.items().iter().any(|item| if ensemble {

@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{ManagementEvent, TurnEvent};
 
 #[tokio::test]
 async fn explicit_a_b_a_switches_send_full_websocket_input_and_clear_all_continuations() {
@@ -313,13 +314,13 @@ async fn cancellation_racing_model_publication_is_terminal_without_hiding_commit
             let (events, mut updates) = session_event_channel(1);
             let marker_id = format!("model-publication-backpressure-{scope:?}-{kind}");
             events
-                .send(SessionEvent::SkillsResult {
+                .send(SessionEvent::Manage(ManagementEvent::SkillsResult {
                     request_id: marker_id.clone(),
-                    result: zevria_instructions::skill::SkillManagementResult::error(
+                    result: Box::new(zevria_instructions::skill::SkillManagementResult::error(
                         "marker",
                         "publication backpressure",
-                    ),
-                })
+                    )),
+                }))
                 .await
                 .unwrap();
             commands
@@ -366,26 +367,28 @@ async fn cancellation_racing_model_publication_is_terminal_without_hiding_commit
             );
             assert!(matches!(
                 updates.try_recv().unwrap(),
-                SessionUpdate::Lifecycle(SessionEvent::SkillsResult { request_id, .. }) if request_id == marker_id
+                SessionUpdate::Lifecycle(SessionEvent::Manage(ManagementEvent::SkillsResult { request_id, .. })) if request_id == marker_id
             ));
             assert!(
                 std::future::poll_fn(|cx| Poll::Ready(run.as_mut().poll(cx)))
                     .await
                     .is_pending()
             );
-            let SessionUpdate::Lifecycle(SessionEvent::ModelsResult { request_id, result }) =
-                updates.try_recv().unwrap()
+            let SessionUpdate::Lifecycle(SessionEvent::Manage(ManagementEvent::ModelsResult {
+                request_id,
+                result,
+            })) = updates.try_recv().unwrap()
             else {
                 panic!("model result")
             };
             assert_eq!(request_id, "selection");
             if kind == "changed" {
                 assert!(
-                    matches!(result, Result::Changed { scope: actual_scope, unchanged: false, .. } if actual_scope == scope),
+                    matches!(*result, Result::Changed { scope: actual_scope, unchanged: false, .. } if actual_scope == scope),
                     "a committed selection must not be hidden by cancellation"
                 );
             } else {
-                assert_eq!(result, Result::Cancelled);
+                assert_eq!(result, Box::new(Result::Cancelled));
             }
             // A cancelled preview must not block reopening the picker.
             commands
@@ -405,7 +408,7 @@ async fn cancellation_racing_model_publication_is_terminal_without_hiding_commit
                     .is_pending()
             );
             assert!(
-                matches!(updates.try_recv().unwrap(), SessionUpdate::Lifecycle(SessionEvent::ModelsResult { request_id, result: Result::Catalog { .. } }) if request_id == "reopened")
+                matches!(updates.try_recv().unwrap(), SessionUpdate::Lifecycle(SessionEvent::Manage(ManagementEvent::ModelsResult { request_id, result }))  if matches!(result.as_ref(), Result::Catalog { .. } if request_id == "reopened"))
             );
             commands
                 .send(SessionCommand::Control(
@@ -519,17 +522,19 @@ async fn maintenance_handles_cancellation_shutdown_and_never_queues_competing_ma
         let mut busy = false;
         while let Ok(update) = updates.try_recv() {
             match update {
-                SessionUpdate::Lifecycle(SessionEvent::ModelsResult { request_id, result })
-                    if request_id == "competitor" =>
-                {
-                    busy = matches!(result,Result::Rejected {code,..} if code=="busy")
+                SessionUpdate::Lifecycle(SessionEvent::Manage(ManagementEvent::ModelsResult {
+                    request_id,
+                    result,
+                })) if request_id == "competitor" => {
+                    busy = matches!(*result,Result::Rejected {code,..} if code=="busy")
                 }
-                SessionUpdate::Lifecycle(SessionEvent::ModelsResult { request_id, result })
-                    if request_id == "selection" =>
-                {
-                    cancelled = result == Result::Cancelled
+                SessionUpdate::Lifecycle(SessionEvent::Manage(ManagementEvent::ModelsResult {
+                    request_id,
+                    result,
+                })) if request_id == "selection" => {
+                    cancelled = result == Box::new(Result::Cancelled)
                 }
-                SessionUpdate::Lifecycle(SessionEvent::TurnStarted { .. }) => {
+                SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Started { .. })) => {
                     panic!("management is not a turn")
                 }
                 _ => {}

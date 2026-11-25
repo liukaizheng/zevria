@@ -36,13 +36,13 @@ impl WorkerReviewUiState {
         }
         if self.handoff.as_ref().is_some_and(|handoff| {
             handoff.target != target
-                || state.accepted_generation >= handoff.accepted_generation
-                || state.sealed
-                || state.abandoned
+                || state.inputs.accepted_generation >= handoff.accepted_generation
+                || state.is_sealed()
+                || state.is_abandoned()
         }) {
             self.handoff = None;
         }
-        let frozen = state.sealed || state.abandoned;
+        let frozen = state.is_sealed() || state.is_abandoned();
         if frozen {
             composer.cancel_paste();
         }
@@ -73,7 +73,7 @@ impl WorkerReviewUiState {
         let Some((_, state)) = &self.bound else {
             return false;
         };
-        if state.sealed || state.abandoned {
+        if state.is_sealed() || state.is_abandoned() {
             return false;
         }
         let urgent = matches!(
@@ -99,10 +99,12 @@ impl WorkerReviewUiState {
                         .is_some_and(|plan| &plan.revision == expected_revision)
             }
             WorkerControlAction::Unconfirm { expected_revision } => state
+                .proposals
                 .confirmation
                 .as_ref()
                 .is_some_and(|receipt| &receipt.revision == expected_revision),
             WorkerControlAction::Unbaseline { expected_revision } => state
+                .proposals
                 .baseline
                 .as_ref()
                 .is_some_and(|receipt| &receipt.revision == expected_revision),
@@ -133,7 +135,7 @@ impl WorkerReviewUiState {
             self.handoff = Some(SubmissionHandoff {
                 request_id: control.request_id.clone(),
                 target: target.clone(),
-                accepted_generation: state.accepted_generation.saturating_add(1),
+                accepted_generation: state.inputs.accepted_generation.saturating_add(1),
             });
         }
         let draft = composer.snapshot();

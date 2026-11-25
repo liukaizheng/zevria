@@ -12,6 +12,7 @@
 //! [`SessionEvent::SubtaskLaunched`], so its live pane opens before the report
 //! arrives.
 
+use crate::SubtaskEvent;
 use std::{
     collections::BTreeSet,
     fmt, fs,
@@ -290,12 +291,12 @@ impl SubtaskLauncher {
         // for a launch that failed.
         let _ = self
             .events
-            .send(SessionEvent::SubtaskLaunched {
+            .send(SessionEvent::Subtask(SubtaskEvent::Launched {
                 turn_id: turn.id,
                 call_id: call_id.into(),
                 entry_index,
-                descriptor: descriptor.clone(),
-            })
+                descriptor: Box::new(descriptor.clone()),
+            }))
             .await;
         Ok((
             SubtaskLaunchMetadata {
@@ -395,11 +396,11 @@ mod tests {
         let event = events.try_recv().expect("launched event");
         assert!(matches!(
             event,
-            crate::SessionUpdate::Lifecycle(SessionEvent::SubtaskLaunched {
+            crate::SessionUpdate::Lifecycle(SessionEvent::Subtask(SubtaskEvent::Launched {
                 call_id,
                 descriptor,
                 ..
-            })
+            }))
                 if call_id == "call-1"
                     && descriptor.id == metadata.id
                     && descriptor.title == "find config loading"

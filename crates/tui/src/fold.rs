@@ -5,7 +5,7 @@ use std::{
     ops::{AddAssign, RangeInclusive},
 };
 
-use crate::{
+use zevria_presentation::{
     blocks::{
         ConversationEntry, DiagnosticTone, PresentationBlock, PresentationBlockId,
         PresentationBlockKind, PresentationRole, PresentedTool, TURN_CANCELLED, WebActionKind,
@@ -419,6 +419,7 @@ impl FoldState {
         }
     }
 
+    #[cfg(test)]
     pub fn toggle(&mut self, key: FoldKey) {
         if self.contains(key) {
             self.unfold(key);
@@ -929,6 +930,7 @@ impl EntryFolds<'_> {
         })
     }
 
+    #[cfg(test)]
     pub fn is_block_folded(self, id: PresentationBlockId) -> bool {
         self.block_mode(id).is_folded()
     }
@@ -1061,6 +1063,7 @@ impl EntryFolds<'_> {
         None
     }
 
+    #[cfg(test)]
     pub fn is_item_folded(self, content_index: usize) -> bool {
         self.item_mode(content_index).is_folded()
     }
@@ -1116,9 +1119,9 @@ pub fn preview_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blocks::{BlockVisibility, DisplayTurn, NativeHeader};
-    use crate::conversation::{EnsembleHistory, ToolCallStatus};
     use rig_core::message::Message;
+    use zevria_presentation::blocks::{BlockVisibility, DisplayTurn, NativeHeader};
+    use zevria_presentation::conversation::{EnsembleHistory, ToolCallStatus};
 
     #[test]
     fn preview_uses_only_provider_text() {
@@ -1480,10 +1483,10 @@ mod tests {
 
     #[test]
     fn bulk_folds_set_final_answer_visibility_for_live_and_restored_turns() {
-        use crate::session_model::SessionModel;
         use zevria_content::ResponseAttemptOutcome;
         use zevria_foundation::{SessionMode, TurnId};
-        use zevria_session_api::SessionEvent as E;
+        use zevria_presentation::session_model::SessionModel;
+        use zevria_session_api::{SessionEvent as E, TurnEvent};
         use zevria_transcript::{IncompleteResponse, TranscriptItem, restored_attempt};
 
         let item = indexed_response();
@@ -1497,28 +1500,28 @@ mod tests {
             let mut trailing = attempt.clone();
             trailing.id = format!("interrupted-{i}");
             trailing.close_uncommitted(ResponseAttemptOutcome::Interrupted);
-            live.reduce(E::TurnStarted {
+            live.reduce(E::Turn(TurnEvent::Started {
                 turn_id,
                 message: prompt.clone(),
                 mode: SessionMode::Build,
-            });
-            live.reduce(E::ModelCallStarted { turn_id, call: 1 });
-            live.reduce(E::Intermediate {
+            }));
+            live.reduce(E::Turn(TurnEvent::ModelCallStarted { turn_id, call: 1 }));
+            live.reduce(E::Turn(TurnEvent::Intermediate {
                 turn_id,
                 message: tool_round(),
                 attempt_id: None,
-            });
-            live.reduce(E::ModelCallStarted { turn_id, call: 2 });
+            }));
+            live.reduce(E::Turn(TurnEvent::ModelCallStarted { turn_id, call: 2 }));
             attempt.touch();
-            live.reduce(E::ResponseAttemptUpdated {
+            live.reduce(E::Turn(TurnEvent::ResponseAttemptUpdated {
                 turn_id,
-                attempt: attempt.clone(),
-            });
-            live.reduce(E::TurnCompleted {
+                attempt: Box::new(attempt.clone()),
+            }));
+            live.reduce(E::Turn(TurnEvent::Completed {
                 turn_id,
                 message: canonical.clone(),
                 attempt_id: Some(attempt.id),
-            });
+            }));
             live.conversation.update_response_attempt(trailing.clone());
             live.conversation.push_error("trailing notice".into());
             live.conversation.push_compaction_divider();
@@ -1730,7 +1733,7 @@ mod tests {
             TranscriptItem::Message(Message::assistant("retained partial body")),
             TranscriptItem::Message(tool_round()),
             TranscriptItem::Error {
-                error: crate::blocks::TURN_CANCELLED.into(),
+                error: zevria_presentation::blocks::TURN_CANCELLED.into(),
             },
         ]);
         folds.fold_turns(&conversation, false, TurnFold::AllFinals);
@@ -1740,7 +1743,7 @@ mod tests {
 
     #[test]
     fn lossy_headerless_preview_is_provisional_until_completed() {
-        use crate::agent_transcript::AgentTranscriptReducer;
+        use zevria_presentation::agents::AgentTranscriptReducer;
         use zevria_workflow::{AgentRunEvent, AgentRunStatus};
         let mut reducer = AgentTranscriptReducer::default();
         let mut conversation = ConversationState::default();

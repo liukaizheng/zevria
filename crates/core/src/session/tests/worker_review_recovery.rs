@@ -68,9 +68,9 @@ impl EnsembleLauncher for RecoveryLauncher {
         let (tx, rx) = mpsc::channel(32);
         for state in states {
             // Mirror the same root/actor boundary used by the real supervisor.
-            if let Some(active) = &previous.state.active
-                && state.active.is_none()
-                && state.settled_generation >= active.generation
+            if let Some(active) = &previous.state.inputs.active
+                && state.inputs.active.is_none()
+                && state.inputs.settled_generation >= active.generation
             {
                 writer.append(&AgentRunTranscriptRecord::Event {
                     event: AgentRunEvent::Review {
@@ -80,11 +80,11 @@ impl EnsembleLauncher for RecoveryLauncher {
                     },
                 })?;
             }
-            for input in &state.pending {
+            for input in &state.inputs.pending {
                 self.delivered.lock().unwrap().push(input.clone());
                 let dispatched = WorkerReviewEvent::Dispatched {
                     generation: input.generation,
-                    attempt: state.attempt + 1,
+                    attempt: state.connection.attempt + 1,
                 };
                 for event in [
                     AgentRunEvent::Review {
@@ -204,6 +204,7 @@ fn recovery_fixture(
     let mut evidence = journal.state.evidence.clone();
     evidence.plan = journal
         .state
+        .proposals
         .candidate
         .as_ref()
         .map(|snapshot| snapshot.plan.clone());
@@ -395,11 +396,15 @@ async fn recovered_feedback_is_queued_once_and_durable_dispatch_is_never_resent(
         );
         let restored = launcher.restored.lock().unwrap();
         assert_eq!(restored.len(), 2);
-        assert!(restored[1].pending.is_empty());
-        assert!(restored[1].active.is_none());
-        assert_eq!(restored[1].settled_generation, 2);
+        assert!(restored[1].inputs.pending.is_empty());
+        assert!(restored[1].inputs.active.is_none());
+        assert_eq!(restored[1].inputs.settled_generation, 2);
         assert!(restored[1].eligible_snapshot().is_some());
-        assert!(restored.iter().all(|state| state.confirmation.is_none()));
+        assert!(
+            restored
+                .iter()
+                .all(|state| state.proposals.confirmation.is_none())
+        );
         let records = zevria_transcript::load_agent_run(&path).unwrap();
         assert_eq!(records.iter().filter(|record| matches!(record, AgentRunTranscriptRecord::Event { event: AgentRunEvent::Prompt { text, .. } } if text == "accepted feedback")).count(), 1);
         assert!(!engine.conversation.items().iter().any(|item| matches!(

@@ -18,30 +18,32 @@ use crate::{
 use super::continuation::Transmission;
 use super::continuation::full_transmission;
 use super::continuation::select_transmission;
-use super::driver::{DriverContext, DriverFailure, DriverTransport, ResponseDriver};
+use super::driver::{DriverContext, DriverTransport, ResponseDriver, run_with_attempt_stream};
 use super::errors::WebSocketDisconnected;
 use super::prepare::PreparedRequest;
+use crate::recovery::AttemptError;
 pub(super) async fn send_prepared_request(
     prepared: &PreparedRequest,
     transmission: &Transmission<'_>,
     openai: &mut OpenAiProvider,
     send_timeout: std::time::Duration,
-) -> anyhow::Result<()> {
+) -> Result<(), AttemptError> {
     let payload = serde_json::to_string(&super::serialize::RequestBody::websocket(
         prepared,
         transmission.input,
         transmission.previous_response_id.as_deref(),
-    )?)?;
+    )?)
+    .map_err(CompletionError::from)?;
 
     tracing::info!(
         transport = OpenAiTransport::WebSocket.as_str(),
         mode = transmission.mode.as_str(),
-        socket_generation = openai.ws.socket_generation,
+        socket_generation = openai.responses_transport.ws.socket_generation,
         history_message_count = prepared.history_message_count,
         complete_input_item_count = prepared.full_input.len(),
         transmitted_input_item_count = transmission.input.len(),
         replay_source = prepared.replay_source.as_str(),
-        websocket_connection_request_id = ?openai.ws.websocket_connection_request_id.as_deref().map(log_identifier),
+        websocket_connection_request_id = ?openai.responses_transport.ws.websocket_connection_request_id.as_deref().map(log_identifier),
         prompt_cache_key_fingerprint = ?openai.transmitted_prompt_cache_key_fingerprint(),
         "OpenAI websocket request"
     );
@@ -56,28 +58,37 @@ pub(super) async fn send_prepared_request(
     );
     match tokio::time::timeout(
         send_timeout,
-        openai.ws.session.send(WebSocketMessage::text(payload)),
+        openai
+            .responses_transport
+            .ws
+            .session
+            .send(WebSocketMessage::text(payload)),
     )
     .await
     {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             openai
+                .responses_transport
                 .ws
                 .session
                 .terminate(OpenAiWebSocketTerminalCategory::SendError);
-            return Err(
-                WebSocketDisconnected::new("sending the request", error, "send_error").into(),
-            );
+            return Err(WebSocketDisconnected::new(
+                "sending the request",
+                error,
+                OpenAiWebSocketTerminalCategory::SendError,
+            )
+            .into());
         }
         Err(_) => {
             openai
+                .responses_transport
                 .ws
                 .session
                 .terminate(OpenAiWebSocketTerminalCategory::SendTimeout);
             return Err(WebSocketDisconnected::without_source(
                 "waiting for the request send to be acknowledged",
-                OpenAiWebSocketTerminalCategory::SendTimeout.as_str(),
+                OpenAiWebSocketTerminalCategory::SendTimeout,
             )
             .into());
         }
@@ -91,7 +102,7 @@ pub(super) async fn send_prepared_request(
 /// or a successful reconnect replaces the socket generation.
 pub(super) fn abandon_attempt(openai: &mut OpenAiProvider, state: &mut AttemptState) {
     state.reset_result();
-    openai.ws.pending_done_response_id = None;
+    openai.responses_transport.ws.pending_done_response_id = None;
 }
 
 pub(super) async fn run_model_request(
@@ -101,29 +112,11 @@ pub(super) async fn run_model_request(
     progress: &ProgressReporter,
     policy: &RecoveryPolicy,
     attempt_progress: AttemptProgress<'_>,
-) -> anyhow::Result<ModelResponse> {
-    state.attempt = progress
-        .records_attempts()
-        .then(|| crate::attempt::AttemptStream::new(openai.profile.clone(), progress));
-    let result =
-        run_model_request_inner(prepared, openai, state, progress, policy, attempt_progress).await;
-    state.flush_stream(progress);
-    let result = match result {
-        Ok(response) => response.with_attempt_id(
-            state
-                .attempt
-                .as_ref()
-                .map(|attempt| attempt.id().to_owned()),
-        ),
-        Err(error) => {
-            if let Some(attempt) = &mut state.attempt {
-                attempt.close_failed(progress).await?;
-            }
-            Err(error)
-        }
-    };
-    Diagnostics::finish(prepared, openai, result.as_ref().ok());
-    result
+) -> Result<ModelResponse, AttemptError> {
+    run_with_attempt_stream(prepared, openai, state, progress, async |openai, state| {
+        run_model_request_inner(prepared, openai, state, progress, policy, attempt_progress).await
+    })
+    .await
 }
 
 pub(super) async fn run_model_request_inner(
@@ -133,19 +126,25 @@ pub(super) async fn run_model_request_inner(
     progress: &ProgressReporter,
     policy: &RecoveryPolicy,
     attempt_progress: AttemptProgress<'_>,
-) -> anyhow::Result<ModelResponse> {
+) -> Result<ModelResponse, AttemptError> {
     state.reset_result();
     let mut telemetry = crate::telemetry::RequestTelemetry::new();
     // Remember the prior terminal even if selecting this transmission must
     // invalidate continuation. Late duplicate terminals belong to that old
     // attempt, not to the new search trail or answer accumulator.
-    let prior_terminal_id = openai.ws.pending_done_response_id.clone().or_else(|| {
-        openai
-            .ws
-            .continuation
-            .as_ref()
-            .map(|continuation| continuation.response_id.clone())
-    });
+    let prior_terminal_id = openai
+        .responses_transport
+        .ws
+        .pending_done_response_id
+        .clone()
+        .or_else(|| {
+            openai
+                .responses_transport
+                .ws
+                .continuation
+                .as_ref()
+                .map(|continuation| continuation.response_id.clone())
+        });
 
     let transmission = if std::mem::take(&mut state.stale_replay) {
         full_transmission(prepared)
@@ -153,7 +152,7 @@ pub(super) async fn run_model_request_inner(
         select_transmission(prepared, openai)
     };
     let request_mode = transmission.mode;
-    let socket_generation = openai.ws.socket_generation;
+    let socket_generation = openai.responses_transport.ws.socket_generation;
     let previous_response_id = transmission.previous_response_id.clone();
     if let Err(error) =
         send_prepared_request(prepared, &transmission, openai, policy.send_timeout).await
@@ -182,16 +181,23 @@ pub(super) async fn run_model_request_inner(
 
     loop {
         let inbound = match state
-            .next_event(clock.next(openai.ws.session.next()), progress)
+            .next_event(
+                clock.next(openai.responses_transport.ws.session.next()),
+                progress,
+            )
             .await
         {
             Ok(inbound) => inbound,
             Err(error) => {
                 openai
+                    .responses_transport
                     .ws
                     .session
                     .terminate(OpenAiWebSocketTerminalCategory::ResponseIdleTimeout);
-                openai.ws.invalidate_continuation("response_idle_timeout");
+                openai
+                    .responses_transport
+                    .ws
+                    .invalidate_continuation("response_idle_timeout");
                 abandon_attempt(openai, state);
                 return Err(error.into());
             }
@@ -199,6 +205,7 @@ pub(super) async fn run_model_request_inner(
 
         let Some(inbound) = inbound else {
             let error = openai
+                .responses_transport
                 .ws
                 .session
                 .terminal_status()
@@ -208,7 +215,7 @@ pub(super) async fn run_model_request_inner(
                 .unwrap_or_else(|| {
                     WebSocketDisconnected::without_source(
                         "waiting for the turn to finish",
-                        "pump_stopped",
+                        OpenAiWebSocketTerminalCategory::PumpStopped,
                     )
                 });
             abandon_attempt(openai, state);
@@ -219,12 +226,13 @@ pub(super) async fn run_model_request_inner(
             OpenAiWebSocketInbound::Message(message) => message,
             OpenAiWebSocketInbound::Error(error) => {
                 let terminal_category = openai
+                    .responses_transport
                     .ws
                     .session
                     .terminal_status()
-                    .map(OpenAiWebSocketTerminalCategory::as_str)
-                    .unwrap_or(OpenAiWebSocketTerminalCategory::ReadError.as_str());
+                    .unwrap_or(OpenAiWebSocketTerminalCategory::ReadError);
                 openai
+                    .responses_transport
                     .ws
                     .session
                     .terminate(OpenAiWebSocketTerminalCategory::ReadError);
@@ -244,6 +252,7 @@ pub(super) async fn run_model_request_inner(
                 .map(|frame| frame.reason.to_string())
                 .unwrap_or_default();
             openai
+                .responses_transport
                 .ws
                 .session
                 .terminate(OpenAiWebSocketTerminalCategory::CloseFrame);
@@ -251,13 +260,13 @@ pub(super) async fn run_model_request_inner(
             let error = if reason.is_empty() {
                 WebSocketDisconnected::without_source(
                     "reading the response (the server closed the connection)",
-                    OpenAiWebSocketTerminalCategory::CloseFrame.as_str(),
+                    OpenAiWebSocketTerminalCategory::CloseFrame,
                 )
             } else {
                 WebSocketDisconnected::from_server_reason(
                     "reading the response (the server closed the connection)",
                     reason,
-                    OpenAiWebSocketTerminalCategory::CloseFrame.as_str(),
+                    OpenAiWebSocketTerminalCategory::CloseFrame,
                 )
             };
             return Err(error.into());
@@ -268,7 +277,7 @@ pub(super) async fn run_model_request_inner(
             Ok(None) => continue,
             Err(error) => {
                 abandon_attempt(openai, state);
-                return Err(error);
+                return Err(error.into());
             }
         };
 
@@ -290,8 +299,7 @@ pub(super) async fn run_model_request_inner(
                 raw,
                 message.len(),
             )
-            .await
-            .map_err(DriverFailure::into_websocket)?
+            .await?
         {
             return Ok(response);
         }

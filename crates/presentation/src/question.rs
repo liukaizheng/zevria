@@ -15,10 +15,10 @@ pub struct AnswerDraft {
     choice_notes: BTreeMap<usize, String>,
 }
 #[derive(Debug)]
-pub struct QuestionForm {
+pub struct QuestionForm<A = Vec<AnswerDraft>> {
     pub turn_id: TurnId,
     pub request: QuestionRequest,
-    pub answers: Vec<AnswerDraft>,
+    pub answers: A,
     pub pending: bool,
     pub error: Option<String>,
 }
@@ -247,5 +247,50 @@ impl QuestionForm {
             "this question cannot be dismissed"
         );
         Ok(QuestionResponse::Dismissed)
+    }
+}
+
+/// Confirmed answers in prompt order. A stepwise editor owns its text and
+/// cursor drafts separately; rewinding replaces a confirmed slot in place.
+#[derive(Debug, Default)]
+pub struct StepwiseAnswers(Vec<QuestionAnswer>);
+
+impl QuestionForm<StepwiseAnswers> {
+    pub fn stepwise(turn_id: TurnId, request: QuestionRequest) -> Self {
+        Self {
+            turn_id,
+            request,
+            answers: StepwiseAnswers::default(),
+            pending: false,
+            error: None,
+        }
+    }
+
+    pub fn answer_at(&self, index: usize) -> Option<&QuestionAnswer> {
+        self.answers.0.get(index)
+    }
+
+    /// Commit the editor's accepted value, using the shared request identity
+    /// and prompt order to assemble the terminal response.
+    pub fn commit_step(
+        &mut self,
+        index: usize,
+        answer: Option<QuestionAnswerValue>,
+        note: Option<String>,
+    ) -> Option<QuestionResponse> {
+        let confirmed = &mut self.answers.0;
+        let answer = QuestionAnswer {
+            id: self.request.questions[index].id.clone(),
+            answer,
+            note,
+        };
+        if index == confirmed.len() {
+            confirmed.push(answer);
+        } else {
+            confirmed[index] = answer;
+        }
+        (index + 1 == self.request.questions.len()).then(|| QuestionResponse::Answered {
+            answers: confirmed.clone(),
+        })
     }
 }

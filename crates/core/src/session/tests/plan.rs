@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{PlanEvent, TurnEvent};
 
 #[tokio::test]
 async fn restoration_rejects_malformed_plan_records_in_tail_or_prefix() {
@@ -178,7 +179,7 @@ async fn plan_recovery_materializes_an_accepted_candidate_after_a_durable_final_
         collect_events(&mut receiver)
             .await
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnRecovered { turn_id, .. } if *turn_id == TurnId::new(406)))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Recovered { turn_id, .. }) if *turn_id == TurnId::new(406)))
     );
 }
 
@@ -416,7 +417,7 @@ async fn successive_plan_and_build_submissions_resolve_fresh_policies() {
         .await
         .into_iter()
         .filter_map(|event| match event {
-            SessionEvent::TurnStarted { mode, .. } => Some(mode),
+            SessionEvent::Turn(TurnEvent::Started { mode, .. }) => Some(mode),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -487,10 +488,10 @@ async fn plan_policy_allows_command_and_is_fixed_across_continuations() {
     let events = collect_events(&mut receiver).await;
     assert!(matches!(
         events.first(),
-        Some(SessionEvent::TurnStarted {
+        Some(SessionEvent::Turn(TurnEvent::Started {
             mode: SessionMode::Plan,
             ..
-        })
+        }))
     ));
 }
 
@@ -554,7 +555,7 @@ async fn plan_policy_denies_file_tools_before_dispatch_and_preserves_correlation
     let metadata = events
         .iter()
         .find_map(|event| match event {
-            SessionEvent::ToolResults { metadata, .. } => Some(metadata),
+            SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) => Some(metadata),
             _ => None,
         })
         .expect("denied tool-results event");
@@ -638,14 +639,14 @@ async fn ordinary_plan_final_remains_planning_without_approval() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
     );
     assert!(!events.iter().any(|event| matches!(
         event,
-        SessionEvent::PlanStateChanged {
-            state: PlanWorkflowState::Ready { .. }
-        }
-    )));
+        SessionEvent::Plan(PlanEvent::StateChanged {
+            state
+        })
+     if matches!(state.as_ref(), PlanWorkflowState::Ready { .. }))));
 }
 
 #[tokio::test]
@@ -786,14 +787,14 @@ async fn build_turns_and_unconfigured_engines_never_write_plans() {
     let events = collect_events(&mut receiver).await;
     assert!(events.iter().all(|event| !matches!(
         event,
-        SessionEvent::PlanStateChanged {
-            state: PlanWorkflowState::Ready { .. }
-        }
-    )));
+        SessionEvent::Plan(PlanEvent::StateChanged {
+            state
+        })
+     if matches!(state.as_ref(), PlanWorkflowState::Ready { .. }))));
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .filter(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
             .count(),
         2
     );
@@ -851,17 +852,17 @@ async fn plan_projection_failures_preserve_ready_approval() {
     assert_eq!(artifact.markdown, markdown);
     let completed = emitted
         .iter()
-        .position(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+        .position(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
         .unwrap();
     let ready = emitted
         .iter()
         .position(|event| {
             matches!(
                 event,
-                SessionEvent::PlanStateChanged {
-                    state: PlanWorkflowState::Ready { .. }
-                }
-            )
+                SessionEvent::Plan(PlanEvent::StateChanged {
+                    state
+                })
+             if matches!(state.as_ref(), PlanWorkflowState::Ready { .. }))
         })
         .unwrap();
     let warning = emitted
@@ -869,7 +870,7 @@ async fn plan_projection_failures_preserve_ready_approval() {
         .position(|event| {
             matches!(
                 event,
-                SessionEvent::PlanProjectionWarning { draft: None, .. }
+                SessionEvent::Plan(PlanEvent::ProjectionWarning { draft: None, .. })
             )
         })
         .unwrap();
@@ -898,7 +899,7 @@ async fn plan_projection_failures_preserve_ready_approval() {
             .await
             .iter()
             .any(|event| matches!(event,
-                SessionEvent::FreshPlanHandoffRequested { handoff } if handoff == &expected_handoff
+                SessionEvent::Plan(PlanEvent::FreshHandoffRequested { handoff }) if **handoff == expected_handoff
             )),
         "approval still uses the canonical transcript artifact"
     );
@@ -949,14 +950,14 @@ async fn provider_failure_after_submit_plan_leaves_workflow_planning() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnFailed { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Failed { .. })))
     );
     assert!(!events.iter().any(|event| matches!(
         event,
-        SessionEvent::PlanStateChanged {
-            state: PlanWorkflowState::Ready { .. }
-        }
-    )));
+        SessionEvent::Plan(PlanEvent::StateChanged {
+            state
+        })
+     if matches!(state.as_ref(), PlanWorkflowState::Ready { .. }))));
 }
 
 #[tokio::test]
@@ -1003,8 +1004,8 @@ async fn cancellation_after_submit_plan_acceptance_never_commits_ready() {
                 .expect("candidate acceptance should arrive promptly")
                 .expect("event channel remains open");
         match event {
-            SessionEvent::TurnStarted { turn_id: id, .. } => turn_id = Some(id),
-            SessionEvent::ToolResults { metadata, .. }
+            SessionEvent::Turn(TurnEvent::Started { turn_id: id, .. }) => turn_id = Some(id),
+            SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. })
                 if metadata.iter().any(|entry| {
                     entry.tool_name == SUBMIT_PLAN_TOOL_NAME
                         && entry.outcome == ToolCallOutcome::Success
@@ -1029,7 +1030,8 @@ async fn cancellation_after_submit_plan_acceptance_never_commits_ready() {
                 .await
                 .expect("cancellation should arrive promptly")
                 .expect("event channel remains open");
-        if matches!(event, SessionEvent::TurnCancelled { turn_id: id } if id == turn_id) {
+        if matches!(event, SessionEvent::Turn(TurnEvent::Cancelled { turn_id: id }) if id == turn_id)
+        {
             break;
         }
     }
@@ -1119,7 +1121,7 @@ async fn duplicate_plan_submission_is_denied_after_first_acceptance() {
         .await
         .into_iter()
         .find_map(|event| match event {
-            SessionEvent::ToolResults { metadata, .. } => Some(
+            SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) => Some(
                 metadata
                     .into_iter()
                     .map(|entry| entry.outcome)
@@ -1198,7 +1200,7 @@ async fn stale_resolution_is_rejected_and_fresh_handoff_contains_exact_artifact(
         .await
         .into_iter()
         .find_map(|event| match event {
-            SessionEvent::FreshPlanHandoffRequested { handoff } => Some(handoff),
+            SessionEvent::Plan(PlanEvent::FreshHandoffRequested { handoff }) => Some(handoff),
             _ => None,
         })
         .expect("fresh handoff");
@@ -1249,15 +1251,15 @@ async fn current_resolution_persists_semantic_handoff_then_runs_build() {
     let events = collect_events(&mut receiver).await;
     let handoff_index = events
         .iter()
-        .position(|event| matches!(event, SessionEvent::PlanHandoffStarted { .. }))
+        .position(|event| matches!(event, SessionEvent::Plan(PlanEvent::HandoffStarted { .. })))
         .expect("handoff event");
     let completed_index = events
         .iter()
-        .position(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+        .position(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
         .expect("Build completion");
     assert!(handoff_index < completed_index);
     let handoff = events.iter().find_map(|event| match event {
-        SessionEvent::PlanHandoffStarted { handoff, .. } => Some(handoff),
+        SessionEvent::Plan(PlanEvent::HandoffStarted { handoff, .. }) => Some(handoff),
         _ => None,
     });
     assert_eq!(handoff.map(|handoff| &handoff.artifact), Some(&artifact));
@@ -1325,7 +1327,7 @@ async fn retained_resolution_keeps_revision_context_and_uses_the_submitted_artif
     let handoff = emitted
         .iter()
         .find_map(|event| match event {
-            SessionEvent::PlanHandoffStarted { handoff, .. } => Some(handoff),
+            SessionEvent::Plan(PlanEvent::HandoffStarted { handoff, .. }) => Some(handoff),
             _ => None,
         })
         .expect("semantic handoff event");
@@ -1414,7 +1416,7 @@ async fn retained_fresh_resolution_is_versioned_and_revision_cannot_repeat() {
         .await
         .into_iter()
         .find_map(|event| match event {
-            SessionEvent::FreshPlanHandoffRequested { handoff } => Some(handoff),
+            SessionEvent::Plan(PlanEvent::FreshHandoffRequested { handoff }) => Some(handoff),
             _ => None,
         })
         .expect("fresh handoff");
@@ -1458,7 +1460,7 @@ async fn fresh_session_starts_only_from_a_canonical_typed_handoff() {
             if stored.artifact == artifact
     ));
     assert!(collect_events(&mut receiver).await.iter().any(|event| {
-        matches!(event, SessionEvent::PlanHandoffStarted { handoff: live, .. }
+        matches!(event, SessionEvent::Plan(PlanEvent::HandoffStarted { handoff: live, .. })
             if live.artifact == artifact)
     }));
 
@@ -1699,7 +1701,7 @@ async fn atomic_revision_feedback_edits_retain_the_planning_prefix() {
             collect_events(&mut receiver)
                 .await
                 .iter()
-                .any(|event| matches!(event, SessionEvent::TurnRejected { .. }))
+                .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Rejected { .. })))
         );
         let revision = if is_skill {
             TurnCommand::RevisePlanWithSkill {
@@ -1758,15 +1760,15 @@ async fn atomic_revision_feedback_edits_retain_the_planning_prefix() {
         let updates = collect_events(&mut receiver).await;
         assert!(updates.iter().any(|event| matches!(
             event,
-            SessionEvent::TurnStarted {
+            SessionEvent::Turn(TurnEvent::Started {
                 mode: SessionMode::Plan,
                 ..
-            }
+            })
         )));
         assert!(
             !updates
                 .iter()
-                .any(|event| matches!(event, SessionEvent::TurnRejected { .. }))
+                .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Rejected { .. })))
         );
     }
 }

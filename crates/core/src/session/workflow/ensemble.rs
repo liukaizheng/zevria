@@ -29,6 +29,7 @@ use zevria_session_api::EnsembleLaunchRequest;
 use zevria_session_api::event::{ProgressReporter, SessionEvent, SessionEventSender};
 use zevria_session_api::provider::ModelProvider;
 use zevria_session_api::turn::TurnContext;
+use zevria_session_api::{EnsembleEvent, TurnEvent};
 use zevria_transcript::SessionReplayError;
 use zevria_transcript::transcript::TranscriptItem;
 use zevria_workflow::ensemble::{
@@ -464,11 +465,11 @@ impl<P: ModelProvider> SessionEngine<P> {
             resumed: false,
         });
         let _ = events
-            .send(SessionEvent::EnsembleStarted {
+            .send(SessionEvent::Ensemble(EnsembleEvent::Started {
                 turn_id: turn.id,
-                start: start.clone(),
+                start: Box::new(start.clone()),
                 resumed: false,
-            })
+            }))
             .await;
         self.emit_plan_state_if_changed(previous, events).await?;
         Ok((accepted, start))
@@ -506,11 +507,11 @@ impl<P: ModelProvider> SessionEngine<P> {
             resumed: true,
         });
         let _ = events
-            .send(SessionEvent::EnsembleStarted {
+            .send(SessionEvent::Ensemble(EnsembleEvent::Started {
                 turn_id: turn.id,
-                start: recovery.start.clone(),
+                start: Box::new(recovery.start.clone()),
                 resumed: true,
-            })
+            }))
             .await;
         let outcome = self
             .resume_accepted_ensemble(&accepted, recovery, events, turn)
@@ -536,11 +537,11 @@ impl<P: ModelProvider> SessionEngine<P> {
                 }
             }
             let _ = events
-                .send(SessionEvent::EnsembleReportsReady {
+                .send(SessionEvent::Ensemble(EnsembleEvent::ReportsReady {
                     turn_id: turn.id,
                     run_id: recovery.start.run_id.clone(),
                     agents,
-                })
+                }))
                 .await;
             if recovery.start.publishes_confirmed_worker_plan() {
                 return self
@@ -594,11 +595,11 @@ impl<P: ModelProvider> SessionEngine<P> {
         };
         for outcome in &outcomes {
             let _ = events
-                .send(SessionEvent::AgentRunFinished {
+                .send(SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished {
                     turn_id: turn.id,
                     ensemble_run_id: start.run_id.clone(),
-                    outcome: outcome.clone(),
-                })
+                    outcome: Box::new(outcome.clone()),
+                }))
                 .await;
         }
         if turn.is_cancelled() {
@@ -658,11 +659,11 @@ impl<P: ModelProvider> SessionEngine<P> {
             return Err(error.context("failed to persist ensemble reports").into());
         }
         let _ = events
-            .send(SessionEvent::EnsembleReportsReady {
+            .send(SessionEvent::Ensemble(EnsembleEvent::ReportsReady {
                 turn_id: turn.id,
                 run_id: start.run_id.clone(),
                 agents: summaries,
-            })
+            }))
             .await;
         if start.publishes_confirmed_worker_plan() {
             return self
@@ -700,7 +701,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 publication: None,
                 retained: Vec::new(),
                 usage: None,
-                terminal: SessionEvent::TurnRecovered { turn_id: turn.id },
+                terminal: SessionEvent::Turn(TurnEvent::Recovered { turn_id: turn.id }),
                 defer_publication: true,
             }
         } else {
@@ -749,11 +750,11 @@ impl<P: ModelProvider> SessionEngine<P> {
                 publication: Some((record, artifact)),
                 retained: vec![TranscriptItem::Message(message.clone())],
                 usage: None,
-                terminal: SessionEvent::TurnCompleted {
+                terminal: SessionEvent::Turn(TurnEvent::Completed {
                     turn_id: turn.id,
                     attempt_id: None,
                     message,
-                },
+                }),
                 defer_publication: true,
             }
         };

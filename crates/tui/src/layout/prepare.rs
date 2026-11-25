@@ -3,6 +3,7 @@
 use super::EntrySelection;
 use crate::app::{EnsembleHistory, EntryFolds, ToolCallState, ToolCallStatus};
 use crate::chrome::style_selected_line;
+use crate::fold::{ActivityDigest, BlockFold, FoldMode, SpanSummary};
 use crate::presentation::{
     AcpToolPresentation, DiagnosticTone, LaunchBatchNotice, ListMarker, NativeHeader,
     PresentationBlock, PresentationBlockKind, PresentationRole, PresentedChecklist, PresentedPlan,
@@ -28,7 +29,6 @@ use zevria_foundation::{
     QuestionResponse, READ_IMAGE_TOOL_NAME, READ_PLAN_TOOL_NAME, RECONCILE_REPORTS_TOOL_NAME,
     SKILL_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME, TASK_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
 };
-use zevria_presentation::fold::{ActivityDigest, BlockFold, FoldMode, SpanSummary};
 use zevria_workflow::{AgentRunStatus, EnsembleWorkflow, PlanArtifact, PlanHandoff};
 
 use zevria_foundation::{COMMAND_TOOL_NAME, DELETE_TOOL_NAME, EDIT_TOOL_NAME, WRITE_TOOL_NAME};

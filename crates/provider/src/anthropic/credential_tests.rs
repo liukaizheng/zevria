@@ -1,15 +1,16 @@
 use super::*;
 use crate::credential::test_support::{KeyHelper, retry_events};
 use std::time::Duration;
+use zevria_session_api::TurnEvent;
 
 fn command_profile(url: String, auth: AnthropicAuth, source: ApiKeySource) -> ResolvedModelProfile {
     let mut profile = profile(url);
     let ProfileProtocol::Anthropic { endpoint, .. } = &mut profile.protocol else {
         unreachable!()
     };
-    endpoint.auth = auth;
-    endpoint.api_key = source;
-    endpoint.network.max_attempts = 1;
+    std::sync::Arc::make_mut(endpoint).auth = auth;
+    std::sync::Arc::make_mut(endpoint).api_key = source;
+    std::sync::Arc::make_mut(endpoint).network.max_attempts = 1;
     profile
 }
 
@@ -72,7 +73,7 @@ async fn command_credentials_refresh_in_both_auth_modes_with_identical_bodies() 
         while let Ok(event) = receiver.try_recv() {
             assert!(!matches!(
                 event,
-                SessionUpdate::Lifecycle(SessionEvent::TurnRetrying { .. })
+                SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Retrying { .. }))
             ));
         }
         server.await.unwrap();
@@ -91,7 +92,9 @@ async fn command_count_tokens_refresh_excludes_helper_time_from_deadline() {
     let ProfileProtocol::Anthropic { endpoint, .. } = &mut profile.protocol else {
         unreachable!()
     };
-    endpoint.input_token_count.request_timeout_seconds = 1;
+    std::sync::Arc::make_mut(endpoint)
+        .input_token_count
+        .request_timeout_seconds = 1;
     let server = tokio::spawn(async move {
         let mut bodies = vec![];
         for (index, status) in ["401 Unauthorized", "200 OK"].into_iter().enumerate() {

@@ -2,6 +2,7 @@ use super::*;
 use zevria_acp::{ExecutionProfile, SessionRuntimeFactory as _, SessionStart, StartSessionRequest};
 use zevria_session_api::ManagementCommand;
 use zevria_session_api::ModeSelectionResult;
+use zevria_session_api::{JobEvent, ManagementEvent, TurnEvent};
 use zevria_workflow::PlanRecord;
 use zevria_workflow::PlanWorkflowState;
 
@@ -23,7 +24,9 @@ async fn select_mode(
             let update = events.recv().await.unwrap();
             if !matches!(
                 update,
-                SessionUpdate::Lifecycle(SessionEvent::JobContinuationChanged { mode: None })
+                SessionUpdate::Lifecycle(SessionEvent::Job(JobEvent::ContinuationChanged {
+                    mode: None
+                }))
             ) {
                 break update;
             }
@@ -33,17 +36,19 @@ async fn select_mode(
     .unwrap();
     assert_eq!(
         update,
-        SessionUpdate::Lifecycle(SessionEvent::ModeResult {
+        SessionUpdate::Lifecycle(SessionEvent::Manage(ManagementEvent::ModeResult {
             request_id,
             result: ModeSelectionResult::Accepted { mode, changed },
-        }),
+        })),
         "selection must acknowledge management without turn, workflow, or provider events"
     );
     while let Ok(update) = events.try_recv() {
         assert!(
             matches!(
                 update,
-                SessionUpdate::Lifecycle(SessionEvent::JobContinuationChanged { mode: None })
+                SessionUpdate::Lifecycle(SessionEvent::Job(JobEvent::ContinuationChanged {
+                    mode: None
+                }))
             ),
             "mode management must not allocate turns or call a provider: {update:?}"
         );
@@ -72,7 +77,7 @@ fn assert_tui_restoration_uses_selected_mode(restoration: &runtime::RestoredSess
     );
     assert!(matches!(
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))),
-        Some(UiAction::Submit { mode, .. }) if mode == restoration.selected_mode
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(zevria_session_api::TurnCommand::Submit { mode, .. }))) if mode == restoration.selected_mode
     ));
 }
 
@@ -323,13 +328,14 @@ async fn production_mode_selection_does_not_allocate_turns_or_call_the_provider(
         .unwrap();
     loop {
         match event(&mut events).await {
-            SessionEvent::TurnStarted { turn_id, mode, .. } => {
+            SessionEvent::Turn(TurnEvent::Started { turn_id, mode, .. }) => {
                 assert_eq!(turn_id, zevria_foundation::TurnId::new(1));
                 assert_eq!(mode, SessionMode::Build);
                 assert!(path.is_file(), "acceptance must follow publication");
                 break;
             }
-            SessionEvent::TurnFailed { error, .. } | SessionEvent::TurnRejected { error, .. } => {
+            SessionEvent::Turn(TurnEvent::Failed { error, .. })
+            | SessionEvent::Turn(TurnEvent::Rejected { error, .. }) => {
                 panic!("first real prompt failed: {error}");
             }
             _ => {}

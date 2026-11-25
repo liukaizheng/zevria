@@ -30,7 +30,6 @@ async fn runtime(profile: &ResolvedModelProfile) -> OpenAiProvider {
         "session",
         "stable-cache-key",
     )
-    .await
     .unwrap()
 }
 async fn preconnect(profile: &ResolvedModelProfile) -> anyhow::Result<OpenAiProvider> {
@@ -380,8 +379,8 @@ async fn websocket_handshake_refresh_and_key_expiry_keep_the_socket_incremental(
         2,
         "healthy socket must not acquire another key"
     );
-    assert_eq!(provider.transport, OpenAiTransport::WebSocket);
-    assert_eq!(provider.ws.socket_generation, 0);
+    assert_eq!(provider.transport(), OpenAiTransport::WebSocket);
+    assert_eq!(provider.responses_transport.ws.socket_generation, 0);
     assert_no_retry(&mut receiver);
     server.await.unwrap();
 }
@@ -420,7 +419,7 @@ async fn second_websocket_401_is_terminal_without_fallback() {
         .unwrap_err();
     assert!(format!("{error:#}").contains("rejected after a refresh"));
     assert_eq!(helper.runs(), 2);
-    assert_eq!(provider.transport, OpenAiTransport::WebSocket);
+    assert_eq!(provider.transport(), OpenAiTransport::WebSocket);
     server.await.unwrap();
 }
 
@@ -457,8 +456,11 @@ async fn transient_helper_failures_retry_without_network_or_fallback() {
         );
         assert_eq!(helper.runs(), 4);
         assert_helper_retries(&mut receiver, 3, "stderr: login is required");
-        assert_eq!(provider.transport == OpenAiTransport::WebSocket, websocket);
-        assert!(provider.http_fallback.is_none());
+        assert_eq!(
+            provider.transport() == OpenAiTransport::WebSocket,
+            websocket
+        );
+        assert!(provider.responses_transport.fallback().is_none());
         assert_no_connection(&listener).await;
     }
 }
@@ -473,10 +475,10 @@ async fn transient_helper_failure_during_preconnect_leaves_websocket_disconnecte
         helper.source.clone(),
     );
     let provider = preconnect(&profile).await.unwrap();
-    assert_eq!(provider.transport, OpenAiTransport::WebSocket);
-    assert!(provider.http_fallback.is_none());
+    assert_eq!(provider.transport(), OpenAiTransport::WebSocket);
+    assert!(provider.responses_transport.fallback().is_none());
     assert_eq!(
-        provider.ws.session.terminal_status(),
+        provider.responses_transport.ws.session.terminal_status(),
         Some(crate::websocket_session::OpenAiWebSocketTerminalCategory::StartupConnectFailed)
     );
     assert_eq!(helper.runs(), 1);
@@ -507,8 +509,11 @@ async fn invalid_helper_output_is_terminal_during_http_websocket_and_preconnect(
                 .await
                 .unwrap_err();
             assert_no_retry(&mut receiver);
-            assert_eq!(provider.transport == OpenAiTransport::WebSocket, websocket);
-            assert!(provider.http_fallback.is_none());
+            assert_eq!(
+                provider.transport() == OpenAiTransport::WebSocket,
+                websocket
+            );
+            assert!(provider.responses_transport.fallback().is_none());
             error
         };
         assert!(error.is::<ApiKeyCommandError>(), "{error:#}");
@@ -575,8 +580,11 @@ async fn failed_helper_refresh_recovers_without_resending_the_rejected_key() {
             "initial key, failed refresh, and two retries"
         );
         assert_helper_retries(&mut receiver, 2, "stderr: login renewal failed");
-        assert_eq!(provider.transport == OpenAiTransport::WebSocket, websocket);
-        assert!(provider.http_fallback.is_none());
+        assert_eq!(
+            provider.transport() == OpenAiTransport::WebSocket,
+            websocket
+        );
+        assert!(provider.responses_transport.fallback().is_none());
         assert_no_connection(&server.await.unwrap()).await;
     }
 }
@@ -631,8 +639,11 @@ async fn second_401_is_terminal_after_an_interrupted_helper_refresh() {
         assert!(error.contains("rejected after a refresh"), "{error}");
         assert_helper_retries(&mut receiver, 1, "stderr: login renewal failed");
         assert_eq!(helper.runs(), 3);
-        assert_eq!(provider.transport == OpenAiTransport::WebSocket, websocket);
-        assert!(provider.http_fallback.is_none());
+        assert_eq!(
+            provider.transport() == OpenAiTransport::WebSocket,
+            websocket
+        );
+        assert!(provider.responses_transport.fallback().is_none());
         assert_no_connection(&server.await.unwrap()).await;
     }
 }
@@ -688,8 +699,11 @@ async fn helper_failure_then_success_retries_with_the_same_prompt_cache_key() {
             .unwrap();
         assert_eq!(helper.runs(), 2);
         assert_helper_retries(&mut receiver, 1, "stderr: request timed out");
-        assert_eq!(provider.transport == OpenAiTransport::WebSocket, websocket);
-        assert!(provider.http_fallback.is_none());
+        assert_eq!(
+            provider.transport() == OpenAiTransport::WebSocket,
+            websocket
+        );
+        assert!(provider.responses_transport.fallback().is_none());
         server.await.unwrap();
     }
 }
@@ -761,9 +775,9 @@ async fn helper_failures_do_not_count_toward_fallback_or_disqualify_the_first_ht
         ]
     );
     assert_eq!(helper.runs(), 5);
-    assert_eq!(provider.transport, OpenAiTransport::Http);
+    assert_eq!(provider.transport(), OpenAiTransport::Http);
     assert_eq!(
-        provider.http_fallback,
+        provider.responses_transport.fallback(),
         Some(crate::connection::HttpFallback::Sticky(
             "websocket_retries_exhausted"
         ))

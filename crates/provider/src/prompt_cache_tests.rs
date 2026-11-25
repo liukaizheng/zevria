@@ -79,15 +79,17 @@ async fn inactivity_replay_preserves_wire_prefix_controls_headers_and_cache_iden
         "stable-session",
         "stable-cache-key",
     )
-    .await
     .unwrap();
     assert_eq!(provider.recovery.connect_timeout.as_secs(), 11);
     assert_eq!(provider.recovery.send_timeout.as_secs(), 7);
     assert_eq!(provider.recovery.stall_warning.as_secs(), 3);
     assert_eq!(provider.recovery.response_idle_timeout.as_secs(), 42);
     assert_eq!(provider.recovery.websocket_keepalive.as_secs(), 17);
-    assert_eq!(provider.ws.config.keepalive.as_secs(), 17);
-    assert!(provider.ws.config.prewarm);
+    assert_eq!(
+        provider.responses_transport.ws.config.keepalive.as_secs(),
+        17
+    );
+    assert!(provider.responses_transport.ws.config.prewarm);
     assert_eq!(provider.recovery.recovery_window.as_secs(), 123);
     assert_eq!(provider.recovery.max_attempts, 2);
     let prompt = Message::user("authoritative input");
@@ -101,14 +103,14 @@ async fn inactivity_replay_preserves_wire_prefix_controls_headers_and_cache_iden
         model_role: ModelRole::Build,
         allowed_tool_names: None,
     };
-    let before = crate::turn::prepare_turn_request(&request(), &mut provider)
+    let before = crate::responses::prepare_turn_request(&request(), &mut provider)
         .await
         .unwrap();
     provider.recovery = RecoveryPolicy {
         response_idle_timeout: std::time::Duration::from_millis(80),
         ..fast_recovery_policy(2)
     };
-    let after = crate::turn::prepare_turn_request(&request(), &mut provider)
+    let after = crate::responses::prepare_turn_request(&request(), &mut provider)
         .await
         .unwrap();
     assert_eq!(before.request_properties, after.request_properties);

@@ -40,7 +40,7 @@ async fn additions_share_strict_renderer_fold_in_place_and_keep_tools_when_forbi
             "tool_choice".into(),
             json!({"type":"function","name":"read"}),
         );
-        let normal = crate::turn::prepare_turn_request(&request, &mut provider)
+        let normal = crate::responses::prepare_turn_request(&request, &mut provider)
             .await
             .unwrap();
         let addition = &normal.full_input[1];
@@ -67,7 +67,7 @@ async fn additions_share_strict_renderer_fold_in_place_and_keep_tools_when_forbi
                 ["z", "a"]
             );
         }
-        let fallback = crate::turn::prepare_turn_request(
+        let fallback = crate::responses::prepare_turn_request(
             &ModelRequest {
                 input_identity: None,
                 forbid_tool_calls: true,
@@ -82,7 +82,7 @@ async fn additions_share_strict_renderer_fold_in_place_and_keep_tools_when_forbi
         expected["tool_choice"] = "none".into();
         assert_eq!(*fallback.request_properties, expected);
         provider.compatibility.additional_tools = false;
-        let folded = crate::turn::prepare_turn_request(&request, &mut provider)
+        let folded = crate::responses::prepare_turn_request(&request, &mut provider)
             .await
             .unwrap();
         assert_eq!(folded.full_input.len(), 1);
@@ -248,7 +248,14 @@ async fn full_history_engine_summary_continues_websocket_with_only_trigger_then_
             .unwrap();
     }
     server.await.unwrap();
-    assert!(engine.provider().ws.continuation.is_none());
+    assert!(
+        engine
+            .provider()
+            .responses_transport
+            .ws
+            .continuation
+            .is_none()
+    );
     assert!(
         engine
             .conversation()

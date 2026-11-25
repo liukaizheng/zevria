@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{PlanEvent, TurnEvent};
 
 #[tokio::test]
 async fn failed_confirmation_keeps_a_durable_draft_that_can_be_resubmitted_without_text() {
@@ -45,7 +46,7 @@ async fn failed_confirmation_keeps_a_durable_draft_that_can_be_resubmitted_witho
         collect_events(&mut receiver)
             .await
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnFailed { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Failed { .. })))
     );
     prompt(&mut engine, &events, "resubmit").await;
     assert_eq!(
@@ -181,7 +182,7 @@ async fn registered_plan_tools_fail_cleanly_in_build_even_under_an_unrestricted_
     let results = lifecycle
         .iter()
         .find_map(|event| match event {
-            SessionEvent::ToolResults { metadata, .. } => Some(metadata),
+            SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) => Some(metadata),
             _ => None,
         })
         .unwrap();
@@ -229,7 +230,7 @@ async fn draft_mirror_warnings_are_deduplicated_until_the_next_successful_write(
             .filter(|event| {
                 matches!(
                     event,
-                    SessionEvent::PlanProjectionWarning { draft: Some(_), .. }
+                    SessionEvent::Plan(PlanEvent::ProjectionWarning { draft: Some(_), .. })
                 )
             })
             .count();
@@ -463,7 +464,7 @@ mod failed_persistence {
             !collect_events(&mut receiver)
                 .await
                 .iter()
-                .any(|event| matches!(event, SessionEvent::ToolResults { .. }))
+                .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::ToolResults { .. })))
         );
         blocker.restore().unwrap();
     }

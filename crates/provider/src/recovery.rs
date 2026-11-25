@@ -2,6 +2,9 @@
 
 use std::{future::Future, sync::Mutex, time::Duration};
 use tokio::time::Instant;
+use zevria_model::RetryCategory;
+#[cfg(test)]
+use zevria_session_api::TurnEvent;
 use zevria_session_api::{
     ProgressReporter,
     event::{NetworkStatus, NetworkTransport},
@@ -72,51 +75,227 @@ pub(crate) enum FailureClass {
 
 /// All retry categories emitted by either adapter. HTTP 408 is a server
 /// response, not a local header timeout, so it must not escalate that timer.
-pub(crate) fn failure_class(category: &str) -> FailureClass {
+pub(crate) const fn failure_class(category: RetryCategory) -> FailureClass {
     match category {
-        "request_timeout" | "request_start_timeout" => FailureClass::RequestStart,
-        "response_idle_timeout" => FailureClass::Idle,
-        "credential_helper" => FailureClass::Credential,
-        "request_error"
-        | "transport"
-        | "stream"
-        | "sse_transport_error"
-        | "premature_eof"
-        | "connect_error"
-        | "disconnect"
-        | "close_frame"
-        | "end_of_stream"
-        | "read_error"
-        | "send_error"
-        | "send_timeout"
-        | "pong_error"
-        | "upstream_disconnect"
-        | "pump_stopped"
-        | "startup_connect_failed"
-        | "not_connected"
-        | "http_fallback"
-        | "local_cancellation" => FailureClass::Connectivity,
-        "server_error"
-        | "overloaded"
-        | "response_failed_transient"
-        | "request_timeout_status"
-        | "connection_limit" => FailureClass::Server,
-        "rate_limited" | "rate_limit" | "rate_limit_exceeded" => FailureClass::RateLimited,
-        "protocol"
-        | "invalid_tool_json"
-        | "stale_response_id"
-        | "websocket_upgrade_required"
-        | "thinking_binding_mismatch"
-        | "inbound_overflow" => FailureClass::Protocol,
-        _ => {
-            debug_assert!(false, "unclassified retry category: {category}");
-            FailureClass::Protocol
+        RetryCategory::RequestTimeout | RetryCategory::RequestStartTimeout => {
+            FailureClass::RequestStart
+        }
+        RetryCategory::ResponseIdleTimeout => FailureClass::Idle,
+        RetryCategory::CredentialHelper => FailureClass::Credential,
+        RetryCategory::RequestError
+        | RetryCategory::Transport
+        | RetryCategory::Stream
+        | RetryCategory::SseTransportError
+        | RetryCategory::PrematureEof
+        | RetryCategory::ConnectError
+        | RetryCategory::Disconnect
+        | RetryCategory::CloseFrame
+        | RetryCategory::EndOfStream
+        | RetryCategory::ReadError
+        | RetryCategory::SendError
+        | RetryCategory::SendTimeout
+        | RetryCategory::PongError
+        | RetryCategory::UpstreamDisconnect
+        | RetryCategory::PumpStopped
+        | RetryCategory::StartupConnectFailed
+        | RetryCategory::NotConnected
+        | RetryCategory::HttpFallback
+        | RetryCategory::LocalCancellation => FailureClass::Connectivity,
+        RetryCategory::ServerError
+        | RetryCategory::Overloaded
+        | RetryCategory::ResponseFailedTransient
+        | RetryCategory::RequestTimeoutStatus
+        | RetryCategory::ConnectionLimit => FailureClass::Server,
+        RetryCategory::RateLimited
+        | RetryCategory::RateLimit
+        | RetryCategory::RateLimitExceeded => FailureClass::RateLimited,
+        RetryCategory::Protocol
+        | RetryCategory::InvalidToolJson
+        | RetryCategory::StaleResponseId
+        | RetryCategory::WebsocketUpgradeRequired
+        | RetryCategory::ThinkingBindingMismatch
+        | RetryCategory::InboundOverflow => FailureClass::Protocol,
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum AttemptError {
+    Retryable {
+        category: RetryCategory,
+        error: anyhow::Error,
+        server_delay: Option<Duration>,
+        upstream_request_id: Option<String>,
+    },
+    Terminal {
+        error: anyhow::Error,
+        upstream_request_id: Option<String>,
+    },
+}
+
+impl AttemptError {
+    #[cfg(test)]
+    pub(crate) fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Retryable { error, .. } | Self::Terminal { error, .. } => error,
+        }
+    }
+
+    pub(crate) fn retryable(category: RetryCategory, error: impl Into<anyhow::Error>) -> Self {
+        Self::Retryable {
+            category,
+            error: error.into(),
+            server_delay: None,
+            upstream_request_id: None,
+        }
+    }
+
+    pub(crate) fn terminal(error: impl Into<anyhow::Error>) -> Self {
+        Self::Terminal {
+            error: error.into(),
+            upstream_request_id: None,
+        }
+    }
+
+    pub(crate) fn retryable_response(
+        category: RetryCategory,
+        error: impl Into<anyhow::Error>,
+        upstream_request_id: &Option<String>,
+    ) -> Self {
+        Self::Retryable {
+            category,
+            error: crate::http::with_http_response_request_id(
+                error.into(),
+                upstream_request_id,
+                "OpenAI",
+                "x-request-id",
+            ),
+            server_delay: None,
+            upstream_request_id: upstream_request_id.clone(),
+        }
+    }
+
+    pub(crate) fn terminal_response(
+        error: impl Into<anyhow::Error>,
+        upstream_request_id: &Option<String>,
+    ) -> Self {
+        Self::Terminal {
+            error: crate::http::with_http_response_request_id(
+                error.into(),
+                upstream_request_id,
+                "OpenAI",
+                "x-request-id",
+            ),
+            upstream_request_id: upstream_request_id.clone(),
+        }
+    }
+
+    pub(crate) fn from_http_status(
+        category: Option<RetryCategory>,
+        error: rig_core::error::ProviderError,
+        upstream_request_id: Option<String>,
+        server_delay: Option<Duration>,
+    ) -> Self {
+        match category {
+            Some(category) => Self::Retryable {
+                category,
+                error: error.into(),
+                upstream_request_id,
+                server_delay,
+            },
+            None => Self::Terminal {
+                error: error.into(),
+                upstream_request_id,
+            },
         }
     }
 }
 
+impl From<anyhow::Error> for AttemptError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::terminal(error)
+    }
+}
+
+impl From<rig_core::error::ProviderError> for AttemptError {
+    fn from(error: rig_core::error::ProviderError) -> Self {
+        Self::terminal(error)
+    }
+}
+
+impl From<ResponseIdleTimeout> for AttemptError {
+    fn from(error: ResponseIdleTimeout) -> Self {
+        Self::retryable(RetryCategory::ResponseIdleTimeout, error)
+    }
+}
+
+pub(crate) trait RecoveryDriver: Send {
+    type Output;
+
+    fn attempt<'a>(
+        &'a mut self,
+        plan: AttemptPlan,
+        recovery: &'a Recovery<'a>,
+    ) -> impl Future<Output = Result<Self::Output, AttemptError>> + Send + 'a;
+
+    fn before_retry(&mut self, failure: &AttemptFailure) -> anyhow::Result<()>;
+}
+
+/// Shared attempt budget, retry notification, and delay. Adapters own
+/// request encoding, transport state, and semantic repairs; this loop never
+/// modifies the prepared request or re-admits the model call.
+pub(crate) async fn run_recovery_loop<D: RecoveryDriver>(
+    policy: &RecoveryPolicy,
+    reporter: &ProgressReporter,
+    provider: &str,
+    driver: &mut D,
+) -> anyhow::Result<D::Output> {
+    let recovery = Recovery::new(policy);
+    while let Some(plan) = recovery.start_attempt() {
+        let last = match driver.attempt(plan, &recovery).await {
+            Ok(response) => return Ok(response),
+            Err(AttemptError::Terminal { error, .. }) => return Err(error),
+            Err(AttemptError::Retryable {
+                category,
+                error,
+                server_delay,
+                upstream_request_id,
+            }) => AttemptFailure {
+                category,
+                class: failure_class(category),
+                error,
+                server_delay,
+                upstream_request_id,
+            },
+        };
+        let decision = recovery.decide(&last);
+        recovery.log_failure(&last, decision);
+        match decision {
+            Decision::Exhausted(reason) => {
+                return Err(recovery.exhausted_error(reason, last, provider));
+            }
+            Decision::Retry {
+                next_attempt,
+                delay,
+                retrying_for,
+            } => {
+                driver.before_retry(&last)?;
+                reporter
+                    .retrying(
+                        next_attempt,
+                        delay,
+                        retrying_for,
+                        format!("{}: {:#}", last.category, last.error),
+                    )
+                    .await;
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+    anyhow::bail!("completion recovery requires a positive attempt cap")
+}
+
 pub(crate) struct AttemptFailure {
-    pub(crate) category: &'static str,
+    pub(crate) category: RetryCategory,
     pub(crate) class: FailureClass,
     pub(crate) error: anyhow::Error,
     pub(crate) server_delay: Option<Duration>,
@@ -296,7 +475,7 @@ impl<'a> Recovery<'a> {
             _ => None,
         };
         tracing::warn!(
-            timeout_category = failure.category, attempt = state.attempts,
+            timeout_category = failure.category.as_str(), attempt = state.attempts,
             elapsed_ms = ms(state.attempt_started.elapsed()),
             upstream_request_id = ?failure.upstream_request_id.as_deref().map(crate::connection::log_identifier),
             made_progress = state.made_progress, next_delay_ms = ?next_delay,
@@ -309,7 +488,7 @@ impl<'a> Recovery<'a> {
 
     pub(crate) fn log_exhausted(&self, reason: ExhaustedReason, last: &AttemptFailure) {
         let state = self.state.lock().expect("recovery state");
-        tracing::warn!(reason = ?reason, timeout_category = last.category, attempt = state.attempts,
+        tracing::warn!(reason = ?reason, timeout_category = last.category.as_str(), attempt = state.attempts,
             elapsed_ms = ms(state.started.elapsed()),
             upstream_request_id = ?last.upstream_request_id.as_deref().map(crate::connection::log_identifier),
             made_progress = state.made_progress, next_delay_ms = ?Option::<u64>::None,
@@ -543,7 +722,7 @@ impl Drop for ProgressClock<'_> {
 mod tests {
     use super::*;
 
-    fn failure(category: &'static str) -> AttemptFailure {
+    fn failure(category: RetryCategory) -> AttemptFailure {
         AttemptFailure {
             category,
             class: failure_class(category),
@@ -555,7 +734,7 @@ mod tests {
 
     #[test]
     fn credential_helper_failures_have_a_provider_specific_hint() {
-        let last = failure("credential_helper");
+        let last = failure(RetryCategory::CredentialHelper);
         assert_eq!(last.class, FailureClass::Credential);
         let policy = RecoveryPolicy::default();
         let recovery = Recovery::new(&policy);
@@ -584,7 +763,7 @@ mod tests {
         recovery.start_attempt().unwrap();
         tokio::time::advance(Duration::from_secs(300)).await;
         assert_eq!(
-            recovery.decide(&failure("request_error")),
+            recovery.decide(&failure(RetryCategory::RequestError)),
             Decision::Exhausted(ExhaustedReason::Window)
         );
         recovery.mark_progress(Instant::now());
@@ -592,7 +771,7 @@ mod tests {
             delay,
             retrying_for,
             ..
-        } = recovery.decide(&failure("request_error"))
+        } = recovery.decide(&failure(RetryCategory::RequestError))
         else {
             panic!("progress must reset window");
         };
@@ -611,13 +790,17 @@ mod tests {
         loop {
             recovery.start_attempt().unwrap();
             recovery.state.lock().unwrap().jitter_sample = u32::MAX;
-            match recovery.decide(&failure("request_error")) {
+            match recovery.decide(&failure(RetryCategory::RequestError)) {
                 Decision::Retry { delay, .. } => tokio::time::advance(delay).await,
                 Decision::Exhausted(reason) => {
                     assert_eq!(reason, ExhaustedReason::Window);
                     assert!(started.elapsed() <= Duration::from_secs(300));
                     assert!(started.elapsed() + policy.backoff_cap > Duration::from_secs(300));
-                    let error = recovery.exhausted_error(reason, failure("request_error"), "test");
+                    let error = recovery.exhausted_error(
+                        reason,
+                        failure(RetryCategory::RequestError),
+                        "test",
+                    );
                     assert!(error.to_string().contains("recovery window expired"));
                     assert!(error.to_string().contains("recovery_window_seconds = 300"));
                     break;
@@ -634,7 +817,7 @@ mod tests {
             recovery.start_attempt().unwrap();
             recovery.state.lock().unwrap().jitter_sample = u32::MAX;
             assert!(
-                matches!(recovery.decide(&failure("request_error")), Decision::Retry { delay, .. } if delay == Duration::from_secs_f64(expected))
+                matches!(recovery.decide(&failure(RetryCategory::RequestError)), Decision::Retry { delay, .. } if delay == Duration::from_secs_f64(expected))
             );
         }
         recovery.start_attempt().unwrap();
@@ -643,12 +826,12 @@ mod tests {
         // The window never interrupts a running, useful attempt.
         recovery.mark_progress(Instant::now());
         assert!(
-            matches!(recovery.decide(&failure("premature_eof")), Decision::Retry { delay, retrying_for, .. } if delay == Duration::from_millis(500) && retrying_for == Duration::from_millis(299_500))
+            matches!(recovery.decide(&failure(RetryCategory::PrematureEof)), Decision::Retry { delay, retrying_for, .. } if delay == Duration::from_millis(500) && retrying_for == Duration::from_millis(299_500))
         );
         recovery.start_attempt().unwrap();
         recovery.state.lock().unwrap().jitter_sample = u32::MAX;
         assert!(
-            matches!(recovery.decide(&failure("request_error")), Decision::Retry { delay, .. } if delay == Duration::from_millis(500))
+            matches!(recovery.decide(&failure(RetryCategory::RequestError)), Decision::Retry { delay, .. } if delay == Duration::from_millis(500))
         );
     }
 
@@ -661,7 +844,7 @@ mod tests {
             assert_eq!(recovery.will_retry_at(Instant::now(), true), attempt < 4);
             assert!(recovery.will_retry_at(Instant::now(), false));
             recovery.mark_progress(Instant::now());
-            let decision = recovery.decide(&failure("premature_eof"));
+            let decision = recovery.decide(&failure(RetryCategory::PrematureEof));
             if attempt == 4 {
                 assert_eq!(decision, Decision::Exhausted(ExhaustedReason::Interrupted));
             } else {
@@ -675,7 +858,7 @@ mod tests {
         let recovery = Recovery::new(&policy);
         recovery.start_attempt().unwrap();
         assert_eq!(
-            recovery.decide(&failure("request_error")),
+            recovery.decide(&failure(RetryCategory::RequestError)),
             Decision::Exhausted(ExhaustedReason::AttemptCap)
         );
         assert_eq!(recovery.start_attempt(), None);
@@ -690,10 +873,14 @@ mod tests {
                 recovery.start_attempt().unwrap().request_start_deadline,
                 Duration::from_secs(seconds)
             );
-            recovery.decide(&failure("request_timeout"));
+            recovery.decide(&failure(RetryCategory::RequestTimeout));
         }
         let recovery = Recovery::new(&policy);
-        for category in ["request_timeout_status", "server_error", "rate_limit"] {
+        for category in [
+            RetryCategory::RequestTimeoutStatus,
+            RetryCategory::ServerError,
+            RetryCategory::RateLimit,
+        ] {
             assert_eq!(
                 recovery.start_attempt().unwrap().request_start_deadline,
                 Duration::from_secs(30)
@@ -709,7 +896,7 @@ mod tests {
         recovery.start_attempt().unwrap();
         assert!(recovery.will_retry_at(Instant::now() + Duration::from_secs(299), false));
         assert!(!recovery.will_retry_at(Instant::now() + Duration::from_secs(300), false));
-        let mut last = failure("rate_limited");
+        let mut last = failure(RetryCategory::RateLimited);
         last.server_delay = Some(Duration::from_secs(45));
         assert!(
             matches!(recovery.decide(&last), Decision::Retry { delay, retrying_for, .. } if delay == Duration::from_secs(45) && retrying_for == Duration::from_secs(255))
@@ -821,21 +1008,25 @@ mod tests {
         tokio::time::advance(Duration::from_secs(30)).await;
         assert!(matches!(
             events.recv().await,
-            Some(SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
-                status: NetworkStatus::Quiet {
-                    will_retry: true,
+            Some(SessionUpdate::Lifecycle(SessionEvent::Turn(
+                TurnEvent::NetworkStatus {
+                    status: NetworkStatus::Quiet {
+                        will_retry: true,
+                        ..
+                    },
                     ..
-                },
-                ..
-            }))
+                }
+            )))
         ));
         send.send("partial frame completed").unwrap();
         assert!(matches!(
             events.recv().await,
-            Some(SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
-                status: NetworkStatus::ProgressResumed,
-                ..
-            }))
+            Some(SessionUpdate::Lifecycle(SessionEvent::Turn(
+                TurnEvent::NetworkStatus {
+                    status: NetworkStatus::ProgressResumed,
+                    ..
+                }
+            )))
         ));
         for _ in 0..8 {
             tokio::time::advance(Duration::from_secs(25)).await;
@@ -845,10 +1036,12 @@ mod tests {
         tokio::time::advance(Duration::from_secs(30)).await;
         assert!(matches!(
             events.recv().await,
-            Some(SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
-                status: NetworkStatus::Quiet { .. },
-                ..
-            }))
+            Some(SessionUpdate::Lifecycle(SessionEvent::Turn(
+                TurnEvent::NetworkStatus {
+                    status: NetworkStatus::Quiet { .. },
+                    ..
+                }
+            )))
         ));
         tokio::time::advance(Duration::from_secs(150)).await;
         assert!(waiting.await.unwrap().is_err());
@@ -875,7 +1068,7 @@ mod tests {
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(30)).await;
         assert!(
-            matches!(events.recv().await, Some(SessionUpdate::Lifecycle(SessionEvent::NetworkStatus { status: NetworkStatus::Quiet { idle_for, retry_in, will_retry: true }, .. })) if idle_for == Duration::from_secs(30) && retry_in == Duration::from_secs(150))
+            matches!(events.recv().await, Some(SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::NetworkStatus { status: NetworkStatus::Quiet { idle_for, retry_in, will_retry: true }, .. }))) if idle_for == Duration::from_secs(30) && retry_in == Duration::from_secs(150))
         );
         tokio::time::advance(Duration::from_secs(149)).await;
         assert!(!waiting.is_finished());

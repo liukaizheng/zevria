@@ -1,6 +1,7 @@
 //! A real engine/tool/JSONL/new-router resume, exercised in both feature builds.
 use super::*;
 use zevria_instructions::skill::{SkillDefinition, SkillSource};
+use zevria_session_api::TurnEvent;
 
 pub(super) async fn flow() -> Vec<String> {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -264,11 +265,12 @@ async fn submit(engine: &mut SessionEngine<ProviderRouter>, text: &str) {
             assert!(
                 !matches!(
                     event,
-                    SessionEvent::TurnFailed { .. } | SessionEvent::TurnRejected { .. }
+                    SessionEvent::Turn(TurnEvent::Failed { .. })
+                        | SessionEvent::Turn(TurnEvent::Rejected { .. })
                 ),
                 "{event:?}"
             );
-            completed |= matches!(event, SessionEvent::TurnCompleted { .. });
+            completed |= matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. }));
         }
     }
     assert!(completed);

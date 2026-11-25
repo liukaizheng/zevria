@@ -288,6 +288,7 @@ async fn session_header_validation_precedes_io_and_values_are_sensitive() {
         let provider = connect_profile(&profile, ignored).await;
         assert!(
             provider
+                .responses_transport
                 .ws
                 .config
                 .headers
@@ -303,8 +304,8 @@ async fn session_header_validation_precedes_io_and_values_are_sensitive() {
     assert_eq!(headers["x-conversation-id"].to_str().unwrap(), SESSION_ID);
     assert!(!format!("{headers:?}").contains(SESSION_ID));
     let provider = connect_profile(&profile, SESSION_ID).await;
-    assert!(provider.ws.config.headers["x-conversation-id"].is_sensitive());
-    assert!(!format!("{:?}", provider.ws.config.headers).contains(SESSION_ID));
+    assert!(provider.responses_transport.ws.config.headers["x-conversation-id"].is_sensitive());
+    assert!(!format!("{:?}", provider.responses_transport.ws.config.headers).contains(SESSION_ID));
     assert!(!format!("{:?}", provider.http).contains(SESSION_ID));
 
     let router = ProviderRouter::from_routes(
@@ -586,17 +587,20 @@ async fn session_headers_survive_websocket_recovery_http_retries_and_provisional
             (websocket_requests, http_requests)
         });
         let mut provider = connect_profile(&profile, SESSION_ID).await;
-        assert_eq!(provider.transport == OpenAiTransport::Http, startup_426);
+        assert_eq!(provider.transport() == OpenAiTransport::Http, startup_426);
         let mut state = AttemptState::default();
         session_turn(&mut provider, &mut state, "fallback")
             .await
             .unwrap();
-        assert_eq!(provider.transport, OpenAiTransport::Http);
+        assert_eq!(provider.transport(), OpenAiTransport::Http);
         session_turn(&mut provider, &mut state, "sticky HTTP followup")
             .await
             .unwrap();
-        assert_eq!(provider.transport == OpenAiTransport::Http, startup_426);
-        assert_eq!(provider.ws.continuation.is_none(), startup_426);
+        assert_eq!(provider.transport() == OpenAiTransport::Http, startup_426);
+        assert_eq!(
+            provider.responses_transport.ws.continuation.is_none(),
+            startup_426
+        );
         let (websocket, http) = server.await.unwrap();
         assert_eq!(http.len(), if startup_426 { 3 } else { 2 });
         assert_eq!(http[0].body, http[1].body);
@@ -674,16 +678,16 @@ async fn websocket_session_headers_are_stable_through_continuation_reset_and_can
             .await
             .unwrap();
         provider.reset();
-        assert!(provider.ws.continuation.is_none());
+        assert!(provider.responses_transport.ws.continuation.is_none());
         session_turn(&mut provider, &mut state, "after reset")
             .await
             .unwrap();
         provider.cancel();
-        assert!(provider.ws.continuation.is_none());
+        assert!(provider.responses_transport.ws.continuation.is_none());
         session_turn(&mut provider, &mut state, "after cancel")
             .await
             .unwrap();
-        assert_eq!(provider.ws.socket_generation, 1);
+        assert_eq!(provider.responses_transport.ws.socket_generation, 1);
         assert_eq!(
             continuation_response_id(&provider),
             Some("resp_after_cancel")

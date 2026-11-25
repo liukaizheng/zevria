@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use zevria_session_api::{SubtaskEvent, TurnEvent};
 
 use rig_agent::tool::server::ToolServer;
 use rig_core::message::{AssistantContent, Message, ToolFunction, ToolResultContent, UserContent};
@@ -232,12 +233,12 @@ async fn exercise_batch(
     let launches = events
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::SubtaskLaunched {
+            SessionEvent::Subtask(SubtaskEvent::Launched {
                 call_id,
                 entry_index,
                 descriptor,
                 ..
-            } => Some((call_id, *entry_index, descriptor)),
+            }) => Some((call_id, *entry_index, descriptor)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -249,7 +250,7 @@ async fn exercise_batch(
                 .any(|(call_id, entry_index, launched)| call_id.as_str()
                     == CALL_IDS[if separate_calls { index } else { 0 }]
                     && *entry_index == if separate_calls { 0 } else { index }
-                    && *launched == descriptor)
+                    && ***launched == *descriptor)
         );
     }
     if descriptors.len() == 2 {
@@ -258,9 +259,9 @@ async fn exercise_batch(
     let batches = events
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 message, metadata, ..
-            } => Some((message, metadata)),
+            }) => Some((message, metadata)),
             _ => None,
         })
         .collect::<Vec<_>>();

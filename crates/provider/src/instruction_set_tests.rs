@@ -44,10 +44,10 @@ async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incr
         output,
     ))
     .unwrap();
-    provider.ws.continuation = Some(
+    provider.responses_transport.ws.continuation = Some(
         ContinuationState::after_response(
             &first,
-            provider.ws.socket_generation,
+            provider.responses_transport.ws.socket_generation,
             "first-response".into(),
             &response,
         )
@@ -127,7 +127,7 @@ async fn same_tool_mode_switch_changes_request_properties_but_activation_is_incr
         "full transmission borrows the prepared input"
     );
     assert!(
-        provider.ws.continuation.is_none(),
+        provider.responses_transport.ws.continuation.is_none(),
         "request_properties_changed clears the previous chain"
     );
 }

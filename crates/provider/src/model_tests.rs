@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::ManagementEvent;
 #[path = "model_boundary_tests.rs"]
 mod boundaries;
 #[path = "model_lifecycle_tests.rs"]
@@ -463,9 +464,9 @@ async fn manage(engine: &mut SessionEngine<ProviderRouter>, request: Request) ->
         .await
         .unwrap();
     if let Ok(SessionUpdate::Lifecycle(event)) = receiver.try_recv() {
-        if let SessionEvent::ModelsResult { request_id, result } = event {
+        if let SessionEvent::Manage(ManagementEvent::ModelsResult { request_id, result }) = event {
             assert_eq!(request_id, "selection");
-            return result;
+            return *result;
         }
         panic!("management emitted a conversation event: {event:?}");
     }
@@ -795,9 +796,8 @@ async fn confirmed_conversion_is_source_only_and_checkpoint_survives_failed_defa
         "root",
         &crate::router::profile_cache_key("root", &a),
     )
-    .await
     .unwrap();
-    let expected = crate::turn::prepare_turn_request(
+    let expected = crate::responses::prepare_turn_request(
         &ModelRequest {
             input_identity: None,
             instructions: &instructions,

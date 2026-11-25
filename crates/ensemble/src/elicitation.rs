@@ -1,7 +1,93 @@
 //! Deterministic ACP form normalization.
 
-use super::*;
+use agent_client_protocol::schema::v1::{
+    CreateElicitationRequest, ElicitationContentValue, ElicitationMode, ElicitationPropertySchema,
+    ElicitationScope, Meta, MultiSelectItems,
+};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use zevria_foundation::{
+    QuestionAnswerValue, QuestionOption, QuestionPrompt, QuestionPromptKind, QuestionRequest,
+    QuestionRequestId, QuestionResponse,
+};
+use zevria_workflow::{
+    AgentUserDecisionAnswer, AgentUserDecisionBatch, AgentUserDecisionId, AgentUserDecisionValue,
+};
+
+#[derive(Debug)]
+pub(super) enum ElicitationConversionError {
+    Decline { field_count: usize, reason: String },
+    ProtocolViolation { field_count: usize, reason: String },
+}
+
+impl ElicitationConversionError {
+    fn decline(field_count: usize, reason: impl Into<String>) -> Self {
+        Self::Decline {
+            field_count,
+            reason: reason.into(),
+        }
+    }
+
+    pub(super) fn field_count(&self) -> usize {
+        match self {
+            Self::Decline { field_count, .. } | Self::ProtocolViolation { field_count, .. } => {
+                *field_count
+            }
+        }
+    }
+
+    pub(super) fn reason(&self) -> &str {
+        match self {
+            Self::Decline { reason, .. } | Self::ProtocolViolation { reason, .. } => reason,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct ConvertedElicitation {
+    pub(super) request: QuestionRequest,
+    pub(super) fields: Vec<ElicitationFieldMapping>,
+}
+
+#[derive(Debug)]
+pub(super) struct ElicitationFieldMapping {
+    pub(super) property: String,
+    pub(super) required: bool,
+    pub(super) kind: ElicitationFieldKind,
+}
+
+/// Native and Codex user-note companions return a primary Other token plus text.
+/// Legacy Codex/Claude companions return only text (and normal multi tokens).
+#[derive(Debug, Clone)]
+pub(super) struct CustomAnswerCompanion {
+    pub(super) property: String,
+    pub(super) other_value: Option<String>,
+    default: Option<String>,
+}
+
+struct CustomCompanionTarget {
+    question_id: String,
+    other_value: Option<String>,
+    codex_user_note: bool,
+}
+
+#[derive(Debug)]
+pub(super) enum ElicitationFieldKind {
+    Text,
+    Single {
+        values: HashMap<String, String>,
+        companion: Option<CustomAnswerCompanion>,
+    },
+    Multi {
+        values: HashMap<String, String>,
+        companion: Option<CustomAnswerCompanion>,
+    },
+    Boolean {
+        values: HashMap<String, bool>,
+    },
+}
+
 use agent_client_protocol::schema::v1::EnumOption;
+use zevria_acp::elicitation_meta::ZevriaElicitationMeta;
 
 const CODEX_OTHER_OPTION: &str = "None of the above";
 
@@ -23,9 +109,8 @@ impl RawOption {
     }
 
     fn titled(option: &EnumOption) -> Self {
-        let meta = option.meta.as_ref().and_then(|meta| meta.get("zevria"));
-        let detail = meta.and_then(|meta| meta.get("detail")?.as_str());
-        let short_description = detail.and_then(|_| meta?.get("description")?.as_str());
+        let detail = ZevriaElicitationMeta::read_option(option.meta.as_ref());
+        let short_description = detail.as_ref().and_then(|meta| meta.description);
         Self {
             value: option.value.clone(),
             title: option.title.clone(),
@@ -33,7 +118,7 @@ impl RawOption {
                 .or(option.description.as_deref())
                 .unwrap_or_default()
                 .to_owned(),
-            detail: detail.map(str::to_owned),
+            detail: detail.map(|meta| meta.detail.to_owned()),
         }
     }
 }
@@ -967,15 +1052,19 @@ pub(super) fn property_meta(property: &ElicitationPropertySchema) -> Option<&Met
     }
 }
 
-pub(super) fn custom_companion_target(
+fn custom_companion_target(
     meta: Option<&Meta>,
 ) -> Result<Option<CustomCompanionTarget>, &'static str> {
     let Some(meta) = meta else {
         return Ok(None);
     };
-    let mut target = None;
+    let mut target =
+        ZevriaElicitationMeta::read_custom_answer(meta)?.map(|answer| CustomCompanionTarget {
+            question_id: answer.question_id.to_owned(),
+            other_value: Some(answer.other_value.to_owned()),
+            codex_user_note: false,
+        });
     for (namespace, flag) in [
-        ("zevria", "isOtherAnswer"),
         ("codex", "isOtherAnswer"),
         ("_askUserQuestionCustomAnswer", "isCustomAnswer"),
     ] {
@@ -1019,19 +1108,7 @@ pub(super) fn custom_companion_target(
         if question_id.trim().is_empty() {
             return Err("custom-answer metadata questionId must not be blank");
         }
-        let other_value = if codex_user_note {
-            Some(CODEX_OTHER_OPTION.to_string())
-        } else if namespace == "zevria" {
-            let Some(token) = object.get("otherValue").and_then(serde_json::Value::as_str) else {
-                return Err("native custom-answer metadata is missing otherValue");
-            };
-            if token.trim().is_empty() {
-                return Err("native custom-answer metadata otherValue must not be blank");
-            }
-            Some(token.to_string())
-        } else {
-            None
-        };
+        let other_value = codex_user_note.then(|| CODEX_OTHER_OPTION.to_owned());
         if target.is_some() {
             return Err("custom-answer metadata has multiple companion markers");
         }

@@ -3,6 +3,7 @@ use super::*;
 use zevria_foundation::ReasoningLevel as Level;
 use zevria_instructions::{DirectiveContent, SkillName, SkillSnapshot};
 use zevria_model::models::{ModelSelection, SessionModels};
+use zevria_session_api::{JobEvent, ManagementEvent, PlanEvent, TurnEvent};
 use zevria_session_api::{ManagementCommand, ModeSelectionResult, TurnCommand};
 use zevria_tui::{App, RestorationInput, UiOutcome};
 use zevria_workflow::{PlanDecision, PlanRecord, PlanWorkflowState};
@@ -50,10 +51,12 @@ async fn select_complete(
         }))
         .unwrap();
     loop {
-        if let SessionEvent::ModelsResult { request_id, result } = event(events).await {
+        if let SessionEvent::Manage(ManagementEvent::ModelsResult { request_id, result }) =
+            event(events).await
+        {
             assert_eq!(request_id, "committed-selection");
             assert!(
-                matches!(result, Result::Changed { role, reasoning_level, context, scope: Scope::SessionOnly, .. } if role == zevria_model::models::mode_role(mode) && context.profile == target.profile && reasoning_level == target.reasoning_level)
+                matches!(*result, Result::Changed { role, reasoning_level, context, scope: Scope::SessionOnly, .. } if role == zevria_model::models::mode_role(mode) && context.profile == target.profile && reasoning_level == target.reasoning_level)
             );
             return;
         }
@@ -75,18 +78,25 @@ async fn set_mode(
         .unwrap();
     let result = loop {
         let event = event(events).await;
-        if !matches!(event, SessionEvent::JobContinuationChanged { mode: None }) {
+        if !matches!(
+            event,
+            SessionEvent::Job(JobEvent::ContinuationChanged { mode: None })
+        ) {
             break event;
         }
     };
-    assert!(matches!(result, SessionEvent::ModeResult {
+    assert!(
+        matches!(result, SessionEvent::Manage(ManagementEvent::ModeResult {
         request_id, result: ModeSelectionResult::Accepted { mode: actual, .. },
-    } if request_id == "mode-round-trip" && actual == mode));
+    }) if request_id == "mode-round-trip" && actual == mode)
+    );
     while let Ok(update) = events.try_recv() {
         assert!(
             matches!(
                 update,
-                SessionUpdate::Lifecycle(SessionEvent::JobContinuationChanged { mode: None })
+                SessionUpdate::Lifecycle(SessionEvent::Job(JobEvent::ContinuationChanged {
+                    mode: None
+                }))
             ),
             "mode management must not allocate a turn or call a provider: {update:?}"
         );
@@ -322,7 +332,7 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
             resumed.restored.plan_state,
             PlanWorkflowState::Planning { .. }
         ));
-        assert!(!resumed.restored.active_skills.is_empty());
+        assert!(!resumed.restored.skill_context.pins.is_empty());
         let mut inherited = tui_models(&resumed.restored);
         resumed.running.shutdown().await.unwrap();
         let mut previous_id = source_id;
@@ -347,7 +357,7 @@ async fn repeated_new_replacements_inherit_configured_and_overridden_pairs_after
                 ]
             );
             assert!(transcript::model_input(&running.restored.transcript_items).is_empty());
-            assert!(running.restored.active_skills.is_empty());
+            assert!(running.restored.skill_context.pins.is_empty());
             let path = running.restored.transcript_path.clone();
             assert!(!path.exists());
             let live_models = tui_models(&running.restored);
@@ -507,15 +517,17 @@ async fn same_session_and_fresh_plan_implementation_use_the_saved_build_route() 
         if decision == PlanDecision::ImplementFresh {
             let handoff = loop {
                 match event(&mut events).await {
-                    SessionEvent::FreshPlanHandoffRequested { handoff } => break handoff,
-                    SessionEvent::TurnFailed { error, .. }
-                    | SessionEvent::TurnRejected { error, .. } => {
+                    SessionEvent::Plan(PlanEvent::FreshHandoffRequested { handoff }) => {
+                        break handoff;
+                    }
+                    SessionEvent::Turn(TurnEvent::Failed { error, .. })
+                    | SessionEvent::Turn(TurnEvent::Rejected { error, .. }) => {
                         panic!("Plan approval failed: {error}")
                     }
                     _ => {}
                 }
             };
-            assert_eq!(handoff, approved);
+            assert_eq!(*handoff, approved);
             assert!(
                 server.requests.try_recv().is_err(),
                 "source never performs fresh implementation"
@@ -523,7 +535,13 @@ async fn same_session_and_fresh_plan_implementation_use_the_saved_build_route() 
             source.running.shutdown().await.unwrap();
             source_before = Some(std::fs::read(&source_path).unwrap());
             running = fixture
-                .start(crate::replacement_start(UiOutcome::Fresh { handoff, models }).unwrap())
+                .start(
+                    crate::replacement_start(UiOutcome::Fresh {
+                        handoff: *handoff,
+                        models,
+                    })
+                    .unwrap(),
+                )
                 .await;
             assert_ne!(running.restored.session_id, "source-plan");
             assert_ne!(running.restored.transcript_path, source_path);

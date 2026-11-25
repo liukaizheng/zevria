@@ -95,7 +95,7 @@ impl OperationKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PendingOperation {
+pub struct PendingTurn {
     pub started_at: Instant,
     pub kind: OperationKind,
     pub mode: SessionMode,
@@ -103,7 +103,7 @@ pub struct PendingOperation {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ActiveOperation {
+pub struct ActiveTurn {
     pub started_at: Instant,
     pub id: TurnId,
     /// Raw dispatch marker, used only to reject duplicate/stale events.
@@ -184,8 +184,26 @@ impl RetryNotice {
 #[allow(clippy::large_enum_variant)]
 pub enum SessionActivity {
     Idle,
-    Pending(PendingOperation),
-    Active(ActiveOperation),
+    Managing(ManagementInFlight),
+    PendingTurn(PendingTurn),
+    ActiveTurn(ActiveTurn),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ManagementInFlight {
+    started_at: Instant,
+    mode: SessionMode,
+    role: ModelRole,
+    request: ManagementRequest,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ManagementRequest {
+    Models,
+    Mode {
+        request_id: String,
+        requested: SessionMode,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -322,7 +340,6 @@ pub struct SessionState {
     telemetry: [RoleTelemetry; ModelRole::COUNT],
     reasoning: [Option<zevria_foundation::ReasoningLevel>; ModelRole::COUNT],
     persistence_error: Option<String>,
-    pub pending_mode_selection: Option<PendingModeSelection>,
 }
 
 impl Default for SessionState {
@@ -336,7 +353,6 @@ impl Default for SessionState {
             telemetry: std::array::from_fn(|_| RoleTelemetry::default()),
             reasoning: [None; ModelRole::COUNT],
             persistence_error: None,
-            pending_mode_selection: None,
         }
     }
 }
@@ -346,9 +362,9 @@ impl SessionState {
     /// Reconcile cached activity (including compaction), never role-keyed usage.
     pub fn reconcile_inspect_role(&mut self, role: ModelRole) {
         match &mut self.activity {
-            SessionActivity::Pending(pending) => pending.role = role,
-            SessionActivity::Active(active) => active.role = role,
-            SessionActivity::Idle => {}
+            SessionActivity::PendingTurn(pending) => pending.role = role,
+            SessionActivity::ActiveTurn(active) => active.role = role,
+            SessionActivity::Idle | SessionActivity::Managing(_) => {}
         }
     }
 
@@ -364,8 +380,9 @@ impl SessionState {
     pub fn elapsed(&self) -> Option<Duration> {
         let started_at = match &self.activity {
             SessionActivity::Idle => return None,
-            SessionActivity::Pending(pending) => pending.started_at,
-            SessionActivity::Active(active) => active.started_at,
+            SessionActivity::Managing(managing) => managing.started_at,
+            SessionActivity::PendingTurn(pending) => pending.started_at,
+            SessionActivity::ActiveTurn(active) => active.started_at,
         };
         Some(self.observed_at.saturating_duration_since(started_at))
     }
@@ -379,17 +396,68 @@ impl SessionState {
     }
 
     pub fn finish_model_management(&mut self) {
-        if matches!(&self.activity, SessionActivity::Pending(pending) if pending.kind == OperationKind::ModelManagement)
-        {
+        if matches!(
+            &self.activity,
+            SessionActivity::Managing(ManagementInFlight {
+                request: ManagementRequest::Models,
+                ..
+            })
+        ) {
             self.activity = SessionActivity::Idle;
         }
     }
 
     pub fn finish_mode_management(&mut self) {
-        if matches!(&self.activity, SessionActivity::Pending(pending) if pending.kind == OperationKind::ModeManagement)
-        {
+        if self.mode_selection().is_some() {
             self.activity = SessionActivity::Idle;
         }
+    }
+
+    pub fn mode_selection(&self) -> Option<(&str, SessionMode)> {
+        match &self.activity {
+            SessionActivity::Managing(ManagementInFlight {
+                request:
+                    ManagementRequest::Mode {
+                        request_id,
+                        requested,
+                    },
+                ..
+            }) => Some((request_id, *requested)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn begin_mode_selection(
+        &mut self,
+        request_id: String,
+        requested: SessionMode,
+    ) -> bool {
+        self.begin_management(
+            self.next_mode,
+            role_for_mode(self.next_mode),
+            ManagementRequest::Mode {
+                request_id,
+                requested,
+            },
+        )
+    }
+
+    fn begin_management(
+        &mut self,
+        mode: SessionMode,
+        role: ModelRole,
+        request: ManagementRequest,
+    ) -> bool {
+        if self.is_busy() {
+            return false;
+        }
+        self.activity = SessionActivity::Managing(ManagementInFlight {
+            started_at: self.observed_at,
+            mode,
+            role,
+            request,
+        });
+        true
     }
 
     pub fn install_model(
@@ -414,10 +482,15 @@ impl SessionState {
         if !matches!(self.activity, SessionActivity::Idle) {
             return false;
         }
-        if !kind.is_management() {
-            self.quiescent = false;
+        match kind {
+            OperationKind::ModelManagement => {
+                return self.begin_management(mode, role, ManagementRequest::Models);
+            }
+            OperationKind::ModeManagement => return false, // Requires a correlated request.
+            _ => {}
         }
-        self.activity = SessionActivity::Pending(PendingOperation {
+        self.quiescent = false;
+        self.activity = SessionActivity::PendingTurn(PendingTurn {
             started_at: self.observed_at,
             kind,
             mode,
@@ -432,11 +505,10 @@ impl SessionState {
 
     /// Root turn work excludes management, which does not publish idle barriers.
     pub const fn has_turn_work(&self) -> bool {
-        match &self.activity {
-            SessionActivity::Idle => false,
-            SessionActivity::Pending(pending) => !pending.kind.is_management(),
-            SessionActivity::Active(_) => true,
-        }
+        matches!(
+            self.activity,
+            SessionActivity::PendingTurn(_) | SessionActivity::ActiveTurn(_)
+        )
     }
 
     /// Ignore barriers that predate a newly admitted or authoritative turn.
@@ -453,7 +525,7 @@ impl SessionState {
     pub const fn is_compacting(&self) -> bool {
         matches!(
             self.activity,
-            SessionActivity::Active(ActiveOperation {
+            SessionActivity::ActiveTurn(ActiveTurn {
                 phase: ActivePhase::Compacting { .. },
                 ..
             })
@@ -474,39 +546,45 @@ impl SessionState {
 
     pub const fn active_id(&self) -> Option<TurnId> {
         match &self.activity {
-            SessionActivity::Active(active) => Some(active.id),
-            SessionActivity::Idle | SessionActivity::Pending(_) => None,
+            SessionActivity::ActiveTurn(active) => Some(active.id),
+            SessionActivity::Idle
+            | SessionActivity::Managing(_)
+            | SessionActivity::PendingTurn(_) => None,
         }
     }
 
     pub const fn display_turn(&self) -> Option<DisplayTurn> {
         match &self.activity {
-            SessionActivity::Active(active) => active.display_turn,
-            SessionActivity::Idle | SessionActivity::Pending(_) => None,
+            SessionActivity::ActiveTurn(active) => active.display_turn,
+            SessionActivity::Idle
+            | SessionActivity::Managing(_)
+            | SessionActivity::PendingTurn(_) => None,
         }
     }
 
     pub const fn call_header(&self) -> Option<NativeHeader> {
         match &self.activity {
-            SessionActivity::Active(active) => active.call_header,
-            SessionActivity::Idle | SessionActivity::Pending(_) => None,
+            SessionActivity::ActiveTurn(active) => active.call_header,
+            SessionActivity::Idle
+            | SessionActivity::Managing(_)
+            | SessionActivity::PendingTurn(_) => None,
         }
     }
 
     pub fn bind_display_turn(&mut self, turn: DisplayTurn) {
-        if let SessionActivity::Active(active) = &mut self.activity {
+        if let SessionActivity::ActiveTurn(active) = &mut self.activity {
             active.display_turn = Some(turn);
         }
     }
 
     pub fn bind_call_header(&mut self, header: NativeHeader) {
-        if let SessionActivity::Active(active) = &mut self.activity {
+        if let SessionActivity::ActiveTurn(active) = &mut self.activity {
             active.call_header = Some(header);
         }
     }
 
     pub fn model_call_started(&mut self, id: TurnId, call: usize) -> bool {
-        let SessionActivity::Active(active) = &mut self.activity else {
+        let SessionActivity::ActiveTurn(active) = &mut self.activity else {
             return false;
         };
         if active.id != id
@@ -525,33 +603,27 @@ impl SessionState {
 
     pub const fn cancel_target(&self) -> Option<Option<TurnId>> {
         match &self.activity {
-            SessionActivity::Idle => None,
-            SessionActivity::Pending(pending)
-                if matches!(
-                    pending.kind,
-                    OperationKind::ModeManagement | OperationKind::ModelManagement
-                ) =>
-            {
-                None
-            }
-            SessionActivity::Pending(_) => Some(None),
-            SessionActivity::Active(active) => Some(Some(active.id)),
+            SessionActivity::Idle | SessionActivity::Managing(_) => None,
+            SessionActivity::PendingTurn(_) => Some(None),
+            SessionActivity::ActiveTurn(active) => Some(Some(active.id)),
         }
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub const fn in_flight_mode(&self) -> Option<SessionMode> {
         match &self.activity {
-            SessionActivity::Pending(pending) => Some(pending.mode),
-            SessionActivity::Active(active) => Some(active.mode),
+            SessionActivity::PendingTurn(pending) => Some(pending.mode),
+            SessionActivity::ActiveTurn(active) => Some(active.mode),
+            SessionActivity::Managing(managing) => Some(managing.mode),
             SessionActivity::Idle => None,
         }
     }
 
     pub const fn in_flight_role(&self) -> Option<ModelRole> {
         match &self.activity {
-            SessionActivity::Pending(pending) => Some(pending.role),
-            SessionActivity::Active(active) => Some(active.role),
+            SessionActivity::PendingTurn(pending) => Some(pending.role),
+            SessionActivity::ActiveTurn(active) => Some(active.role),
+            SessionActivity::Managing(managing) => Some(managing.role),
             SessionActivity::Idle => None,
         }
     }
@@ -568,8 +640,12 @@ impl SessionState {
 
     pub const fn operation_kind(&self) -> Option<OperationKind> {
         match &self.activity {
-            SessionActivity::Pending(pending) => Some(pending.kind),
-            SessionActivity::Active(active) => Some(active.kind),
+            SessionActivity::PendingTurn(pending) => Some(pending.kind),
+            SessionActivity::ActiveTurn(active) => Some(active.kind),
+            SessionActivity::Managing(managing) => Some(match managing.request {
+                ManagementRequest::Models => OperationKind::ModelManagement,
+                ManagementRequest::Mode { .. } => OperationKind::ModeManagement,
+            }),
             SessionActivity::Idle => None,
         }
     }
@@ -592,7 +668,6 @@ impl SessionState {
 
     pub fn reset_for_restore(&mut self) {
         self.next_mode = SessionMode::Build;
-        self.pending_mode_selection = None;
         self.persistence_error = None;
         self.activity = SessionActivity::Idle;
         self.quiescent = true;
@@ -668,13 +743,13 @@ impl SessionState {
                 announced_mode,
                 self.observed_at,
             ),
-            SessionActivity::Pending(pending) if pending.kind.accepts(start) => (
+            SessionActivity::PendingTurn(pending) if pending.kind.accepts(start) => (
                 StartTransition::Pending(pending.kind),
                 pending.kind,
                 pending.mode,
                 pending.started_at,
             ),
-            SessionActivity::Active(active)
+            SessionActivity::ActiveTurn(active)
                 if active.id == id
                     && matches!(active.phase, ActivePhase::AwaitingStart)
                     && active.kind.accepts(start) =>
@@ -686,10 +761,12 @@ impl SessionState {
                     active.started_at,
                 )
             }
-            SessionActivity::Pending(_) | SessionActivity::Active(_) => return None,
+            SessionActivity::Managing(_)
+            | SessionActivity::PendingTurn(_)
+            | SessionActivity::ActiveTurn(_) => return None,
         };
         self.quiescent = false;
-        self.activity = SessionActivity::Active(ActiveOperation {
+        self.activity = SessionActivity::ActiveTurn(ActiveTurn {
             started_at,
             id,
             model_call: None,
@@ -722,23 +799,23 @@ impl SessionState {
                 idle_role,
                 self.observed_at,
             ),
-            SessionActivity::Pending(pending) if !pending.kind.is_management() => {
+            SessionActivity::PendingTurn(pending) => {
                 (pending.kind, pending.mode, pending.role, pending.started_at)
             }
-            SessionActivity::Pending(_) => return None,
-            SessionActivity::Active(active) if active.id == id => {
+            SessionActivity::Managing(_) => return None,
+            SessionActivity::ActiveTurn(active) if active.id == id => {
                 (active.kind, active.mode, active.role, active.started_at)
             }
-            SessionActivity::Active(_) => return None,
+            SessionActivity::ActiveTurn(_) => return None,
         };
         let (model_call, display_turn, call_header) = match &self.activity {
-            SessionActivity::Active(active) => {
+            SessionActivity::ActiveTurn(active) => {
                 (active.model_call, active.display_turn, active.call_header)
             }
             _ => (None, None, None),
         };
         self.quiescent = false;
-        self.activity = SessionActivity::Active(ActiveOperation {
+        self.activity = SessionActivity::ActiveTurn(ActiveTurn {
             started_at,
             id,
             model_call,
@@ -759,7 +836,7 @@ impl SessionState {
         id: TurnId,
         trigger: CompactionTrigger,
     ) -> Option<CompactionTransition> {
-        let SessionActivity::Active(active) = &self.activity else {
+        let SessionActivity::ActiveTurn(active) = &mut self.activity else {
             return None;
         };
         if active.id != id
@@ -778,32 +855,16 @@ impl SessionState {
         };
         match trigger {
             CompactionTrigger::Manual => self.activity = SessionActivity::Idle,
-            CompactionTrigger::AutomaticPreTurn => {
-                let active = match std::mem::replace(&mut self.activity, SessionActivity::Idle) {
-                    SessionActivity::Active(active) => active,
-                    SessionActivity::Idle | SessionActivity::Pending(_) => unreachable!(),
-                };
-                self.activity = SessionActivity::Active(ActiveOperation {
-                    phase: ActivePhase::AwaitingStart,
-                    ..active
-                });
-            }
+            CompactionTrigger::AutomaticPreTurn => active.phase = ActivePhase::AwaitingStart,
             CompactionTrigger::AutomaticMidTurn => {
-                let active = match std::mem::replace(&mut self.activity, SessionActivity::Idle) {
-                    SessionActivity::Active(active) => active,
-                    SessionActivity::Idle | SessionActivity::Pending(_) => unreachable!(),
-                };
-                self.activity = SessionActivity::Active(ActiveOperation {
-                    phase: ActivePhase::Running(TurnTail::Waiting),
-                    ..active
-                });
+                active.phase = ActivePhase::Running(TurnTail::Waiting)
             }
         }
         Some(transition)
     }
 
     pub fn accepts_network(&mut self, id: TurnId, call: usize, attempt: usize) -> bool {
-        let SessionActivity::Active(active) = &mut self.activity else {
+        let SessionActivity::ActiveTurn(active) = &mut self.activity else {
             return false;
         };
         if active.id != id
@@ -830,7 +891,7 @@ impl SessionState {
         if !self.accepts_network(id, call, attempt) {
             return false;
         }
-        let SessionActivity::Active(active) = &mut self.activity else {
+        let SessionActivity::ActiveTurn(active) = &mut self.activity else {
             unreachable!()
         };
         if status == NetworkStatus::AttemptStarted
@@ -853,7 +914,7 @@ impl SessionState {
 
     pub fn network_message(&self) -> Option<(String, bool)> {
         use zevria_session_api::event::{NetworkStatus, NetworkTransport};
-        let SessionActivity::Active(active) = &self.activity else {
+        let SessionActivity::ActiveTurn(active) = &self.activity else {
             return None;
         };
         let notice = active.network.as_ref()?;
@@ -920,7 +981,7 @@ impl SessionState {
     pub fn stream_snapshot(&self) -> Option<StreamSnapshotId> {
         matches!(
             self.activity,
-            SessionActivity::Active(ActiveOperation {
+            SessionActivity::ActiveTurn(ActiveTurn {
                 phase: ActivePhase::Running(TurnTail::Streaming(_)),
                 ..
             })
@@ -936,7 +997,7 @@ impl SessionState {
         retrying_for: Duration,
         error: String,
     ) -> bool {
-        if let SessionActivity::Active(active) = &mut self.activity
+        if let SessionActivity::ActiveTurn(active) = &mut self.activity
             && active.id == id
         {
             active.network = None;
@@ -958,20 +1019,20 @@ impl SessionState {
     }
 
     pub fn accepts_progress(&self, id: TurnId) -> bool {
-        matches!(&self.activity, SessionActivity::Active(active)
+        matches!(&self.activity, SessionActivity::ActiveTurn(active)
             if active.id == id && matches!(active.phase, ActivePhase::Running(_)))
     }
 
     pub fn accepts_terminal(&self, id: TurnId) -> bool {
         match &self.activity {
-            SessionActivity::Pending(pending) => !pending.kind.is_management(),
-            SessionActivity::Active(active) => active.id == id,
-            SessionActivity::Idle => false,
+            SessionActivity::PendingTurn(_) => true,
+            SessionActivity::ActiveTurn(active) => active.id == id,
+            SessionActivity::Idle | SessionActivity::Managing(_) => false,
         }
     }
 
     pub fn progress(&mut self, id: TurnId) -> bool {
-        if let SessionActivity::Active(active) = &mut self.activity
+        if let SessionActivity::ActiveTurn(active) = &mut self.activity
             && active.id == id
         {
             active.network = None;
@@ -983,7 +1044,7 @@ impl SessionState {
         if !self.accepts_progress(id) {
             return false;
         }
-        let SessionActivity::Active(active) = &mut self.activity else {
+        let SessionActivity::ActiveTurn(active) = &mut self.activity else {
             unreachable!("accepted a running turn");
         };
         active.phase = ActivePhase::Running(tail);
@@ -991,7 +1052,7 @@ impl SessionState {
     }
 
     pub fn clear_stream(&mut self, id: TurnId) -> bool {
-        let SessionActivity::Active(active) = &mut self.activity else {
+        let SessionActivity::ActiveTurn(active) = &mut self.activity else {
             return false;
         };
         if active.id != id {
@@ -1047,9 +1108,11 @@ impl SessionState {
             return None;
         }
         let kind = match &self.activity {
-            SessionActivity::Pending(pending) if !pending.kind.is_management() => pending.kind,
-            SessionActivity::Active(active) if active.id == id => active.kind,
-            SessionActivity::Idle | SessionActivity::Pending(_) | SessionActivity::Active(_) => {
+            SessionActivity::PendingTurn(pending) => pending.kind,
+            SessionActivity::ActiveTurn(active) if active.id == id => active.kind,
+            SessionActivity::Idle
+            | SessionActivity::Managing(_)
+            | SessionActivity::ActiveTurn(_) => {
                 return None;
             }
         };
@@ -1061,7 +1124,7 @@ impl SessionState {
     /// decisions. Current-session implementation remains in flight until its
     /// handoff start (and eventual terminal event).
     pub fn settle_plan_state(&mut self, state: &PlanWorkflowState) -> bool {
-        let SessionActivity::Pending(pending) = &self.activity else {
+        let SessionActivity::PendingTurn(pending) = &self.activity else {
             return false;
         };
         let settled = match (pending.kind, state) {
@@ -1088,7 +1151,7 @@ impl SessionState {
     }
 
     pub fn settle_fresh_handoff_request(&mut self, version: PlanVersion) -> bool {
-        let SessionActivity::Pending(PendingOperation {
+        let SessionActivity::PendingTurn(PendingTurn {
             kind: OperationKind::PlanImplementFresh { expected },
             ..
         }) = self.activity
@@ -1198,10 +1261,10 @@ mod tests {
             );
             assert!(state.compaction_completed(TURN, trigger).is_some());
             match (trigger, state.activity()) {
-                (CompactionTrigger::AutomaticPreTurn, SessionActivity::Active(active)) => {
+                (CompactionTrigger::AutomaticPreTurn, SessionActivity::ActiveTurn(active)) => {
                     assert!(matches!(active.phase, ActivePhase::AwaitingStart));
                 }
-                (CompactionTrigger::AutomaticMidTurn, SessionActivity::Active(active)) => {
+                (CompactionTrigger::AutomaticMidTurn, SessionActivity::ActiveTurn(active)) => {
                     assert!(matches!(
                         active.phase,
                         ActivePhase::Running(TurnTail::Waiting)
@@ -1258,7 +1321,7 @@ mod tests {
         assert!(state.progress(TURN));
         assert!(matches!(
             state.activity(),
-            SessionActivity::Active(ActiveOperation {
+            SessionActivity::ActiveTurn(ActiveTurn {
                 phase: ActivePhase::Running(TurnTail::Waiting),
                 ..
             })
@@ -1281,7 +1344,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             state.activity(),
-            SessionActivity::Active(ActiveOperation {
+            SessionActivity::ActiveTurn(ActiveTurn {
                 phase: ActivePhase::AwaitingStart,
                 ..
             })
@@ -1361,7 +1424,7 @@ mod tests {
             "immediate".into(),
         );
         let notice = |state: &SessionState| {
-            let SessionActivity::Active(ActiveOperation {
+            let SessionActivity::ActiveTurn(ActiveTurn {
                 phase: ActivePhase::Running(TurnTail::Retrying(notice)),
                 ..
             }) = state.activity()
@@ -1452,7 +1515,7 @@ mod tests {
         assert!(state.progress(TURN));
         assert!(matches!(
             state.activity(),
-            SessionActivity::Active(ActiveOperation {
+            SessionActivity::ActiveTurn(ActiveTurn {
                 phase: ActivePhase::Running(TurnTail::Waiting),
                 ..
             })
@@ -1573,10 +1636,4 @@ mod tests {
                 .is_none()
         );
     }
-}
-
-#[derive(Debug)]
-pub struct PendingModeSelection {
-    pub request_id: String,
-    pub mode: SessionMode,
 }

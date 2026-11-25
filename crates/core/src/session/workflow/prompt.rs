@@ -24,6 +24,7 @@ use zevria_instructions::skill::{ActiveSkills, SkillApplication, SkillInvocation
 use zevria_model::compaction::CompactionCheckpoint;
 use zevria_model::request::{InputTokenCount, ModelRequest, ModelRequestItem};
 use zevria_model::telemetry::{ContextTokenSnapshot, ContextTokenSource};
+use zevria_session_api::TurnEvent;
 use zevria_session_api::command::{
     TranscriptEdit, TranscriptEditReplacement, TranscriptEditTarget,
 };
@@ -888,11 +889,11 @@ impl<P: ModelProvider> SessionEngine<P> {
         }
         self.emit_selected_mode(events).await;
         let _ = events
-            .send(SessionEvent::TurnStarted {
+            .send(SessionEvent::Turn(TurnEvent::Started {
                 turn_id: turn.id,
                 message: prepared.display,
                 mode: context.mode,
-            })
+            }))
             .await;
         self.emit_plan_state_if_changed(previous, events).await?;
         Ok(AcceptedTurn {

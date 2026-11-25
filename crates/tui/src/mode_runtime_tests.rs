@@ -4,15 +4,24 @@ use zevria_foundation::ModelRole;
 use zevria_foundation::SessionMode;
 use zevria_session_api::ManagementCommand;
 use zevria_session_api::ModeSelectionResult;
+use zevria_session_api::{ManagementEvent, QuestionEvent, SubtaskEvent, TurnEvent};
 
 fn request(views: &mut SessionViews, command: &str) -> (String, SessionMode) {
     views
+        .workspace
         .root
         .set_focus_for_test(crate::app::FocusState::Insert);
-    views.root.set_input_for_test(command, command.len());
-    let Some(UiAction::SetMode { request_id, mode }) = views.handle_event(Event::Key(
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
-    )) else {
+    views
+        .workspace
+        .root
+        .set_input_for_test(command, command.len());
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Manage(
+        ManagementCommand::SetMode { request_id, mode },
+    ))) = views.handle_event(Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::CONTROL,
+    )))
+    else {
         panic!("root mode command");
     };
     (request_id, mode)
@@ -22,8 +31,8 @@ fn request(views: &mut SessionViews, command: &str) -> (String, SessionMode) {
 fn mode_actions_use_management_transport_and_acknowledge_only_the_root() {
     let mut views = SessionViews::new(App::new(), PathBuf::from("."));
     views.seed_child_creation_order(&[TranscriptItem::SessionMode(SessionMode::Plan)]);
-    assert!(views.children.is_empty());
-    assert!(views.agents.is_empty());
+    assert!(views.workspace.children.is_empty());
+    assert!(views.workspace.agents.is_empty());
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let (id, mode) = request(&mut views, "/plan");
     views.send_mode_selection(&commands, id.clone(), mode);
@@ -34,34 +43,34 @@ fn mode_actions_use_management_transport_and_acknowledge_only_the_root() {
     let child = SubtaskId::new("child");
     let index = views.ensure_child(&child);
     views.set_visible(Some(VisiblePane::Subtask(
-        views.children[index].app.surface().id.pane,
+        views.workspace.children[index].app.surface().id.pane,
     )));
-    views.apply(SessionEvent::SubtaskSession {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
         id: child.clone(),
-        event: Box::new(SessionEvent::ModeResult {
+        event: Box::new(SessionEvent::Manage(ManagementEvent::ModeResult {
             request_id: id.clone(),
             result: ModeSelectionResult::Accepted {
                 mode,
                 changed: true,
             },
-        }),
-    });
-    assert!(views.root.mode_selection_pending());
-    assert_eq!(views.root.next_mode(), SessionMode::Build);
-    views.apply(SessionEvent::ModeResult {
+        })),
+    }));
+    assert!(views.workspace.root.mode_selection_pending());
+    assert_eq!(views.workspace.root.next_mode(), SessionMode::Build);
+    views.apply(SessionEvent::Manage(ManagementEvent::ModeResult {
         request_id: id,
         result: ModeSelectionResult::Accepted {
             mode,
             changed: true,
         },
-    });
-    assert!(!views.root.is_busy());
-    assert_eq!(views.root.next_mode(), SessionMode::Plan);
+    }));
+    assert!(!views.workspace.root.is_busy());
+    assert_eq!(views.workspace.root.next_mode(), SessionMode::Plan);
     assert_eq!(views.child(&child).unwrap().next_mode(), SessionMode::Build);
-    views.apply(SessionEvent::ModeChanged {
+    views.apply(SessionEvent::Turn(TurnEvent::ModeChanged {
         mode: SessionMode::Plan,
-    });
-    assert_eq!(views.root.next_mode(), SessionMode::Plan);
+    }));
+    assert_eq!(views.workspace.root.next_mode(), SessionMode::Plan);
     assert_eq!(views.child(&child).unwrap().next_mode(), SessionMode::Build);
 }
 
@@ -73,12 +82,12 @@ fn closed_mode_transport_unlocks_the_root_and_restores_the_command_draft() {
     let draft = "/plan \n";
     let (id, mode) = request(&mut views, draft);
     views.send_mode_selection(&commands, id, mode);
-    assert_eq!(views.root.next_mode(), SessionMode::Build);
-    assert_eq!(views.root.input(), draft);
-    assert!(!views.root.is_busy());
-    assert!(!views.root.mode_selection_pending());
+    assert_eq!(views.workspace.root.next_mode(), SessionMode::Build);
+    assert_eq!(views.workspace.root.input(), draft);
+    assert!(!views.workspace.root.is_busy());
+    assert!(!views.workspace.root.mode_selection_pending());
     assert!(
-        matches!(views.root.history(), [crate::app::HistoryEntry::Error(error)] if error.contains("engine_stopped"))
+        matches!(views.workspace.root.history(), [crate::app::HistoryEntry::Error(error)] if error.contains("engine_stopped"))
     );
 }
 
@@ -86,19 +95,24 @@ fn closed_mode_transport_unlocks_the_root_and_restores_the_command_draft() {
 fn pending_shortcut_preserves_the_root_draft_and_cannot_cancel_root_from_a_child() {
     let mut views = SessionViews::new(App::new(), PathBuf::from("."));
     views
+        .workspace
         .root
         .set_focus_for_test(crate::app::FocusState::Insert);
     let draft = "é draft\nnext line";
-    views.root.set_input_for_test(draft, 2);
-    let Some(UiAction::SetMode { request_id, mode }) = views.handle_event(Event::Key(
-        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
-    )) else {
+    views.workspace.root.set_input_for_test(draft, 2);
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Manage(
+        ManagementCommand::SetMode { request_id, mode },
+    ))) = views.handle_event(Event::Key(KeyEvent::new(
+        KeyCode::BackTab,
+        KeyModifiers::SHIFT,
+    )))
+    else {
         panic!("mode management shortcut");
     };
     let child = views.ensure_child(&SubtaskId::new("inspect-child"));
     for pane in [
         Some(VisiblePane::Subtask(
-            views.children[child].app.surface().id.pane,
+            views.workspace.children[child].app.surface().id.pane,
         )),
         None,
     ] {
@@ -111,32 +125,35 @@ fn pending_shortcut_preserves_the_root_draft_and_cannot_cancel_root_from_a_child
                 )))
                 .is_none()
         );
-        assert_eq!(views.root.input(), if pane.is_some() { draft } else { "" });
         assert_eq!(
-            views.root.input_cursor(),
+            views.workspace.root.input(),
+            if pane.is_some() { draft } else { "" }
+        );
+        assert_eq!(
+            views.workspace.root.input_cursor(),
             if pane.is_some() { 2 } else { 0 }
         );
-        assert!(views.root.mode_selection_pending());
-        assert_eq!(views.root.active_turn_id(), None);
+        assert!(views.workspace.root.mode_selection_pending());
+        assert_eq!(views.workspace.root.active_turn_id(), None);
     }
-    views.apply(SessionEvent::ModeResult {
+    views.apply(SessionEvent::Manage(ManagementEvent::ModeResult {
         request_id,
         result: ModeSelectionResult::Accepted {
             mode,
             changed: true,
         },
-    });
-    assert!(!views.root.is_busy());
-    assert_eq!(views.root.next_mode(), SessionMode::Plan);
-    assert_eq!(views.root.input(), "");
-    assert_eq!(views.root.input_cursor(), 0);
+    }));
+    assert!(!views.workspace.root.is_busy());
+    assert_eq!(views.workspace.root.next_mode(), SessionMode::Plan);
+    assert_eq!(views.workspace.root.input(), "");
+    assert_eq!(views.workspace.root.input_cursor(), 0);
 }
 
 #[test]
 fn delayed_question_cannot_open_a_response_path_during_mode_management() {
     let mut views = SessionViews::new(App::new(), PathBuf::from("."));
     let (id, mode) = request(&mut views, "/plan");
-    views.apply(SessionEvent::QuestionAsked {
+    views.apply(SessionEvent::Question(QuestionEvent::Asked {
         turn_id: zevria_foundation::TurnId::new(99),
         request: zevria_foundation::QuestionRequest {
             allow_choice_notes: false,
@@ -156,20 +173,20 @@ fn delayed_question_cannot_open_a_response_path_during_mode_management() {
                 default: None,
             }],
         },
-    });
-    assert!(views.overlays.question().is_none());
-    assert!(views.root.mode_selection_pending());
-    assert!(views.root.history().is_empty());
-    views.apply(SessionEvent::ModeResult {
+    }));
+    assert!(views.workspace.controls.question().is_none());
+    assert!(views.workspace.root.mode_selection_pending());
+    assert!(views.workspace.root.history().is_empty());
+    views.apply(SessionEvent::Manage(ManagementEvent::ModeResult {
         request_id: id,
         result: ModeSelectionResult::Accepted {
             mode,
             changed: true,
         },
-    });
-    assert!(views.overlays.question().is_none());
-    assert_eq!(views.root.next_mode(), SessionMode::Plan);
-    assert!(!views.root.is_busy());
+    }));
+    assert!(views.workspace.controls.question().is_none());
+    assert_eq!(views.workspace.root.next_mode(), SessionMode::Plan);
+    assert!(!views.workspace.root.is_busy());
 }
 
 #[test]
@@ -181,13 +198,13 @@ fn draining_engine_shutdown_settles_unacknowledged_selection_but_keeps_an_accept
         let (events, mut updates) = zevria_session_api::session_event_channel(8);
         if acknowledged {
             events
-                .try_send(SessionEvent::ModeResult {
+                .try_send(SessionEvent::Manage(ManagementEvent::ModeResult {
                     request_id: id.clone(),
                     result: ModeSelectionResult::Accepted {
                         mode,
                         changed: true,
                     },
-                })
+                }))
                 .unwrap();
         }
         drop(events);
@@ -198,38 +215,41 @@ fn draining_engine_shutdown_settles_unacknowledged_selection_but_keeps_an_accept
                 .is_none()
         );
         assert!(engine_done);
-        assert!(!views.root.is_busy());
-        assert!(!views.root.mode_selection_pending());
+        assert!(!views.workspace.root.is_busy());
+        assert!(!views.workspace.root.mode_selection_pending());
         let selected = if acknowledged {
             SessionMode::Plan
         } else {
             SessionMode::Build
         };
-        assert_eq!(views.root.next_mode(), selected);
-        assert_eq!(views.root.input(), if acknowledged { "" } else { draft });
-        let errors = views.root.history().len();
+        assert_eq!(views.workspace.root.next_mode(), selected);
+        assert_eq!(
+            views.workspace.root.input(),
+            if acknowledged { "" } else { draft }
+        );
+        let errors = views.workspace.root.history().len();
         assert_eq!(errors, usize::from(!acknowledged));
-        views.root.engine_disconnected();
-        views.apply(SessionEvent::ModeResult {
+        views.workspace.root.engine_disconnected();
+        views.apply(SessionEvent::Manage(ManagementEvent::ModeResult {
             request_id: id,
             result: ModeSelectionResult::Accepted {
                 mode,
                 changed: true,
             },
-        });
-        assert_eq!(views.root.next_mode(), selected);
-        assert_eq!(views.root.history().len(), errors);
+        }));
+        assert_eq!(views.workspace.root.next_mode(), selected);
+        assert_eq!(views.workspace.root.history().len(), errors);
     }
 }
 
 #[test]
 fn pending_mode_selection_blocks_model_picker_cancellation_and_repeated_switches() {
     let mut views = SessionViews::new(App::new(), PathBuf::from("."));
-    views.root.apply_selected_mode(SessionMode::Plan);
+    views.workspace.root.apply_selected_mode(SessionMode::Plan);
     let (id, mode) = request(&mut views, "/build");
     views.open_model_picker(ModelSelectionScope::SessionOnly);
-    assert!(!views.overlays.models.is_open());
-    assert!(views.overlays.models.commands.is_empty());
+    assert!(!views.workspace.controls.models.is_open());
+    assert!(views.workspace.controls.models.commands.is_empty());
     for key in [
         KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
         KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
@@ -237,14 +257,14 @@ fn pending_mode_selection_blocks_model_picker_cancellation_and_repeated_switches
     ] {
         assert!(views.handle_event(Event::Key(key)).is_none());
     }
-    assert!(views.root.mode_selection_pending());
-    views.apply(SessionEvent::ModeResult {
+    assert!(views.workspace.root.mode_selection_pending());
+    views.apply(SessionEvent::Manage(ManagementEvent::ModeResult {
         request_id: id,
         result: ModeSelectionResult::Accepted {
             mode,
             changed: true,
         },
-    });
+    }));
     views.open_model_picker(ModelSelectionScope::SessionOnly);
     let Some(SessionCommand::Manage(ManagementCommand::Models {
         request_id,
@@ -253,7 +273,7 @@ fn pending_mode_selection_blocks_model_picker_cancellation_and_repeated_switches
                 mode: captured,
                 scope,
             },
-    })) = views.overlays.models.commands.pop_front()
+    })) = views.workspace.controls.models.commands.pop_front()
     else {
         panic!("model selection after acknowledged mode");
     };
@@ -265,9 +285,9 @@ fn pending_mode_selection_blocks_model_picker_cancellation_and_repeated_switches
         input_token_limit: 9_000,
         retained_user_tokens: 100,
     };
-    views.apply(SessionEvent::ModelsResult {
+    views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
         request_id: request_id.clone(),
-        result: zevria_model::models::ModelManagementResult::Catalog {
+        result: Box::new(zevria_model::models::ModelManagementResult::Catalog {
             mode: captured,
             scope,
             current: zevria_model::models::ModelSelection::new(
@@ -279,13 +299,13 @@ fn pending_mode_selection_blocks_model_picker_cancellation_and_repeated_switches
                 reasoning_levels: vec![zevria_foundation::ReasoningLevel::Medium],
             }],
             revision: "old".into(),
-        },
-    });
-    views.overlays.models.handle_key(KeyCode::Enter);
-    views.overlays.models.handle_key(KeyCode::Enter);
-    views.apply(SessionEvent::ModelsResult {
+        }),
+    }));
+    views.workspace.controls.models.handle_key(KeyCode::Enter);
+    views.workspace.controls.models.handle_key(KeyCode::Enter);
+    views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
         request_id,
-        result: zevria_model::models::ModelManagementResult::Changed {
+        result: Box::new(zevria_model::models::ModelManagementResult::Changed {
             role: ModelRole::Build,
             scope,
             context: context.clone(),
@@ -293,9 +313,12 @@ fn pending_mode_selection_blocks_model_picker_cancellation_and_repeated_switches
             reasoning_level: zevria_foundation::ReasoningLevel::Medium,
             revision: "new".into(),
             unchanged: false,
-        },
-    });
-    assert_eq!(views.root.status_for_test().profile, Some(context.profile));
-    assert_eq!(views.root.next_mode(), SessionMode::Build);
-    assert!(!views.root.is_busy());
+        }),
+    }));
+    assert_eq!(
+        views.workspace.root.status_for_test().profile,
+        Some(context.profile)
+    );
+    assert_eq!(views.workspace.root.next_mode(), SessionMode::Build);
+    assert!(!views.workspace.root.is_busy());
 }

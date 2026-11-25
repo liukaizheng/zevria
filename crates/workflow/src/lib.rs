@@ -27,3 +27,6 @@ pub mod plan;
 pub use ensemble::*;
 pub use ensemble_review::*;
 pub use plan::*;
+
+mod worker_observer;
+pub use worker_observer::{WorkerEventObserver, WorkerObservation};

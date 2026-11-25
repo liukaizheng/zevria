@@ -7,6 +7,8 @@ use crate::layout::ConversationCache;
 use crate::presentation::{
     AcpToolPresentation, ConversationEntry, PresentationBlockId, PresentedTool,
 };
+use zevria_session_api::SessionStreamState;
+use zevria_session_api::{SubtaskEvent, TurnEvent};
 
 fn chord(app: &mut App, suffix: char) {
     chord_with_modifiers(app, suffix, KeyModifiers::NONE);
@@ -90,7 +92,7 @@ fn executing_edit() -> App {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             turn_id: TEST_TURN_ID,
             attempt_id: None,
             message: assistant_message(vec![tool_call(
@@ -99,45 +101,48 @@ fn executing_edit() -> App {
                 "edit",
                 json!({"file_path":"src/main.rs"}),
             )]),
-        },
+        }),
     );
     app
 }
 
 fn finish_edit(app: &mut App, output: &str) {
-    app.reduce_without_effects(SessionEvent::ToolResults {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::ToolResults {
         turn_id: TEST_TURN_ID,
         message: tool_result_message("edit", None, "edit", output),
         metadata: vec![
             file_metadata("edit", None, "edit", ToolCallOutcome::Error, Vec::new())
                 .with_diagnostic(output),
         ],
-    });
+    }));
 }
 
 fn start_span_turn(app: &mut App, id: u64, prompt: &str) {
-    app.reduce_without_effects(SessionEvent::TurnStarted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
         turn_id: TurnId::new(id),
         message: Message::user(prompt),
         mode: SessionMode::Build,
-    });
+    }));
 }
 
 fn span_call(app: &mut App, id: u64, call: usize, message: Message, complete: bool) {
     let turn_id = TurnId::new(id);
-    app.reduce_without_effects(SessionEvent::ModelCallStarted { turn_id, call });
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::ModelCallStarted {
+        turn_id,
+        call,
+    }));
     app.reduce_without_effects(if complete {
-        SessionEvent::TurnCompleted {
+        SessionEvent::Turn(TurnEvent::Completed {
             turn_id,
             message,
             attempt_id: None,
-        }
+        })
     } else {
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             turn_id,
             message,
             attempt_id: None,
-        }
+        })
     });
 }
 
@@ -1497,10 +1502,12 @@ fn zr_does_not_trigger_a_pending_fresh_plan_retry() {
     assert!(fold_keys(&app).is_empty(), "removed zr must be inert");
     assert_eq!(
         app.handle_event(key(KeyCode::Char('r'))),
-        Some(UiAction::ResolvePlan {
-            expected,
-            decision: PlanDecision::ImplementFresh
-        })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::ResolvePlan {
+                expected,
+                decision: PlanDecision::ImplementFresh
+            }
+        )))
     );
 }
 
@@ -1509,11 +1516,11 @@ fn bulk_fold_hides_only_the_current_streaming_snapshot() {
     let mut app = App::new();
     start_span_turn(&mut app, 1, "prompt");
     let turn_id = TurnId::new(1);
-    app.reduce_without_effects(SessionEvent::ModelCallStarted { turn_id, call: 1 });
-    let snapshot = |text| SessionEvent::AssistantStreamUpdated {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::ModelCallStarted {
         turn_id,
-        snapshot: Message::assistant(text).into(),
-    };
+        call: 1,
+    }));
+    let snapshot = |text| SessionStreamState::new(turn_id, Message::assistant(text).into());
     app.reduce_without_effects(snapshot("provisional body"));
     assert!(rendered_text(&mut app, 80, 24).contains("provisional body"));
     chord(&mut app, 'm');
@@ -1531,11 +1538,11 @@ fn bulk_fold_hides_only_the_current_streaming_snapshot() {
     chord(&mut app, 'R');
     assert!(rendered_text(&mut app, 80, 24).contains("fresh snapshot"));
     chord(&mut app, 'm');
-    app.reduce_without_effects(SessionEvent::TurnCompleted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Completed {
         turn_id,
         message: Message::assistant("fresh snapshot"),
         attempt_id: None,
-    });
+    }));
     assert!(rendered_text(&mut app, 80, 24).contains("fresh snapshot"));
     assert!(app.view_cache().streaming().is_none());
 }
@@ -1781,20 +1788,20 @@ fn root_and_child_panes_keep_independent_folds_across_navigation() {
     fold_messages(&mut root, [0]);
     let mut views = test_session_views(root);
     let id = SubtaskId::new("fold-child");
-    views.apply(SessionEvent::SubtaskLaunched {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
         turn_id: TEST_TURN_ID,
         call_id: "launch".into(),
         entry_index: 0,
-        descriptor: child_descriptor("fold-child", "fold child"),
-    });
-    views.apply(SessionEvent::SubtaskSession {
+        descriptor: Box::new(child_descriptor("fold-child", "fold child")),
+    }));
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
         id: id.clone(),
-        event: Box::new(SessionEvent::TurnStarted {
+        event: Box::new(SessionEvent::Turn(TurnEvent::Started {
             turn_id: TurnId::new(42),
             message: Message::user(numbered_lines(6)),
             mode: SessionMode::Build,
-        }),
-    });
+        })),
+    }));
     views.handle_event(ctrl('i'));
     rendered_views_text(&mut views, 100, 20);
     assert_eq!(views.visible_child_id(), Some(&id));

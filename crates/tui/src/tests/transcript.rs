@@ -1,16 +1,18 @@
 //! Transcript behavior and presentation tests.
 use super::*;
+use zevria_session_api::SessionStreamState;
+use zevria_session_api::{EnsembleEvent, PlanEvent, SubtaskEvent, TurnEvent};
 
 #[test]
 fn unread_intermediate_fences_reasoning_tool_preview_without_a_stale_tail() {
     let (sender, mut receiver) = session_event_channel(8);
     let mut views = test_session_views(App::new());
     sender
-        .try_send(SessionEvent::TurnStarted {
+        .try_send(SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("use a tool"),
             mode: SessionMode::Build,
-        })
+        }))
         .expect("turn starts");
     apply_transport_update(
         &mut views,
@@ -30,11 +32,11 @@ fn unread_intermediate_fences_reasoning_tool_preview_without_a_stale_tail() {
     ]);
     sender.stream_updated(TEST_TURN_ID, tool_message.clone());
     sender
-        .try_send(SessionEvent::Intermediate {
+        .try_send(SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_message,
-        })
+        }))
         .expect("intermediate queues");
 
     apply_transport_update(
@@ -53,11 +55,11 @@ fn a_preview_consumed_before_intermediate_is_cleared_by_the_commit() {
     let (sender, mut receiver) = session_event_channel(8);
     let mut views = test_session_views(App::new());
     sender
-        .try_send(SessionEvent::TurnStarted {
+        .try_send(SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("use a tool"),
             mode: SessionMode::Build,
-        })
+        }))
         .expect("turn starts");
     apply_transport_update(
         &mut views,
@@ -83,11 +85,11 @@ fn a_preview_consumed_before_intermediate_is_cleared_by_the_commit() {
     assert!(views.root().streaming().is_some());
 
     sender
-        .try_send(SessionEvent::Intermediate {
+        .try_send(SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_message,
-        })
+        }))
         .expect("intermediate queues");
     apply_transport_update(
         &mut views,
@@ -102,11 +104,11 @@ fn a_new_preview_after_intermediate_remains_visible() {
     let (sender, mut receiver) = session_event_channel(8);
     let mut views = test_session_views(App::new());
     sender
-        .try_send(SessionEvent::TurnStarted {
+        .try_send(SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("continue after the tool"),
             mode: SessionMode::Build,
-        })
+        }))
         .expect("turn starts");
     apply_transport_update(
         &mut views,
@@ -115,11 +117,11 @@ fn a_new_preview_after_intermediate_remains_visible() {
 
     sender.stream_updated(TEST_TURN_ID, Message::assistant("old preview"));
     sender
-        .try_send(SessionEvent::Intermediate {
+        .try_send(SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("committed tool call"),
-        })
+        }))
         .expect("intermediate queues");
     sender.stream_updated(TEST_TURN_ID, Message::assistant("legitimate continuation"));
 
@@ -145,54 +147,54 @@ fn stale_turn_events_cannot_mutate_an_idle_or_newer_turn() {
     let old_turn = TurnId::new(1);
     let new_turn = TurnId::new(2);
     let mut app = App::new();
-    app.reduce_without_effects(SessionEvent::TurnStarted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
         turn_id: old_turn,
         message: Message::user("old question"),
         mode: SessionMode::Build,
-    });
-    app.reduce_without_effects(SessionEvent::TurnCompleted {
+    }));
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Completed {
         attempt_id: None,
         turn_id: old_turn,
         message: Message::assistant("old answer"),
-    });
+    }));
     let idle_history_len = app.history().len();
 
-    app.reduce_without_effects(SessionEvent::AssistantStreamUpdated {
-        turn_id: old_turn,
-        snapshot: (Message::assistant("late draft")).into(),
-    });
-    app.reduce_without_effects(SessionEvent::Intermediate {
+    app.reduce_without_effects(SessionStreamState::new(
+        old_turn,
+        (Message::assistant("late draft")).into(),
+    ));
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Intermediate {
         attempt_id: None,
         turn_id: old_turn,
         message: Message::assistant("late intermediate"),
-    });
-    app.reduce_without_effects(SessionEvent::TurnCompleted {
+    }));
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Completed {
         attempt_id: None,
         turn_id: old_turn,
         message: Message::assistant("duplicate terminal"),
-    });
+    }));
     assert_eq!(app.history().len(), idle_history_len);
     assert!(app.streaming().is_none());
     assert!(!app.is_busy());
 
-    app.reduce_without_effects(SessionEvent::TurnStarted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
         turn_id: new_turn,
         message: Message::user("new question"),
         mode: SessionMode::Plan,
-    });
+    }));
     let active_history_len = app.history().len();
-    app.reduce_without_effects(SessionEvent::TurnRejected {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Rejected {
         turn_id: old_turn,
         error: "stale rejection".into(),
-    });
-    app.reduce_without_effects(SessionEvent::AssistantStreamUpdated {
-        turn_id: old_turn,
-        snapshot: (Message::assistant("stale old stream")).into(),
-    });
-    app.reduce_without_effects(SessionEvent::TurnFailed {
+    }));
+    app.reduce_without_effects(SessionStreamState::new(
+        old_turn,
+        (Message::assistant("stale old stream")).into(),
+    ));
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Failed {
         turn_id: old_turn,
         error: "stale old failure".to_string(),
-    });
+    }));
     assert_eq!(app.history().len(), active_history_len);
     assert_eq!(app.active_turn_id(), Some(new_turn));
     assert!(app.is_busy());
@@ -206,15 +208,15 @@ fn recovered_turn_unlocks_without_duplicating_restored_assistant_message() {
     let mut app = App::new();
     app.restore(vec![TranscriptItem::Message(final_message)]);
     let history_len = app.history().len();
-    app.reduce_without_effects(SessionEvent::TurnStarted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
         turn_id,
         message: Message::User {
             content: Vec::new(),
         },
         mode: SessionMode::Build,
-    });
+    }));
 
-    app.reduce_without_effects(SessionEvent::TurnRecovered { turn_id });
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Recovered { turn_id }));
 
     assert_eq!(app.history().len(), history_len);
     assert!(!app.is_busy());
@@ -229,16 +231,16 @@ fn streamed_tool_calls_are_hidden_until_finalized_intermediate() {
     let mut pure_call = App::new();
     apply_turn_event(
         &mut pure_call,
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: (assistant_message(vec![tool_call(
+        SessionStreamState::new(
+            TEST_TURN_ID,
+            (assistant_message(vec![tool_call(
                 "fc_1",
                 Some("call_1"),
                 "command",
                 arguments.clone(),
             )]))
             .into(),
-        },
+        ),
     );
     assert!(pure_call.streaming().is_none());
     let pure_streamed = rendered_text(&mut pure_call, 100, 10);
@@ -253,10 +255,7 @@ fn streamed_tool_calls_are_hidden_until_finalized_intermediate() {
 
     apply_turn_event(
         &mut app,
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: (message.clone()).into(),
-        },
+        SessionStreamState::new(TEST_TURN_ID, (message.clone()).into()),
     );
 
     let streamed = rendered_text(&mut app, 500, 12);
@@ -266,11 +265,11 @@ fn streamed_tool_calls_are_hidden_until_finalized_intermediate() {
 
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message,
-        },
+        }),
     );
 
     assert_eq!(tool_status(&app, 0, 1), ToolCallStatus::Executing);
@@ -338,11 +337,11 @@ fn command_display_elision_keeps_y_copy_payload_exact() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call("fc-copy", None, "command", args.clone())]),
-        },
+        }),
     );
     app.select_for_test(cursor(0, 0));
     let rendered = rendered_text(&mut app, 120, 16);
@@ -605,7 +604,7 @@ fn correlated_result_finishes_call_without_adding_visible_history() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -614,7 +613,7 @@ fn correlated_result_finishes_call_without_adding_visible_history() {
                 "command",
                 arguments.clone(),
             )]),
-        },
+        }),
     );
     app.select_for_test(cursor(0, 0));
 
@@ -632,11 +631,11 @@ fn correlated_result_finishes_call_without_adding_visible_history() {
 
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("fc_1", Some("call_1"), "command", output),
-        },
+        }),
     );
 
     assert_eq!(app.history().len(), 1);
@@ -663,11 +662,11 @@ fn correlated_result_finishes_call_without_adding_visible_history() {
 
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnCompleted {
+        SessionEvent::Turn(TurnEvent::Completed {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("final answer"),
-        },
+        }),
     );
     app.select_message_for_test(cursor(1, 0));
     app.handle_event(key(KeyCode::Up));
@@ -697,7 +696,7 @@ fn live_file_result_is_compact_rendered_and_copy_is_metadata_free() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -706,7 +705,7 @@ fn live_file_result_is_compact_rendered_and_copy_is_metadata_free() {
                 "edit",
                 arguments.clone(),
             )]),
-        },
+        }),
     );
 
     let executing = rendered_text(&mut app, 120, 12);
@@ -716,7 +715,7 @@ fn live_file_result_is_compact_rendered_and_copy_is_metadata_free() {
 
     apply_turn_event(
         &mut app,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: tool_result_message("file", Some("provider"), "edit", output),
             metadata: vec![file_metadata(
@@ -732,7 +731,7 @@ fn live_file_result_is_compact_rendered_and_copy_is_metadata_free() {
                     },
                 }],
             )],
-        },
+        }),
     );
 
     let rendered = rendered_text(&mut app, 120, 24);
@@ -812,15 +811,15 @@ fn read_image_renders_compact_facts_and_preserves_raw_copy() {
         let mut app = App::new();
         apply_turn_event(
             &mut app,
-            SessionEvent::Intermediate {
+            SessionEvent::Turn(TurnEvent::Intermediate {
                 attempt_id: None,
                 turn_id: TEST_TURN_ID,
                 message: assistant_message(vec![AssistantContent::ToolCall(call.clone())]),
-            },
+            }),
         );
         apply_turn_event(
             &mut app,
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 turn_id: TEST_TURN_ID,
                 message: Message::User {
                     content: vec![UserContent::ToolResult(call.result(vec![
@@ -835,7 +834,7 @@ fn read_image_renders_compact_facts_and_preserves_raw_copy() {
                     ToolCallOutcome::Success,
                     Vec::new(),
                 )],
-            },
+            }),
         );
         let rendered = rendered_text(&mut app, 120, 12);
         assert!(
@@ -1122,7 +1121,7 @@ fn compact_write_and_delete_keep_hidden_arguments_and_plain_results_copyable() {
         let mut app = App::new();
         apply_turn_event(
             &mut app,
-            SessionEvent::Intermediate {
+            SessionEvent::Turn(TurnEvent::Intermediate {
                 attempt_id: None,
                 turn_id: TEST_TURN_ID,
                 message: assistant_message(vec![tool_call(
@@ -1131,7 +1130,7 @@ fn compact_write_and_delete_keep_hidden_arguments_and_plain_results_copyable() {
                     tool_name,
                     arguments.clone(),
                 )]),
-            },
+            }),
         );
 
         let executing = rendered_text(&mut app, 100, 16);
@@ -1141,7 +1140,7 @@ fn compact_write_and_delete_keep_hidden_arguments_and_plain_results_copyable() {
 
         apply_turn_event(
             &mut app,
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 turn_id: TEST_TURN_ID,
                 message: tool_result_message("copy-file", None, tool_name, &output),
                 metadata: vec![file_metadata(
@@ -1154,7 +1153,7 @@ fn compact_write_and_delete_keep_hidden_arguments_and_plain_results_copyable() {
                         change,
                     }],
                 )],
-            },
+            }),
         );
 
         let _ = rendered_text(&mut app, 100, 16);
@@ -1343,7 +1342,7 @@ fn denied_file_result_is_labeled_denied_and_keeps_copyable_output() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -1352,11 +1351,11 @@ fn denied_file_result_is_labeled_denied_and_keeps_copyable_output() {
                 "write",
                 arguments.clone(),
             )]),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: tool_result_message("denied-file", Some("provider-denied"), "write", output),
             metadata: vec![
@@ -1374,7 +1373,7 @@ fn denied_file_result_is_labeled_denied_and_keeps_copyable_output() {
                 )
                 .with_diagnostic("the tool `write` is unavailable in Plan mode"),
             ],
-        },
+        }),
     );
 
     let _ = rendered_text(&mut app, 100, 16);
@@ -1413,7 +1412,7 @@ fn failed_file_result_is_labeled_and_rendered_as_an_error() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -1422,18 +1421,18 @@ fn failed_file_result_is_labeled_and_rendered_as_an_error() {
                 "delete",
                 json!({"file_path": "missing.txt"}),
             )]),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: tool_result_message("file", None, "delete", output),
             metadata: vec![
                 file_metadata("file", None, "delete", ToolCallOutcome::Error, Vec::new())
                     .with_diagnostic("file missing.txt does not exist"),
             ],
-        },
+        }),
     );
 
     let _ = rendered_text(&mut app, 100, 16);
@@ -1679,7 +1678,7 @@ fn duplicate_file_metadata_follows_result_order() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![
@@ -1696,11 +1695,11 @@ fn duplicate_file_metadata_follows_result_order() {
                     json!({"file_path": "two.rs", "content": "two"}),
                 ),
             ]),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: Message::User {
                 content: vec![
@@ -1742,7 +1741,7 @@ fn duplicate_file_metadata_follows_result_order() {
                     }],
                 ),
             ],
-        },
+        }),
     );
 
     let HistoryEntry::Conversation(entry) = &app.history()[0] else {
@@ -1830,19 +1829,19 @@ fn missing_empty_or_mismatched_metadata_keeps_plain_write_and_delete_results() {
                 } else {
                     apply_turn_event(
                         &mut app,
-                        SessionEvent::Intermediate {
+                        SessionEvent::Turn(TurnEvent::Intermediate {
                             attempt_id: None,
                             turn_id: TEST_TURN_ID,
                             message: assistant.clone(),
-                        },
+                        }),
                     );
                     apply_turn_event(
                         &mut app,
-                        SessionEvent::ToolResults {
+                        SessionEvent::Turn(TurnEvent::ToolResults {
                             turn_id: TEST_TURN_ID,
                             message: result.clone(),
                             metadata: metadata.clone(),
-                        },
+                        }),
                     );
                 }
 
@@ -1892,15 +1891,15 @@ fn write_and_delete_selection_styles_only_the_summary_and_scrolling_never_reveal
         let mut app = App::new();
         apply_turn_event(
             &mut app,
-            SessionEvent::Intermediate {
+            SessionEvent::Turn(TurnEvent::Intermediate {
                 attempt_id: None,
                 turn_id: TEST_TURN_ID,
                 message: assistant_message(vec![tool_call("file", None, tool_name, arguments)]),
-            },
+            }),
         );
         apply_turn_event(
             &mut app,
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 turn_id: TEST_TURN_ID,
                 message: tool_result_message("file", None, tool_name, "hidden plain result"),
                 metadata: vec![file_metadata(
@@ -1913,7 +1912,7 @@ fn write_and_delete_selection_styles_only_the_summary_and_scrolling_never_reveal
                         change,
                     }],
                 )],
-            },
+            }),
         );
         let counts = if tool_name == "write" {
             "+1010 -0"
@@ -1992,7 +1991,7 @@ fn selected_edit_keeps_the_1000_wrapped_row_limit_and_notice() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -2001,11 +2000,11 @@ fn selected_edit_keeps_the_1000_wrapped_row_limit_and_notice() {
                 "edit",
                 json!({"file_path": "large.rs", "replacements": [], "move_to": null}),
             )]),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: tool_result_message(
                 "edit-file",
@@ -2026,7 +2025,7 @@ fn selected_edit_keeps_the_1000_wrapped_row_limit_and_notice() {
                     },
                 }],
             )],
-        },
+        }),
     );
     app.select_for_test(cursor(0, 0));
 
@@ -2099,23 +2098,23 @@ fn call_id_disambiguates_repeated_tool_ids() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![
                 tool_call("shared", Some("provider_1"), "first", json!({})),
                 tool_call("shared", Some("provider_2"), "second", json!({})),
             ]),
-        },
+        }),
     );
 
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("shared", Some("provider_1"), "first", "first output"),
-        },
+        }),
     );
 
     assert_eq!(tool_status(&app, 0, 0), ToolCallStatus::Finished);
@@ -2136,11 +2135,11 @@ fn call_id_disambiguates_repeated_tool_ids() {
 
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("shared", Some("provider_2"), "second", "second output"),
-        },
+        }),
     );
 
     assert_eq!(tool_status(&app, 0, 0), ToolCallStatus::Finished);
@@ -2166,7 +2165,7 @@ fn exact_call_id_match_beats_a_missing_call_id_fallback() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![
@@ -2178,16 +2177,16 @@ fn exact_call_id_match_beats_a_missing_call_id_fallback() {
                     json!({ "slot": "exact" }),
                 ),
             ]),
-        },
+        }),
     );
 
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("shared", Some("provider_2"), "exact", "exact output"),
-        },
+        }),
     );
 
     assert_eq!(tool_status(&app, 0, 0), ToolCallStatus::Executing);
@@ -2203,11 +2202,11 @@ fn exact_call_id_match_beats_a_missing_call_id_fallback() {
 
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("shared", None, "legacy", "legacy output"),
-        },
+        }),
     );
     app.select_for_test(cursor(0, 0));
     app.handle_event(key(KeyCode::Char('y')));
@@ -2224,7 +2223,7 @@ fn duplicate_call_identifiers_keep_result_order() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![
@@ -2241,11 +2240,11 @@ fn duplicate_call_identifiers_keep_result_order() {
                     json!({ "slot": 2 }),
                 ),
             ]),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::User {
@@ -2262,7 +2261,7 @@ fn duplicate_call_identifiers_keep_result_order() {
                     ),
                 ],
             },
-        },
+        }),
     );
 
     for (content_index, expected) in [(0, "first output"), (1, "second output")] {
@@ -2284,7 +2283,7 @@ fn tool_error_result_still_finishes_without_rendering_output() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -2293,15 +2292,15 @@ fn tool_error_result_still_finishes_without_rendering_output() {
                 "command",
                 arguments.clone(),
             )]),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("failed", None, "command", output),
-        },
+        }),
     );
 
     assert_eq!(tool_status(&app, 0, 0), ToolCallStatus::Finished);
@@ -2334,7 +2333,7 @@ fn mixed_user_intermediate_preserves_only_non_tool_content() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -2343,11 +2342,11 @@ fn mixed_user_intermediate_preserves_only_non_tool_content() {
                 "command",
                 json!({}),
             )]),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::User {
@@ -2360,7 +2359,7 @@ fn mixed_user_intermediate_preserves_only_non_tool_content() {
                     UserContent::Text(Text::new("visible note")),
                 ],
             },
-        },
+        }),
     );
 
     assert_eq!(app.history().len(), 2);
@@ -2391,37 +2390,37 @@ fn terminal_events_interrupt_unmatched_executing_calls() {
     let mut completed = App::new();
     apply_turn_event(
         &mut completed,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: call(),
-        },
+        }),
     );
     apply_turn_event(
         &mut completed,
-        SessionEvent::TurnCompleted {
+        SessionEvent::Turn(TurnEvent::Completed {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("done"),
-        },
+        }),
     );
     assert_eq!(tool_status(&completed, 0, 0), ToolCallStatus::Interrupted);
 
     let mut failed = App::new();
     apply_turn_event(
         &mut failed,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: call(),
-        },
+        }),
     );
     apply_turn_event(
         &mut failed,
-        SessionEvent::TurnFailed {
+        SessionEvent::Turn(TurnEvent::Failed {
             turn_id: TEST_TURN_ID,
             error: "provider failed".to_string(),
-        },
+        }),
     );
     assert_eq!(tool_status(&failed, 0, 0), ToolCallStatus::Interrupted);
     assert!(matches!(
@@ -2432,17 +2431,17 @@ fn terminal_events_interrupt_unmatched_executing_calls() {
     let mut cancelled = App::new();
     apply_turn_event(
         &mut cancelled,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: call(),
-        },
+        }),
     );
     apply_turn_event(
         &mut cancelled,
-        SessionEvent::TurnCancelled {
+        SessionEvent::Turn(TurnEvent::Cancelled {
             turn_id: TEST_TURN_ID,
-        },
+        }),
     );
     assert_eq!(tool_status(&cancelled, 0, 0), ToolCallStatus::Interrupted);
 }
@@ -2452,7 +2451,7 @@ fn result_finishes_most_recent_executing_call_with_reused_id() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -2461,11 +2460,11 @@ fn result_finishes_most_recent_executing_call_with_reused_id() {
                 "command",
                 json!({"turn": 1}),
             )]),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -2474,15 +2473,15 @@ fn result_finishes_most_recent_executing_call_with_reused_id() {
                 "command",
                 json!({"turn": 2}),
             )]),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("reused", None, "command", "latest output"),
-        },
+        }),
     );
 
     assert_eq!(tool_status(&app, 0, 0), ToolCallStatus::Executing);
@@ -2494,7 +2493,7 @@ fn orphan_tool_result_leaves_executing_calls_untouched() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -2503,15 +2502,15 @@ fn orphan_tool_result_leaves_executing_calls_untouched() {
                 "command",
                 json!({}),
             )]),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("unknown", None, "unknown", "orphan output"),
-        },
+        }),
     );
 
     assert_eq!(app.history().len(), 1, "result-only messages add no entry");
@@ -2525,7 +2524,7 @@ fn executing_call_tracking_clears_on_completion_and_restore() {
     assert!(!app.has_executing_tool_calls());
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -2534,16 +2533,16 @@ fn executing_call_tracking_clears_on_completion_and_restore() {
                 "command",
                 json!({}),
             )]),
-        },
+        }),
     );
     assert!(app.has_executing_tool_calls());
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnCompleted {
+        SessionEvent::Turn(TurnEvent::Completed {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("done"),
-        },
+        }),
     );
     assert!(!app.has_executing_tool_calls());
 
@@ -2629,10 +2628,7 @@ fn live_opaque_only_reasoning_does_not_render_a_heading() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: (message.clone()).into(),
-        },
+        SessionStreamState::new(TEST_TURN_ID, (message.clone()).into()),
     );
     assert_eq!(app.streaming(), Some(message));
 
@@ -2898,19 +2894,19 @@ fn question_history_renders_and_restores_compact_answer_summaries() {
     let mut live = App::new();
     apply_turn_event(
         &mut live,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant.clone(),
-        },
+        }),
     );
     apply_turn_event(
         &mut live,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: result.clone(),
             metadata: vec![metadata.clone()],
-        },
+        }),
     );
     let live_rows = rendered_rows(&mut live, 80, 20);
 
@@ -3062,22 +3058,22 @@ fn task_history_renders_and_restores_a_compact_checklist() {
     let mut live = App::new();
     apply_turn_event(
         &mut live,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant.clone(),
-        },
+        }),
     );
     let executing = rendered_text(&mut live, 80, 20);
     assert!(executing.contains("task · 1/3 completed ◐"));
 
     apply_turn_event(
         &mut live,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: result.clone(),
             metadata: vec![metadata.clone()],
-        },
+        }),
     );
     let live_text = rendered_text(&mut live, 80, 20);
 
@@ -3132,34 +3128,34 @@ fn uncorrelated_task_updates_render_as_interrupted_after_restore_failure_and_can
     let mut failed = App::new();
     apply_turn_event(
         &mut failed,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: call(),
-        },
+        }),
     );
     apply_turn_event(
         &mut failed,
-        SessionEvent::TurnFailed {
+        SessionEvent::Turn(TurnEvent::Failed {
             turn_id: TEST_TURN_ID,
             error: "persistence failed".to_string(),
-        },
+        }),
     );
 
     let mut cancelled = App::new();
     apply_turn_event(
         &mut cancelled,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: call(),
-        },
+        }),
     );
     apply_turn_event(
         &mut cancelled,
-        SessionEvent::TurnCancelled {
+        SessionEvent::Turn(TurnEvent::Cancelled {
             turn_id: TEST_TURN_ID,
-        },
+        }),
     );
 
     for app in [&mut restored, &mut failed, &mut cancelled] {
@@ -3186,19 +3182,19 @@ fn launch_rows_render_compactly_with_lifecycle_without_leaking_private_details()
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnStarted {
+        SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("investigate the config"),
             mode: SessionMode::Build,
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: launch_assistant("call-launch", "fallback args title", "SECRET quick prompt"),
-        },
+        }),
     );
 
     // No launch row is shown until a child is accepted or the batch ends.
@@ -3212,23 +3208,23 @@ fn launch_rows_render_compactly_with_lifecycle_without_leaking_private_details()
 
     apply_turn_event(
         &mut app,
-        SessionEvent::SubtaskLaunched {
+        SessionEvent::Subtask(SubtaskEvent::Launched {
             turn_id: TEST_TURN_ID,
             call_id: "call-launch".to_string(),
             entry_index: 0,
-            descriptor: child_descriptor("child-1", "map config loading"),
-        },
+            descriptor: Box::new(child_descriptor("child-1", "map config loading")),
+        }),
     );
     let rendered = rendered_text(&mut app, 100, 16);
     assert!(rendered.contains("◆ explore · map config loading ◐"));
 
     apply_turn_event(
         &mut app,
-        SessionEvent::SubtaskStatus {
+        SessionEvent::Subtask(SubtaskEvent::Status {
             turn_id: TEST_TURN_ID,
             id: SubtaskId::new("child-1"),
             status: SubtaskStatus::Running,
-        },
+        }),
     );
     let rendered = rendered_text(&mut app, 100, 16);
     assert!(rendered.contains("◆ explore · map config loading ◐"));
@@ -3237,11 +3233,11 @@ fn launch_rows_render_compactly_with_lifecycle_without_leaking_private_details()
 
     apply_turn_event(
         &mut app,
-        SessionEvent::SubtaskStatus {
+        SessionEvent::Subtask(SubtaskEvent::Status {
             turn_id: TEST_TURN_ID,
             id: SubtaskId::new("child-1"),
             status: SubtaskStatus::Completed,
-        },
+        }),
     );
     let rendered = rendered_text(&mut app, 100, 16);
     assert!(rendered.contains("◆ explore · map config loading ✓"));
@@ -3250,7 +3246,7 @@ fn launch_rows_render_compactly_with_lifecycle_without_leaking_private_details()
 
     apply_turn_event(
         &mut app,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: tool_result_message(
                 "fc-call-launch",
@@ -3264,7 +3260,7 @@ fn launch_rows_render_compactly_with_lifecycle_without_leaking_private_details()
                 "map config loading",
                 ToolCallOutcome::Success,
             )],
-        },
+        }),
     );
 
     // The attached descriptor names and statuses the row; nothing private or
@@ -3293,15 +3289,15 @@ fn partial_launch_notices_appear_only_after_execution_stops() {
             };
             apply_turn_event(
                 &mut app,
-                SessionEvent::TurnStarted {
+                SessionEvent::Turn(TurnEvent::Started {
                     turn_id: TEST_TURN_ID,
                     message: Message::user("launch two children"),
                     mode: SessionMode::Build,
-                },
+                }),
             );
             apply_turn_event(
                 &mut app,
-                SessionEvent::Intermediate {
+                SessionEvent::Turn(TurnEvent::Intermediate {
                     attempt_id: None,
                     turn_id: TEST_TURN_ID,
                     message: assistant_message(vec![tool_call(
@@ -3310,18 +3306,18 @@ fn partial_launch_notices_appear_only_after_execution_stops() {
                         "launch_subtasks",
                         arguments,
                     )]),
-                },
+                }),
             );
             rendered_text(&mut app, 100, 20);
             assert!(app.view_cache().entries()[1].lines.is_empty());
             apply_turn_event(
                 &mut app,
-                SessionEvent::SubtaskLaunched {
+                SessionEvent::Subtask(SubtaskEvent::Launched {
                     turn_id: TEST_TURN_ID,
                     call_id: "partial".into(),
                     entry_index: 0,
-                    descriptor: child_descriptor("child-first", "first child"),
-                },
+                    descriptor: Box::new(child_descriptor("child-first", "first child")),
+                }),
             );
 
             let rendered = rendered_text(&mut app, 100, 20);
@@ -3334,9 +3330,9 @@ fn partial_launch_notices_appear_only_after_execution_stops() {
             if cancelled {
                 apply_turn_event(
                     &mut app,
-                    SessionEvent::TurnCancelled {
+                    SessionEvent::Turn(TurnEvent::Cancelled {
                         turn_id: TEST_TURN_ID,
-                    },
+                    }),
                 );
                 assert_eq!(tool_status(&app, 1, 0), ToolCallStatus::Interrupted);
             } else {
@@ -3355,7 +3351,7 @@ fn partial_launch_notices_appear_only_after_execution_stops() {
                 metadata.detail = Some(ToolResultDetail::Subtasks(entries));
                 apply_turn_event(
                     &mut app,
-                    SessionEvent::ToolResults {
+                    SessionEvent::Turn(TurnEvent::ToolResults {
                         turn_id: TEST_TURN_ID,
                         message: tool_result_message(
                             "fc-partial",
@@ -3364,7 +3360,7 @@ fn partial_launch_notices_appear_only_after_execution_stops() {
                             "status: error\nerror: SECRET batch result",
                         ),
                         metadata: vec![metadata],
-                    },
+                    }),
                 );
                 assert_eq!(tool_status(&app, 1, 0), ToolCallStatus::Finished);
             }
@@ -3396,31 +3392,31 @@ fn successful_launch_batches_have_only_child_rows_and_skip_the_batch_in_navigati
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnStarted {
+        SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("launch two children"),
             mode: SessionMode::Build,
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: message.clone(),
-        },
+        }),
     );
     let mut entries = Vec::new();
     for (index, title) in ["first child", "second child"].into_iter().enumerate() {
         let id = format!("child-{index}");
         apply_turn_event(
             &mut app,
-            SessionEvent::SubtaskLaunched {
+            SessionEvent::Subtask(SubtaskEvent::Launched {
                 turn_id: TEST_TURN_ID,
                 call_id: "clean".into(),
                 entry_index: index,
-                descriptor: child_descriptor(&id, title),
-            },
+                descriptor: Box::new(child_descriptor(&id, title)),
+            }),
         );
         entries.push(zevria_foundation::SubtaskEntryMetadata {
             index,
@@ -3437,7 +3433,7 @@ fn successful_launch_batches_have_only_child_rows_and_skip_the_batch_in_navigati
         if finished {
             apply_turn_event(
                 &mut app,
-                SessionEvent::ToolResults {
+                SessionEvent::Turn(TurnEvent::ToolResults {
                     turn_id: TEST_TURN_ID,
                     message: tool_result_message(
                         "fc-clean",
@@ -3446,7 +3442,7 @@ fn successful_launch_batches_have_only_child_rows_and_skip_the_batch_in_navigati
                         "SECRET child reports",
                     ),
                     metadata: vec![metadata.clone()],
-                },
+                }),
             );
         }
         let rendered = rendered_text(&mut app, 100, 20);
@@ -3536,15 +3532,15 @@ fn live_prelaunch_failures_show_status_and_reason_without_opening_a_child() {
         let mut app = App::new();
         apply_turn_event(
             &mut app,
-            SessionEvent::TurnStarted {
+            SessionEvent::Turn(TurnEvent::Started {
                 turn_id: TEST_TURN_ID,
                 message: Message::user("inspect synthetic fixtures"),
                 mode: SessionMode::Build,
-            },
+            }),
         );
         apply_turn_event(
             &mut app,
-            SessionEvent::Intermediate {
+            SessionEvent::Turn(TurnEvent::Intermediate {
                 attempt_id: None,
                 turn_id: TEST_TURN_ID,
                 message: launch_assistant(
@@ -3552,11 +3548,11 @@ fn live_prelaunch_failures_show_status_and_reason_without_opening_a_child() {
                     "inspect fixture boundaries",
                     "SECRET launch prompt",
                 ),
-            },
+            }),
         );
         apply_turn_event(
             &mut app,
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 turn_id: TEST_TURN_ID,
                 message: tool_result_message(
                     "fc-call-rejected",
@@ -3568,7 +3564,7 @@ fn live_prelaunch_failures_show_status_and_reason_without_opening_a_child() {
                     diagnostic: diagnostic.map(str::to_string),
                     ..unlaunched_metadata("call-rejected", outcome)
                 }],
-            },
+            }),
         );
 
         let rendered = rendered_text(&mut app, 120, 16);
@@ -3612,15 +3608,15 @@ fn descriptorless_interrupted_launches_do_not_invent_a_failure_or_child() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnStarted {
+        SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("inspect a fixture"),
             mode: SessionMode::Build,
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: launch_assistant(
@@ -3628,13 +3624,13 @@ fn descriptorless_interrupted_launches_do_not_invent_a_failure_or_child() {
                 "inspect fixture boundaries",
                 "SECRET prompt",
             ),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnCancelled {
+        SessionEvent::Turn(TurnEvent::Cancelled {
             turn_id: TEST_TURN_ID,
-        },
+        }),
     );
     let rendered = rendered_text(&mut app, 100, 16);
     assert!(rendered.contains("subtask launch ◼"));
@@ -3972,15 +3968,15 @@ fn concurrent_launch_rows_update_independently_before_the_result_batch() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnStarted {
+        SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("investigate both paths"),
             mode: SessionMode::Build,
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![
@@ -3997,7 +3993,7 @@ fn concurrent_launch_rows_update_independently_before_the_result_batch() {
                     json!({"tasks":[{"title": "trace second path", "prompt": "SECRET second", "type": "explore"}]}),
                 ),
             ]),
-        },
+        }),
     );
     for (call_id, child_id, title) in [
         ("call-first", "child-first", "trace first path"),
@@ -4005,30 +4001,30 @@ fn concurrent_launch_rows_update_independently_before_the_result_batch() {
     ] {
         apply_turn_event(
             &mut app,
-            SessionEvent::SubtaskLaunched {
+            SessionEvent::Subtask(SubtaskEvent::Launched {
                 turn_id: TEST_TURN_ID,
                 call_id: call_id.to_string(),
                 entry_index: 0,
-                descriptor: child_descriptor(child_id, title),
-            },
+                descriptor: Box::new(child_descriptor(child_id, title)),
+            }),
         );
         apply_turn_event(
             &mut app,
-            SessionEvent::SubtaskStatus {
+            SessionEvent::Subtask(SubtaskEvent::Status {
                 turn_id: TEST_TURN_ID,
                 id: SubtaskId::new(child_id),
                 status: SubtaskStatus::Running,
-            },
+            }),
         );
     }
 
     apply_turn_event(
         &mut app,
-        SessionEvent::SubtaskStatus {
+        SessionEvent::Subtask(SubtaskEvent::Status {
             turn_id: TEST_TURN_ID,
             id: SubtaskId::new("child-first"),
             status: SubtaskStatus::Completed,
-        },
+        }),
     );
 
     let rendered = rendered_text(&mut app, 100, 20);
@@ -4041,7 +4037,7 @@ fn concurrent_launch_rows_update_independently_before_the_result_batch() {
 
     apply_turn_event(
         &mut app,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: Message::User {
                 content: vec![
@@ -4073,7 +4069,7 @@ fn concurrent_launch_rows_update_independently_before_the_result_batch() {
                     ToolCallOutcome::Success,
                 ),
             ],
-        },
+        }),
     );
 
     assert_eq!(tool_status(&app, 1, 0), ToolCallStatus::Finished);
@@ -4306,40 +4302,40 @@ fn launch_result_metadata_reconciles_restore_outcomes_and_preserves_terminal_eve
     let mut live = App::new();
     apply_turn_event(
         &mut live,
-        SessionEvent::TurnStarted {
+        SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("launch live child"),
             mode: SessionMode::Build,
-        },
+        }),
     );
     apply_turn_event(
         &mut live,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: launch_assistant("call-live", "live terminal child", "private prompt"),
-        },
+        }),
     );
     apply_turn_event(
         &mut live,
-        SessionEvent::SubtaskLaunched {
+        SessionEvent::Subtask(SubtaskEvent::Launched {
             turn_id: TEST_TURN_ID,
             call_id: "call-live".to_string(),
             entry_index: 0,
-            descriptor: child_descriptor("child-live", "live terminal child"),
-        },
+            descriptor: Box::new(child_descriptor("child-live", "live terminal child")),
+        }),
     );
     apply_turn_event(
         &mut live,
-        SessionEvent::SubtaskStatus {
+        SessionEvent::Subtask(SubtaskEvent::Status {
             turn_id: TEST_TURN_ID,
             id: SubtaskId::new("child-live"),
             status: SubtaskStatus::Failed,
-        },
+        }),
     );
     apply_turn_event(
         &mut live,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: tool_result_message(
                 "fc-call-live",
@@ -4353,7 +4349,7 @@ fn launch_result_metadata_reconciles_restore_outcomes_and_preserves_terminal_eve
                 "live terminal child",
                 ToolCallOutcome::Success,
             )],
-        },
+        }),
     );
     assert_eq!(
         attached_subtask_status(&live, &SubtaskId::new("child-live")),
@@ -4366,42 +4362,42 @@ fn late_terminal_status_updates_an_interrupted_row_after_turn_teardown() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnStarted {
+        SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("launch then cancel"),
             mode: SessionMode::Build,
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: launch_assistant("call-late", "late cancelled child", "private prompt"),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::SubtaskLaunched {
+        SessionEvent::Subtask(SubtaskEvent::Launched {
             turn_id: TEST_TURN_ID,
             call_id: "call-late".to_string(),
             entry_index: 0,
-            descriptor: child_descriptor("child-late", "late cancelled child"),
-        },
+            descriptor: Box::new(child_descriptor("child-late", "late cancelled child")),
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::SubtaskStatus {
+        SessionEvent::Subtask(SubtaskEvent::Status {
             turn_id: TEST_TURN_ID,
             id: SubtaskId::new("child-late"),
             status: SubtaskStatus::Running,
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnCancelled {
+        SessionEvent::Turn(TurnEvent::Cancelled {
             turn_id: TEST_TURN_ID,
-        },
+        }),
     );
     assert_eq!(app.active_turn_id(), None);
     assert_eq!(tool_status(&app, 1, 0), ToolCallStatus::Interrupted);
@@ -4411,11 +4407,11 @@ fn late_terminal_status_updates_an_interrupted_row_after_turn_teardown() {
     assert!(rendered.contains("◆ explore · late cancelled child "));
 
     // This event deliberately arrives after active-turn state was cleared.
-    app.reduce_without_effects(SessionEvent::SubtaskStatus {
+    app.reduce_without_effects(SessionEvent::Subtask(SubtaskEvent::Status {
         turn_id: TEST_TURN_ID,
         id: SubtaskId::new("child-late"),
         status: SubtaskStatus::Cancelled,
-    });
+    }));
     assert_eq!(app.active_turn_id(), None);
     assert_eq!(tool_status(&app, 1, 0), ToolCallStatus::Interrupted);
     assert_eq!(
@@ -4431,40 +4427,40 @@ fn late_terminal_status_updates_an_interrupted_row_after_turn_teardown() {
 fn explore_panes_inherit_profiles_and_override_nominal_build_turns() {
     let child_id = SubtaskId::new("profiled-child");
     let mut views = test_session_views(configured_app());
-    views.apply(SessionEvent::SubtaskLaunched {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
         turn_id: TEST_TURN_ID,
         call_id: "profiled-launch".to_string(),
         entry_index: 0,
-        descriptor: child_descriptor("profiled-child", "inspect routing"),
-    });
-    views.apply(SessionEvent::SubtaskSession {
+        descriptor: Box::new(child_descriptor("profiled-child", "inspect routing")),
+    }));
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
         id: child_id.clone(),
-        event: Box::new(SessionEvent::TurnStarted {
+        event: Box::new(SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("child prompt"),
             mode: SessionMode::Build,
-        }),
-    });
+        })),
+    }));
     assert_eq!(
         views.child(&child_id).expect("child").in_flight_role(),
         Some(ModelRole::Explore)
     );
-    views.apply(SessionEvent::SubtaskSession {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
         id: child_id.clone(),
-        event: Box::new(SessionEvent::CompactionStarted {
+        event: Box::new(SessionEvent::Turn(TurnEvent::CompactionStarted {
             turn_id: TEST_TURN_ID,
             trigger: CompactionTrigger::AutomaticMidTurn,
-        }),
-    });
+        })),
+    }));
     assert_eq!(
         views.child(&child_id).expect("child").in_flight_role(),
         Some(ModelRole::Explore)
     );
-    views.apply(SessionEvent::SubtaskSession {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
         id: child_id.clone(),
-        event: Box::new(SessionEvent::ContextUsageUpdated {
+        event: Box::new(SessionEvent::Turn(TurnEvent::ContextUsageUpdated {
             turn_id: TEST_TURN_ID,
-            snapshot: ContextTokenSnapshot {
+            snapshot: Box::new(ContextTokenSnapshot {
                 profile: ModelProfileRef::new("runtime-explore", "explore-v2"),
                 model_role: ModelRole::Explore,
                 projected_input_tokens: Some(7_500),
@@ -4474,9 +4470,9 @@ fn explore_panes_inherit_profiles_and_override_nominal_build_turns() {
                 automatic_trigger: 40_000,
                 input_token_limit: 50_000,
                 context_window_tokens: 64_000,
-            },
-        }),
-    });
+            }),
+        })),
+    }));
     views.handle_event(ctrl('i'));
     let rendered = rendered_views_text(&mut views, 360, 12);
     assert!(rendered.contains("explore · inspect routing · starting"));
@@ -4501,50 +4497,50 @@ fn explore_panes_inherit_profiles_and_override_nominal_build_turns() {
 #[test]
 fn session_views_route_child_events_navigate_and_never_cancel_or_submit() {
     let mut views = test_session_views(App::new());
-    views.apply(SessionEvent::TurnStarted {
+    views.apply(SessionEvent::Turn(TurnEvent::Started {
         turn_id: TEST_TURN_ID,
         message: Message::user("kick off the explore"),
         mode: SessionMode::Build,
-    });
-    views.apply(SessionEvent::Intermediate {
+    }));
+    views.apply(SessionEvent::Turn(TurnEvent::Intermediate {
         attempt_id: None,
         turn_id: TEST_TURN_ID,
         message: launch_assistant("call-launch", "map config loading", "prompt quick"),
-    });
-    views.apply(SessionEvent::SubtaskLaunched {
+    }));
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
         turn_id: TEST_TURN_ID,
         call_id: "call-launch".to_string(),
         entry_index: 0,
-        descriptor: child_descriptor("child-1", "map config loading"),
-    });
+        descriptor: Box::new(child_descriptor("child-1", "map config loading")),
+    }));
     // Live child traffic reduces into the hidden pane without touching the
     // root pane's busy/streaming state.
     let child_id = SubtaskId::new("child-1");
-    views.apply(SessionEvent::SubtaskSession {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
         id: child_id.clone(),
-        event: Box::new(SessionEvent::TurnStarted {
+        event: Box::new(SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("child prompt"),
             mode: SessionMode::Build,
-        }),
-    });
+        })),
+    }));
     let child_findings = (0..20)
         .map(|index| format!("child finding {index}"))
         .collect::<Vec<_>>()
         .join("\n");
-    views.apply(SessionEvent::SubtaskSession {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
         id: child_id.clone(),
-        event: Box::new(SessionEvent::TurnCompleted {
+        event: Box::new(SessionEvent::Turn(TurnEvent::Completed {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant(child_findings),
-        }),
-    });
-    views.apply(SessionEvent::SubtaskStatus {
+        })),
+    }));
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Status {
         turn_id: TEST_TURN_ID,
         id: child_id.clone(),
         status: SubtaskStatus::Running,
-    });
+    }));
     assert_eq!(views.visible_child_id(), None);
     assert!(views.root().is_busy(), "the parent turn is still running");
     let child = views.child(&child_id).expect("hidden child pane");
@@ -4640,34 +4636,34 @@ fn status_before_launch_is_reconciled_into_running_and_terminal_root_rows() {
         let child_id = SubtaskId::new(format!("child-{case}"));
         let title = format!("race {case} child");
         let mut views = test_session_views(App::new());
-        views.apply(SessionEvent::TurnStarted {
+        views.apply(SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("launch racing child"),
             mode: SessionMode::Build,
-        });
-        views.apply(SessionEvent::Intermediate {
+        }));
+        views.apply(SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: launch_assistant(&call_id, &title, "private race prompt"),
-        });
+        }));
 
-        views.apply(SessionEvent::SubtaskStatus {
+        views.apply(SessionEvent::Subtask(SubtaskEvent::Status {
             turn_id: TEST_TURN_ID,
             id: child_id.clone(),
             status,
-        });
+        }));
         assert_eq!(
             attached_subtask_status(views.root(), &child_id),
             None,
             "the root cannot correlate status before descriptor attachment"
         );
 
-        views.apply(SessionEvent::SubtaskLaunched {
+        views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
             turn_id: TEST_TURN_ID,
             call_id,
             entry_index: 0,
-            descriptor: child_descriptor(child_id.as_str(), &title),
-        });
+            descriptor: Box::new(child_descriptor(child_id.as_str(), &title)),
+        }));
         assert_eq!(
             attached_subtask_status(views.root(), &child_id),
             Some(status),
@@ -4727,14 +4723,14 @@ fn prompt_to_ensemble_acceptance_creates_fresh_panes_and_prunes_discarded_runs()
     let mut root = App::new();
     root.seed_history_entry(history_message(Message::user("ordinary prompt")));
     let mut views = test_session_views(root);
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TEST_TURN_ID,
-        start: old.clone(),
+        start: Box::new(old.clone()),
         resumed: false,
-    });
-    views.apply(SessionEvent::TurnRecovered {
+    }));
+    views.apply(SessionEvent::Turn(TurnEvent::Recovered {
         turn_id: TEST_TURN_ID,
-    });
+    }));
 
     // Select the old ensemble, move to the preceding ordinary prompt,
     // then revise that prompt into a fresh ensemble.
@@ -4753,23 +4749,25 @@ fn prompt_to_ensemble_acceptance_creates_fresh_panes_and_prunes_discarded_runs()
     }
     assert!(matches!(
         views.handle_event(ctrl_enter()),
-        Some(UiAction::EditTranscript(TranscriptEdit {
-            target: TranscriptEditTarget::PromptOrdinal(0),
-            replacement: TranscriptEditReplacement::Ensemble {
-                workflow: EnsembleWorkflow::Plan,
-                ..
-            },
-        }))
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::EditTranscript(TranscriptEdit {
+                target: TranscriptEditTarget::PromptOrdinal(0),
+                replacement: TranscriptEditReplacement::Ensemble {
+                    workflow: EnsembleWorkflow::Plan,
+                    ..
+                },
+            })
+        )))
     ));
 
     // Pending acceptance leaves the discarded pane navigable.
     assert_eq!(views.handle_event(ctrl('i')), None);
     assert_eq!(views.visible_agent_id(), Some(&old_agent_id));
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TurnId::new(2),
-        start: fresh,
+        start: Box::new(fresh),
         resumed: false,
-    });
+    }));
 
     assert_eq!(views.visible_agent_id(), None);
     assert!(views.agent(&old_agent_id).is_none());
@@ -4789,14 +4787,14 @@ fn accepted_ensemble_edits_prune_removed_worker_panes_without_retargeting_naviga
     );
     let fresh_agent_id = fresh.agents[0].id.clone();
     let mut views = test_session_views(App::new());
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TEST_TURN_ID,
-        start: old.clone(),
+        start: Box::new(old.clone()),
         resumed: false,
-    });
-    views.apply(SessionEvent::TurnRecovered {
+    }));
+    views.apply(SessionEvent::Turn(TurnEvent::Recovered {
         turn_id: TEST_TURN_ID,
-    });
+    }));
 
     // Select and enter the old worker, then return to its command row and
     // submit an unchanged exact command as a typed ensemble replacement.
@@ -4815,23 +4813,23 @@ fn accepted_ensemble_edits_prune_removed_worker_panes_without_retargeting_naviga
     assert_eq!(views.handle_event(ctrl('e')), None);
     assert!(matches!(
         views.handle_event(ctrl_enter()),
-        Some(UiAction::EditTranscript(TranscriptEdit {
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(zevria_session_api::TurnCommand::EditTranscript(TranscriptEdit {
             target: TranscriptEditTarget::EnsembleRun(run_id),
             replacement: TranscriptEditReplacement::Ensemble {
                 workflow: EnsembleWorkflow::Review,
                 ..
             },
-        })) if run_id == old.run_id
+        })))) if run_id == old.run_id
     ));
 
     // The pane remains reachable while backend acceptance is pending.
     assert_eq!(views.handle_event(ctrl('i')), None);
     assert_eq!(views.visible_agent_id(), Some(&old_agent_id));
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TurnId::new(2),
-        start: fresh,
+        start: Box::new(fresh),
         resumed: false,
-    });
+    }));
 
     assert_eq!(
         views.visible_agent_id(),
@@ -4849,17 +4847,17 @@ fn ctrl_i_live_fallback_uses_shared_agent_then_subtask_recency() {
     let mut views = test_session_views(App::new());
     let run_id = EnsembleRunId::from_string("live-agent-first");
     let agent = navigation_agent("live-agent");
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TEST_TURN_ID,
-        start: navigation_ensemble_start(&run_id, &agent),
+        start: Box::new(navigation_ensemble_start(&run_id, &agent)),
         resumed: false,
-    });
-    views.apply(SessionEvent::SubtaskLaunched {
+    }));
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
         turn_id: TEST_TURN_ID,
         call_id: "live-subtask-call".to_string(),
         entry_index: 0,
-        descriptor: child_descriptor("live-subtask", "newer subtask"),
-    });
+        descriptor: Box::new(child_descriptor("live-subtask", "newer subtask")),
+    }));
 
     assert_eq!(views.handle_event(ctrl('i')), None);
     assert_eq!(
@@ -4871,19 +4869,19 @@ fn ctrl_i_live_fallback_uses_shared_agent_then_subtask_recency() {
 #[test]
 fn ctrl_i_live_fallback_uses_shared_subtask_then_agent_recency() {
     let mut views = test_session_views(App::new());
-    views.apply(SessionEvent::SubtaskLaunched {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
         turn_id: TEST_TURN_ID,
         call_id: "live-subtask-call".to_string(),
         entry_index: 0,
-        descriptor: child_descriptor("live-subtask", "older subtask"),
-    });
+        descriptor: Box::new(child_descriptor("live-subtask", "older subtask")),
+    }));
     let run_id = EnsembleRunId::from_string("live-agent-last");
     let agent = navigation_agent("live-agent");
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TEST_TURN_ID,
-        start: navigation_ensemble_start(&run_id, &agent),
+        start: Box::new(navigation_ensemble_start(&run_id, &agent)),
         resumed: false,
-    });
+    }));
 
     assert_eq!(views.handle_event(ctrl('i')), None);
     assert_eq!(views.visible_agent_id(), Some(&agent.id));
@@ -4947,7 +4945,7 @@ fn skill_tool_calls_render_as_compact_rows_with_failures_surfaced() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -4956,7 +4954,7 @@ fn skill_tool_calls_render_as_compact_rows_with_failures_surfaced() {
                 "skill",
                 serde_json::json!({"skill": "commit"}),
             )]),
-        },
+        }),
     );
     let rendered = rendered_text(&mut app, 100, 20);
     assert!(rendered.contains("skill · commit ◐"));
@@ -4967,7 +4965,7 @@ fn skill_tool_calls_render_as_compact_rows_with_failures_surfaced() {
 
     apply_turn_event(
         &mut app,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: tool_result_message(
                 "skill-1",
@@ -4982,7 +4980,7 @@ fn skill_tool_calls_render_as_compact_rows_with_failures_surfaced() {
                 ToolCallOutcome::Success,
                 Vec::new(),
             )],
-        },
+        }),
     );
     let rendered = rendered_text(&mut app, 100, 20);
     assert!(rendered.contains("skill · commit ✓"));
@@ -4994,7 +4992,7 @@ fn skill_tool_calls_render_as_compact_rows_with_failures_surfaced() {
     // An unknown-name failure is labeled and its short error stays visible.
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -5003,11 +5001,11 @@ fn skill_tool_calls_render_as_compact_rows_with_failures_surfaced() {
                 "skill",
                 serde_json::json!({"skill": "missing"}),
             )]),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: tool_result_message(
                 "skill-2",
@@ -5019,7 +5017,7 @@ fn skill_tool_calls_render_as_compact_rows_with_failures_surfaced() {
                 file_metadata("skill-2", None, "skill", ToolCallOutcome::Error, Vec::new())
                     .with_diagnostic("unknown skill"),
             ],
-        },
+        }),
     );
     let rendered = rendered_text(&mut app, 100, 24);
     assert!(rendered.contains("skill · missing ✗"));
@@ -5439,7 +5437,7 @@ fn reconcile_reports_copy_and_restore_keep_full_artifact_access() {
         let mut live = App::new();
         apply_turn_event(
             &mut live,
-            SessionEvent::Intermediate {
+            SessionEvent::Turn(TurnEvent::Intermediate {
                 attempt_id: None,
                 turn_id: TEST_TURN_ID,
                 message: assistant_message(vec![tool_call(
@@ -5448,11 +5446,11 @@ fn reconcile_reports_copy_and_restore_keep_full_artifact_access() {
                     RECONCILE_REPORTS_TOOL_NAME,
                     arguments.clone(),
                 )]),
-            },
+            }),
         );
         apply_turn_event(
             &mut live,
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 turn_id: TEST_TURN_ID,
                 message: tool_result_message(id, None, RECONCILE_REPORTS_TOOL_NAME, output),
                 metadata: vec![file_metadata(
@@ -5462,13 +5460,13 @@ fn reconcile_reports_copy_and_restore_keep_full_artifact_access() {
                     ToolCallOutcome::Success,
                     Vec::new(),
                 )],
-            },
+            }),
         );
-        live.reduce_without_effects(SessionEvent::TurnCompleted {
+        live.reduce_without_effects(SessionEvent::Turn(TurnEvent::Completed {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::Assistant(rig_core::message::AssistantMessage::new(Vec::new())),
-        });
+        }));
         live.set_view_for_test(0, false);
         let live_rendered = rendered_text(&mut live, 160, 80);
         assert!(live_rendered.contains("reconcile_reports · 4 disagreements · 4 decisions ✓"));
@@ -5807,7 +5805,7 @@ fn submit_plan_rows_copy_markdown_and_keep_result_copy_behavior() {
         let mut app = App::new();
         apply_turn_event(
             &mut app,
-            SessionEvent::Intermediate {
+            SessionEvent::Turn(TurnEvent::Intermediate {
                 attempt_id: None,
                 turn_id: TEST_TURN_ID,
                 message: assistant_message(vec![tool_call(
@@ -5816,11 +5814,11 @@ fn submit_plan_rows_copy_markdown_and_keep_result_copy_behavior() {
                     SUBMIT_PLAN_TOOL_NAME,
                     arguments,
                 )]),
-            },
+            }),
         );
         apply_turn_event(
             &mut app,
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 turn_id: TEST_TURN_ID,
                 message: tool_result_message(&id, None, SUBMIT_PLAN_TOOL_NAME, output),
                 metadata: vec![file_metadata(
@@ -5830,7 +5828,7 @@ fn submit_plan_rows_copy_markdown_and_keep_result_copy_behavior() {
                     ToolCallOutcome::Success,
                     Vec::new(),
                 )],
-            },
+            }),
         );
         app.select_for_test(cursor(0, 0));
 
@@ -5852,7 +5850,7 @@ fn submit_plan_rows_copy_markdown_and_keep_result_copy_behavior() {
     let mut malformed = App::new();
     apply_turn_event(
         &mut malformed,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -5861,7 +5859,7 @@ fn submit_plan_rows_copy_markdown_and_keep_result_copy_behavior() {
                 SUBMIT_PLAN_TOOL_NAME,
                 serde_json::Value::String(raw_arguments.to_string()),
             )]),
-        },
+        }),
     );
     malformed.select_for_test(cursor(0, 0));
     assert_eq!(
@@ -5884,7 +5882,7 @@ fn successful_submit_plan_body_renders_once_live_and_after_restore() {
     let mut live = App::new();
     apply_turn_event(
         &mut live,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -5893,11 +5891,11 @@ fn successful_submit_plan_body_renders_once_live_and_after_restore() {
                 SUBMIT_PLAN_TOOL_NAME,
                 arguments.clone(),
             )]),
-        },
+        }),
     );
     apply_turn_event(
         &mut live,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: tool_result_message("submit-plan-live", None, SUBMIT_PLAN_TOOL_NAME, output),
             metadata: vec![file_metadata(
@@ -5907,13 +5905,13 @@ fn successful_submit_plan_body_renders_once_live_and_after_restore() {
                 ToolCallOutcome::Success,
                 Vec::new(),
             )],
-        },
+        }),
     );
-    live.reduce_without_effects(SessionEvent::PlanStateChanged {
-        state: PlanWorkflowState::Ready {
+    live.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
+        state: Box::new(PlanWorkflowState::Ready {
             artifact: artifact.clone(),
-        },
-    });
+        }),
+    }));
     live.set_view_for_test(0, false);
     let live_rendered = rendered_text(&mut live, 160, 80);
     assert!(live_rendered.contains("submit_plan · Durable approval workflow ✓"));
@@ -5987,12 +5985,18 @@ fn pending_root_operation_cancels_without_an_engine_turn_id() {
     root.set_input_for_test("pending prompt", "pending prompt".len());
     assert!(matches!(
         root.handle_event(ctrl_enter()),
-        Some(UiAction::Submit { .. })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Submit { .. }
+        )))
     ));
     let mut views = test_session_views(root);
     assert_eq!(
         views.handle_event(ctrl('c')),
-        Some(UiAction::CancelTurn { turn_id: None })
+        Some(UiAction::Session(
+            zevria_session_api::SessionCommand::Control(
+                zevria_session_api::ControlCommand::CancelTurn { turn_id: None }
+            )
+        ))
     );
 }
 
@@ -6001,22 +6005,22 @@ fn retry_notice_is_replaced_by_accepted_progress() {
     let mut app = App::new();
     let turn_id = TurnId::new(89);
     start_empty_turn(&mut app, turn_id, SessionMode::Build);
-    app.reduce_without_effects(SessionEvent::TurnRetrying {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Retrying {
         call: 1,
         turn_id,
         attempt: 2,
         retrying_for: std::time::Duration::from_secs(280),
         retry_after: std::time::Duration::from_millis(500),
         error: "offline".to_string(),
-    });
+    }));
     assert!(app.retry_notice().is_some());
     assert!(rendered_text(&mut app, 100, 10).contains("reconnecting"));
 
-    app.reduce_without_effects(SessionEvent::Intermediate {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Intermediate {
         attempt_id: None,
         turn_id,
         message: Message::assistant("progress resumed"),
-    });
+    }));
     assert!(app.retry_notice().is_none());
     assert!(!rendered_text(&mut app, 100, 10).contains("reconnecting"));
 }
@@ -6025,19 +6029,19 @@ fn retry_notice_is_replaced_by_accepted_progress() {
 fn manual_compaction_busy_state_ends_on_completion_and_adds_one_marker() {
     let mut app = App::new();
     let turn_id = TurnId::new(11);
-    app.reduce_without_effects(SessionEvent::CompactionStarted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::CompactionStarted {
         turn_id,
         trigger: CompactionTrigger::Manual,
-    });
+    }));
     assert!(app.is_busy());
     assert!(app.is_compacting());
     assert_eq!(app.active_turn_id(), Some(turn_id));
 
-    app.reduce_without_effects(SessionEvent::CompactionCompleted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::CompactionCompleted {
         turn_id,
         trigger: CompactionTrigger::Manual,
         backend: CompactionBackend::LocalSummary,
-    });
+    }));
     assert!(!app.is_busy());
     assert!(!app.is_compacting());
     assert_eq!(app.active_turn_id(), None);
@@ -6054,20 +6058,20 @@ fn manual_compaction_busy_state_ends_on_completion_and_adds_one_marker() {
 fn automatic_compaction_completion_keeps_the_surrounding_turn_active() {
     let mut app = App::new();
     let turn_id = TurnId::new(12);
-    app.reduce_without_effects(SessionEvent::TurnStarted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
         turn_id,
         message: Message::user("question"),
         mode: SessionMode::Build,
-    });
-    app.reduce_without_effects(SessionEvent::CompactionStarted {
+    }));
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::CompactionStarted {
         turn_id,
         trigger: CompactionTrigger::AutomaticMidTurn,
-    });
-    app.reduce_without_effects(SessionEvent::CompactionCompleted {
+    }));
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::CompactionCompleted {
         turn_id,
         trigger: CompactionTrigger::AutomaticMidTurn,
         backend: CompactionBackend::OpenaiResponsesCompact,
-    });
+    }));
 
     assert!(app.is_busy());
     assert!(!app.is_compacting());
@@ -6113,16 +6117,16 @@ fn agent_stream_previews_replace_accumulated_text_and_terminal_report_repairs_lo
         safe_mode: "read-only".to_string(),
     };
     let mut views = test_session_views(App::new());
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id,
-        start: EnsembleStart {
+        start: Box::new(EnsembleStart {
             run_id: ensemble_run_id.clone(),
             workflow: EnsembleWorkflow::Review,
             prompt: "review this".into(),
             agents: vec![descriptor.clone()],
-        },
+        }),
         resumed: false,
-    });
+    }));
 
     for (revision, text) in [(1, "hello"), (2, "hello world")] {
         let mut batch = SessionStreamBatch::default();
@@ -6134,22 +6138,23 @@ fn agent_stream_previews_replace_accumulated_text_and_terminal_report_repairs_lo
             event: AgentRunEvent::AgentMessage {
                 text: text.to_string(),
                 message_id: Some("message-1".to_string()),
-            },
+            }
+            .into(),
         });
-        views.apply_streams(&batch);
+        views.apply_streams(batch);
     }
     let pane = views.agent(&descriptor.id).expect("agent pane");
     assert_eq!(assistant_presentation_texts(pane), ["hello world"]);
 
-    views.apply(SessionEvent::AgentRunUpdated {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
         turn_id,
         ensemble_run_id: ensemble_run_id.clone(),
         agent_run_id: descriptor.id.clone(),
-        event: AgentRunEvent::Status {
+        event: Box::new(AgentRunEvent::Status {
             status: AgentRunStatus::Running,
             detail: None,
-        },
-    });
+        }),
+    }));
     let mut batch = SessionStreamBatch::default();
     batch.agent_runs.push(AgentRunStreamState {
         revision: 3,
@@ -6159,14 +6164,15 @@ fn agent_stream_previews_replace_accumulated_text_and_terminal_report_repairs_lo
         event: AgentRunEvent::AgentMessage {
             text: " after".to_string(),
             message_id: Some("message-1".to_string()),
-        },
+        }
+        .into(),
     });
-    views.apply_streams(&batch);
+    views.apply_streams(batch);
 
-    views.apply(SessionEvent::AgentRunFinished {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished {
         turn_id,
         ensemble_run_id,
-        outcome: AgentRunOutcome {
+        outcome: Box::new(AgentRunOutcome {
             confirmation: None,
             descriptor: descriptor.clone(),
             status: AgentRunStatus::Completed,
@@ -6179,8 +6185,8 @@ fn agent_stream_previews_replace_accumulated_text_and_terminal_report_repairs_lo
             user_decisions: Vec::new(),
             decision_ids: Vec::new(),
             unavailable_decisions: Vec::new(),
-        },
-    });
+        }),
+    }));
     let pane = views.agent(&descriptor.id).expect("agent pane");
     let messages = assistant_presentation_texts(pane);
     assert_eq!(messages, ["hello world after complete"]);
@@ -6214,16 +6220,16 @@ fn agent_stream_batch_keeps_unread_thought_before_following_message() {
         safe_mode: "read-only".to_string(),
     };
     let mut views = test_session_views(App::new());
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id,
-        start: EnsembleStart {
+        start: Box::new(EnsembleStart {
             run_id: ensemble_run_id.clone(),
             workflow: EnsembleWorkflow::Review,
             prompt: "review this".into(),
             agents: vec![descriptor.clone()],
-        },
+        }),
         resumed: false,
-    });
+    }));
     let batch = SessionStreamBatch {
         agent_runs: vec![
             AgentRunStreamState {
@@ -6234,7 +6240,8 @@ fn agent_stream_batch_keeps_unread_thought_before_following_message() {
                 event: AgentRunEvent::Thought {
                     text: "inspect privately".to_string(),
                     message_id: Some("thought".to_string()),
-                },
+                }
+                .into(),
             },
             AgentRunStreamState {
                 revision: 3,
@@ -6244,13 +6251,14 @@ fn agent_stream_batch_keeps_unread_thought_before_following_message() {
                 event: AgentRunEvent::AgentMessage {
                     text: "actionable finding".to_string(),
                     message_id: Some("message".to_string()),
-                },
+                }
+                .into(),
             },
         ],
         ..SessionStreamBatch::default()
     };
 
-    views.apply_streams(&batch);
+    views.apply_streams(batch);
 
     let pane = views.agent(&descriptor.id).expect("agent pane");
     assert_eq!(assistant_reasoning_texts(pane), ["inspect privately"]);
@@ -7052,16 +7060,16 @@ fn acp_pane_title_tracks_safe_mode_status_usage_and_diagnostic_hint() {
         safe_mode: "read-only".to_string(),
     };
     let mut views = test_session_views(configured_app());
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id,
-        start: EnsembleStart {
+        start: Box::new(EnsembleStart {
             run_id: run_id.clone(),
             workflow: EnsembleWorkflow::Review,
             prompt: "review".into(),
             agents: vec![descriptor.clone()],
-        },
+        }),
         resumed: false,
-    });
+    }));
     for event in [
         AgentRunEvent::Status {
             status: AgentRunStatus::Running,
@@ -7075,12 +7083,12 @@ fn acp_pane_title_tracks_safe_mode_status_usage_and_diagnostic_hint() {
             },
         },
     ] {
-        views.apply(SessionEvent::AgentRunUpdated {
+        views.apply(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
             turn_id,
             ensemble_run_id: run_id.clone(),
             agent_run_id: descriptor.id.clone(),
-            event,
-        });
+            event: Box::new(event),
+        }));
     }
     views.handle_event(Event::Key(KeyEvent::new(
         KeyCode::Char('i'),
@@ -7099,10 +7107,10 @@ fn acp_pane_title_tracks_safe_mode_status_usage_and_diagnostic_hint() {
     assert!(context_help(views.agent(&descriptor.id).unwrap()).contains("d hide diagnostics"));
     assert!(visible.contains("ACP usage"));
 
-    views.apply(SessionEvent::AgentRunFinished {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished {
         turn_id,
         ensemble_run_id: run_id,
-        outcome: AgentRunOutcome {
+        outcome: Box::new(AgentRunOutcome {
             confirmation: None,
             descriptor,
             status: AgentRunStatus::Completed,
@@ -7119,8 +7127,8 @@ fn acp_pane_title_tracks_safe_mode_status_usage_and_diagnostic_hint() {
             user_decisions: Vec::new(),
             decision_ids: Vec::new(),
             unavailable_decisions: Vec::new(),
-        },
-    });
+        }),
+    }));
     let terminal = rendered_views_text(&mut views, 360, 24);
     assert!(terminal.contains("ACP · Fake ACP · read-only · completed"));
     assert!(terminal.contains("context 3.0k/8.0k"));
@@ -7137,16 +7145,16 @@ fn acp_pane_transitions_from_resuming_to_running_without_losing_plan() {
         safe_mode: "plan".into(),
     };
     let mut views = test_session_views(configured_app());
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id,
-        start: EnsembleStart {
+        start: Box::new(EnsembleStart {
             run_id: run_id.clone(),
             workflow: EnsembleWorkflow::Plan,
             prompt: "plan".into(),
             agents: vec![descriptor.clone()],
-        },
+        }),
         resumed: true,
-    });
+    }));
     views.handle_event(Event::Key(KeyEvent::new(
         KeyCode::Char('i'),
         KeyModifiers::CONTROL,
@@ -7176,12 +7184,12 @@ fn acp_pane_transitions_from_resuming_to_running_without_losing_plan() {
             detail: None,
         },
     ] {
-        views.apply(SessionEvent::AgentRunUpdated {
+        views.apply(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
             turn_id,
             ensemble_run_id: run_id.clone(),
             agent_run_id: descriptor.id.clone(),
-            event,
-        });
+            event: Box::new(event),
+        }));
     }
     let rendered = rendered_views_text(&mut views, 180, 24);
     assert!(rendered.contains("ACP · Recovery ACP · plan · running"));
@@ -7248,20 +7256,20 @@ fn proofless_completed_plan_worker_is_defensively_rendered_as_failed_red() {
         safe_mode: "read-only".to_string(),
     };
     let turn_id = TurnId::new(801);
-    app.reduce_without_effects(SessionEvent::EnsembleStarted {
+    app.reduce_without_effects(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id,
-        start: EnsembleStart {
+        start: Box::new(EnsembleStart {
             run_id: run_id.clone(),
             workflow: EnsembleWorkflow::Plan,
             prompt: "plan".into(),
             agents: vec![descriptor.clone()],
-        },
+        }),
         resumed: false,
-    });
-    app.reduce_without_effects(SessionEvent::AgentRunFinished {
+    }));
+    app.reduce_without_effects(SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished {
         turn_id,
         ensemble_run_id: run_id,
-        outcome: AgentRunOutcome {
+        outcome: Box::new(AgentRunOutcome {
             confirmation: None,
             descriptor,
             status: AgentRunStatus::Completed,
@@ -7274,8 +7282,8 @@ fn proofless_completed_plan_worker_is_defensively_rendered_as_failed_red() {
             user_decisions: Vec::new(),
             decision_ids: Vec::new(),
             unavailable_decisions: Vec::new(),
-        },
-    });
+        }),
+    }));
 
     let mut terminal = Terminal::new(TestBackend::new(100, 12)).expect("terminal");
     terminal.draw(|frame| app.render(frame)).expect("draw");
@@ -7370,10 +7378,10 @@ fn restored_structured_claude_handoff_renders_one_plan_without_duplicate_report(
 fn turn_rejection_cannot_settle_correlated_model_management() {
     let mut app = App::new();
     assert_eq!(app.begin_model_management(), Some(SessionMode::Build));
-    app.reduce_without_effects(SessionEvent::TurnRejected {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Rejected {
         turn_id: TurnId::new(8),
         error: "unrelated turn".into(),
-    });
+    }));
     assert!(app.is_busy());
     assert!(app.history().is_empty());
     app.finish_model_management();

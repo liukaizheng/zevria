@@ -31,7 +31,7 @@ impl DesktopWindow {
         let controller = self.controller.read(cx);
         let t = palette(cx);
         let tone = tones(cx);
-        let model_management = controller.model.models.is_open();
+        let model_management = controller.model.controls.models.is_open();
         let transitioning = model_management
             || matches!(
                 controller.phase,
@@ -133,7 +133,7 @@ impl DesktopWindow {
                 })
             })
             .unwrap_or_else(|| "New session".into());
-        let selected = controller.model.selected_child.is_none();
+        let selected = controller.model.controls.selected_child.is_none();
         let mode_ink = super::status::accent(&controller.model.root, cx);
         let mut listing = div()
             .id("session-list")

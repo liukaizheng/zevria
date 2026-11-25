@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{EnsembleEvent, PlanEvent, QuestionEvent, TurnEvent};
 use zevria_transcript::test_support::TranscriptRewriteBlocker;
 
 #[tokio::test]
@@ -176,7 +177,7 @@ async fn whitespace_only_ensemble_prompt_fails_before_calling_the_launcher() {
     );
     assert!(matches!(
         collect_events(&mut receiver).await.last(),
-        Some(SessionEvent::TurnRejected { error, .. })
+        Some(SessionEvent::Turn(TurnEvent::Rejected { error, .. }))
             if error.contains("requires a non-empty prompt")
     ));
 }
@@ -276,13 +277,13 @@ async fn ensemble_to_ensemble_edit_atomically_replaces_the_tail_with_a_fresh_run
     let lifecycle = collect_events(&mut receiver).await;
     assert!(matches!(
         lifecycle.first(),
-        Some(SessionEvent::EnsembleStarted { start, resumed: false, .. })
+        Some(SessionEvent::Ensemble(EnsembleEvent::Started { start, resumed: false, .. }))
             if start.run_id == fresh_start.run_id
     ));
     assert_eq!(
         lifecycle
             .iter()
-            .filter(|event| matches!(event, SessionEvent::EnsembleStarted { .. }))
+            .filter(|event| matches!(event, SessionEvent::Ensemble(EnsembleEvent::Started { .. })))
             .count(),
         1
     );
@@ -432,17 +433,21 @@ async fn prompt_edits_can_become_fresh_plan_or_review_ensembles() {
         let lifecycle = collect_events(&mut receiver).await;
         assert!(matches!(
             lifecycle.first(),
-            Some(SessionEvent::EnsembleStarted { start, resumed: false, .. })
+            Some(SessionEvent::Ensemble(EnsembleEvent::Started { start, resumed: false, .. }))
                 if start.run_id == fresh_start.run_id
         ));
         if workflow == EnsembleWorkflow::Plan {
             let started = lifecycle
                 .iter()
-                .position(|event| matches!(event, SessionEvent::EnsembleStarted { .. }))
+                .position(|event| {
+                    matches!(event, SessionEvent::Ensemble(EnsembleEvent::Started { .. }))
+                })
                 .expect("ensemble started");
             let plan_changed = lifecycle
                 .iter()
-                .position(|event| matches!(event, SessionEvent::PlanStateChanged { .. }))
+                .position(|event| {
+                    matches!(event, SessionEvent::Plan(PlanEvent::StateChanged { .. }))
+                })
                 .expect("plan state changed");
             assert!(started < plan_changed);
         }
@@ -534,7 +539,7 @@ async fn ensemble_to_message_edit_runs_build_or_plan_from_the_retained_prefix() 
             );
         }
         assert!(collect_events(&mut receiver).await.iter().any(|event| {
-            matches!(event, SessionEvent::TurnStarted { mode: event_mode, message, .. }
+            matches!(event, SessionEvent::Turn(TurnEvent::Started { mode: event_mode, message, .. })
                 if *event_mode == mode && message == &Message::user("ordinary replacement"))
         }));
     }
@@ -649,7 +654,7 @@ async fn prompt_ensemble_and_skill_targets_can_become_typed_skill_turns() {
         let lifecycle = collect_events(&mut receiver).await;
         assert!(lifecycle.iter().any(|event| matches!(
             event,
-            SessionEvent::TurnStarted { message, mode: SessionMode::Build, .. }
+            SessionEvent::Turn(TurnEvent::Started { message, mode: SessionMode::Build, .. })
                 if message == &Message::user("$review inspect this \n carefully")
         )));
     }
@@ -726,7 +731,7 @@ async fn ensemble_edit_workflow_gating_replays_only_the_retained_plan_prefix() {
         collect_events(&mut receiver)
             .await
             .iter()
-            .any(|event| matches!(event, SessionEvent::EnsembleStarted { .. }))
+            .any(|event| matches!(event, SessionEvent::Ensemble(EnsembleEvent::Started { .. })))
     );
 }
 
@@ -1005,11 +1010,11 @@ async fn cancelled_or_failed_ensemble_edit_commit_does_not_truncate_or_launch() 
     assert!(
         lifecycle
             .iter()
-            .all(|event| !matches!(event, SessionEvent::EnsembleStarted { .. }))
+            .all(|event| !matches!(event, SessionEvent::Ensemble(EnsembleEvent::Started { .. })))
     );
     assert!(matches!(
         lifecycle.last(),
-        Some(SessionEvent::TurnRejected { error, .. })
+        Some(SessionEvent::Turn(TurnEvent::Rejected { error, .. }))
             if error.contains("failed to persist the ensemble start")
     ));
 }
@@ -1128,26 +1133,37 @@ async fn ensemble_review_inspects_after_reports_ready_and_persists_boundaries() 
         .iter()
         .enumerate()
         .filter_map(|(index, event)| {
-            matches!(event, SessionEvent::AgentRunFinished { .. }).then_some(index)
+            matches!(
+                event,
+                SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished { .. })
+            )
+            .then_some(index)
         })
         .collect::<Vec<_>>();
     let reports_ready = lifecycle
         .iter()
-        .position(|event| matches!(event, SessionEvent::EnsembleReportsReady { .. }))
+        .position(|event| {
+            matches!(
+                event,
+                SessionEvent::Ensemble(EnsembleEvent::ReportsReady { .. })
+            )
+        })
         .expect("reports-ready event");
     let command_call = lifecycle
         .iter()
         .position(|event| match event {
-            SessionEvent::Intermediate { message, .. } => assistant_tool_calls(message)
-                .iter()
-                .any(|call| call.function.name == "command"),
+            SessionEvent::Turn(TurnEvent::Intermediate { message, .. }) => {
+                assistant_tool_calls(message)
+                    .iter()
+                    .any(|call| call.function.name == "command")
+            }
             _ => false,
         })
         .expect("command intermediate event");
     let command_result = lifecycle
         .iter()
         .position(|event| match event {
-            SessionEvent::ToolResults { metadata, .. } => {
+            SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) => {
                 metadata.iter().any(|result| result.tool_name == "command")
             }
             _ => false,
@@ -1155,7 +1171,7 @@ async fn ensemble_review_inspects_after_reports_ready_and_persists_boundaries() 
         .expect("command result event");
     let completed = lifecycle
         .iter()
-        .position(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+        .position(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
         .expect("review completion event");
     assert_eq!(worker_finishes.len(), 2);
     assert!(worker_finishes.iter().all(|index| *index < reports_ready));
@@ -1164,7 +1180,7 @@ async fn ensemble_review_inspects_after_reports_ready_and_persists_boundaries() 
     assert!(command_result < completed);
     assert!(matches!(
         lifecycle.last(),
-        Some(SessionEvent::TurnCompleted { message, .. })
+        Some(SessionEvent::Turn(TurnEvent::Completed { message, .. }))
             if message == &Message::assistant("review synthesis")
     ));
 }
@@ -1221,20 +1237,23 @@ async fn one_proofless_plan_worker_blocks_reports_ready_and_every_root_model_cal
     assert_eq!(
         lifecycle
             .iter()
-            .filter(|event| matches!(event, SessionEvent::AgentRunFinished { .. }))
+            .filter(|event| matches!(
+                event,
+                SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished { .. })
+            ))
             .count(),
         0
     );
-    assert!(
-        !lifecycle
-            .iter()
-            .any(|event| matches!(event, SessionEvent::EnsembleReportsReady { .. }))
-    );
     assert!(!lifecycle.iter().any(|event| matches!(
         event,
-        SessionEvent::TurnFailed { .. } | SessionEvent::TurnCompleted { .. }
+        SessionEvent::Ensemble(EnsembleEvent::ReportsReady { .. })
     )));
-    assert!(lifecycle.iter().any(|event| matches!(event, SessionEvent::WorkerReviewUpdated { state, .. } if state.status() == AgentRunStatus::AwaitingFeedback)));
+    assert!(!lifecycle.iter().any(|event| matches!(
+        event,
+        SessionEvent::Turn(TurnEvent::Failed { .. })
+            | SessionEvent::Turn(TurnEvent::Completed { .. })
+    )));
+    assert!(lifecycle.iter().any(|event| matches!(event, SessionEvent::Ensemble(EnsembleEvent::WorkerReviewUpdated { state, .. }) if state.status() == AgentRunStatus::AwaitingFeedback)));
 }
 
 #[tokio::test]
@@ -1378,21 +1397,32 @@ async fn ensemble_plan_inspects_after_confirmation_and_publishes_without_approva
             .iter()
             .enumerate()
             .filter_map(|(index, event)| {
-                matches!(event, SessionEvent::AgentRunFinished { .. }).then_some(index)
+                matches!(
+                    event,
+                    SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished { .. })
+                )
+                .then_some(index)
             })
             .collect::<Vec<_>>();
         let reports_ready = lifecycle
             .iter()
-            .position(|event| matches!(event, SessionEvent::EnsembleReportsReady { .. }))
+            .position(|event| {
+                matches!(
+                    event,
+                    SessionEvent::Ensemble(EnsembleEvent::ReportsReady { .. })
+                )
+            })
             .expect("reports-ready event");
         let intermediate_tools = lifecycle
             .iter()
             .enumerate()
             .filter_map(|(index, event)| match event {
-                SessionEvent::Intermediate { message, .. } => assistant_tool_calls(message)
-                    .into_iter()
-                    .next()
-                    .map(|call| (index, call.function.name)),
+                SessionEvent::Turn(TurnEvent::Intermediate { message, .. }) => {
+                    assistant_tool_calls(message)
+                        .into_iter()
+                        .next()
+                        .map(|call| (index, call.function.name))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -1413,7 +1443,7 @@ async fn ensemble_plan_inspects_after_confirmation_and_publishes_without_approva
         let command_result = lifecycle
             .iter()
             .position(|event| match event {
-                SessionEvent::ToolResults { metadata, .. } => {
+                SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) => {
                     metadata.iter().any(|result| result.tool_name == "command")
                 }
                 _ => false,
@@ -1424,7 +1454,7 @@ async fn ensemble_plan_inspects_after_confirmation_and_publishes_without_approva
         let reconciliation_result = lifecycle
             .iter()
             .position(|event| match event {
-                SessionEvent::ToolResults { metadata, .. } => metadata
+                SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) => metadata
                     .iter()
                     .any(|result| result.tool_name == RECONCILE_REPORTS_TOOL_NAME),
                 _ => false,
@@ -1552,16 +1582,17 @@ async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Durati
             assert!(
                 !matches!(
                     &event,
-                    SessionEvent::TurnFailed { .. }
-                        | SessionEvent::TurnRejected { .. }
-                        | SessionEvent::TurnCancelled { .. }
-                        | SessionEvent::TurnCompleted { .. }
+                    SessionEvent::Turn(TurnEvent::Failed { .. })
+                        | SessionEvent::Turn(TurnEvent::Rejected { .. })
+                        | SessionEvent::Turn(TurnEvent::Cancelled { .. })
+                        | SessionEvent::Turn(TurnEvent::Completed { .. })
                 ),
                 "ensemble ended before the question: {event:?}"
             );
-            if let SessionEvent::WorkerReviewUpdated { target, state } = &event
+            if let SessionEvent::Ensemble(EnsembleEvent::WorkerReviewUpdated { target, state }) =
+                &event
                 && let Some(snapshot) = state.eligible_snapshot()
-                && state.confirmation.is_none()
+                && state.proposals.confirmation.is_none()
             {
                 commands
                     .send(SessionCommand::Control(ControlCommand::Worker(
@@ -1576,7 +1607,9 @@ async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Durati
                     .unwrap();
             }
             let question = match &event {
-                SessionEvent::QuestionAsked { request, .. } => Some(request.clone()),
+                SessionEvent::Question(QuestionEvent::Asked { request, .. }) => {
+                    Some(request.clone())
+                }
                 _ => None,
             };
             lifecycle.push(event);
@@ -1622,13 +1655,13 @@ async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Durati
             assert!(
                 !matches!(
                     &event,
-                    SessionEvent::TurnFailed { .. }
-                        | SessionEvent::TurnRejected { .. }
-                        | SessionEvent::TurnCancelled { .. }
+                    SessionEvent::Turn(TurnEvent::Failed { .. })
+                        | SessionEvent::Turn(TurnEvent::Rejected { .. })
+                        | SessionEvent::Turn(TurnEvent::Cancelled { .. })
                 ),
                 "ensemble failed after the question answer: {event:?}"
             );
-            let completed = matches!(event, SessionEvent::TurnCompleted { .. });
+            let completed = matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. }));
             lifecycle.push(event);
             if completed {
                 break;
@@ -1765,24 +1798,35 @@ async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Durati
         .iter()
         .enumerate()
         .filter_map(|(index, event)| {
-            matches!(event, SessionEvent::AgentRunFinished { .. }).then_some(index)
+            matches!(
+                event,
+                SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished { .. })
+            )
+            .then_some(index)
         })
         .collect::<Vec<_>>();
     let reports_ready = lifecycle
         .iter()
-        .position(|event| matches!(event, SessionEvent::EnsembleReportsReady { .. }))
+        .position(|event| {
+            matches!(
+                event,
+                SessionEvent::Ensemble(EnsembleEvent::ReportsReady { .. })
+            )
+        })
         .expect("reports-ready event");
     let intermediate_tool = |name: &str| {
         lifecycle.iter().position(|event| match event {
-            SessionEvent::Intermediate { message, .. } => assistant_tool_calls(message)
-                .iter()
-                .any(|call| call.function.name == name),
+            SessionEvent::Turn(TurnEvent::Intermediate { message, .. }) => {
+                assistant_tool_calls(message)
+                    .iter()
+                    .any(|call| call.function.name == name)
+            }
             _ => false,
         })
     };
     let tool_result = |name: &str| {
         lifecycle.iter().position(|event| match event {
-            SessionEvent::ToolResults { metadata, .. } => {
+            SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) => {
                 metadata.iter().any(|result| result.tool_name == name)
             }
             _ => false,
@@ -1796,7 +1840,7 @@ async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Durati
         .position(|event| {
             matches!(
                 event,
-                SessionEvent::QuestionAsked { request, .. } if request.id == question_id
+                SessionEvent::Question(QuestionEvent::Asked { request, .. }) if request.id == question_id
             )
         })
         .expect("question asked event");
@@ -1805,7 +1849,7 @@ async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Durati
         .position(|event| {
             matches!(
                 event,
-                SessionEvent::QuestionClosed { request_id, .. } if request_id == &question_id
+                SessionEvent::Question(QuestionEvent::Closed { request_id, .. }) if request_id == &question_id
             )
         })
         .expect("question closed event");
@@ -1813,7 +1857,7 @@ async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Durati
     let submit_call = intermediate_tool(SUBMIT_PLAN_TOOL_NAME).expect("submit-plan call event");
     let completed = lifecycle
         .iter()
-        .position(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+        .position(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
         .expect("turn-completed event");
 
     assert_eq!(worker_finishes.len(), 2);
@@ -1835,16 +1879,15 @@ async fn assert_ensemble_plan_question_round_trip(start_delay: std::time::Durati
     assert_eq!(
         lifecycle
             .iter()
-            .filter(|event| matches!(event, SessionEvent::QuestionAsked { .. }))
+            .filter(|event| matches!(event, SessionEvent::Question(QuestionEvent::Asked { .. })))
             .count(),
         1
     );
     assert!(lifecycle.iter().any(|event| matches!(
         event,
-        SessionEvent::PlanStateChanged {
-            state: PlanWorkflowState::Published { artifact }
-        } if artifact.title == title
-    )));
+        SessionEvent::Plan(PlanEvent::StateChanged {
+            state
+        })  if matches!(state.as_ref(), PlanWorkflowState::Published { artifact } if artifact.title == title))));
 }
 
 #[tokio::test]
@@ -1893,19 +1936,22 @@ async fn all_failed_ensemble_skips_the_root_model_call() {
     assert_eq!(
         lifecycle
             .iter()
-            .filter(|event| matches!(event, SessionEvent::AgentRunFinished { .. }))
+            .filter(|event| matches!(
+                event,
+                SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished { .. })
+            ))
             .count(),
         2
     );
     assert!(lifecycle.iter().all(|event| !matches!(
         event,
-        SessionEvent::EnsembleReportsReady { .. }
-            | SessionEvent::Intermediate { .. }
-            | SessionEvent::ToolResults { .. }
+        SessionEvent::Ensemble(EnsembleEvent::ReportsReady { .. })
+            | SessionEvent::Turn(TurnEvent::Intermediate { .. })
+            | SessionEvent::Turn(TurnEvent::ToolResults { .. })
     )));
     assert!(matches!(
         lifecycle.last(),
-        Some(SessionEvent::TurnFailed { error, .. })
+        Some(SessionEvent::Turn(TurnEvent::Failed { error, .. }))
             if error.contains("all ensemble workers failed")
     ));
 }
@@ -2071,21 +2117,27 @@ async fn durable_reports_recovery_reruns_only_root_synthesis() {
         );
     }
     let lifecycle = collect_events(&mut receiver).await;
-    assert!(
-        lifecycle
-            .iter()
-            .all(|event| !matches!(event, SessionEvent::AgentRunFinished { .. }))
-    );
+    assert!(lifecycle.iter().all(|event| !matches!(
+        event,
+        SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished { .. })
+    )));
     let reports_ready = lifecycle
         .iter()
-        .position(|event| matches!(event, SessionEvent::EnsembleReportsReady { .. }))
+        .position(|event| {
+            matches!(
+                event,
+                SessionEvent::Ensemble(EnsembleEvent::ReportsReady { .. })
+            )
+        })
         .expect("recovered reports-ready event");
     let command_call = lifecycle
         .iter()
         .position(|event| match event {
-            SessionEvent::Intermediate { message, .. } => assistant_tool_calls(message)
-                .iter()
-                .any(|call| call.function.name == "command"),
+            SessionEvent::Turn(TurnEvent::Intermediate { message, .. }) => {
+                assistant_tool_calls(message)
+                    .iter()
+                    .any(|call| call.function.name == "command")
+            }
             _ => false,
         })
         .expect("recovered command event");
@@ -2241,7 +2293,7 @@ async fn ensemble_plan_recovery_restores_an_accepted_submit_plan_candidate() {
             .iter()
             .all(|event| !matches!(
                 event,
-                SessionEvent::TurnFailed { error, .. }
+                SessionEvent::Turn(TurnEvent::Failed { error, .. })
                     if error.contains("without calling submit_plan")
             ))
     );

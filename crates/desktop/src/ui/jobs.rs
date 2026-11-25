@@ -7,9 +7,10 @@ use super::{
 use crate::{actions, controller::SessionController};
 use gpui_kit::{component::IconName, prelude::*, *};
 use std::collections::HashMap;
-use zevria_foundation::{CommandJobId, CommandJobView};
+use zevria_foundation::CommandJobId;
 use zevria_presentation::jobs::{
-    JobRow, JobsInspector, JobsMessage, summary_title, tail_byte_label, terminal_tail_text,
+    JobOutput, JobRow, JobsInspector, JobsMessage, summary_title, tail_byte_label,
+    terminal_tail_text,
 };
 
 pub(super) struct JobsPanelView {
@@ -47,7 +48,7 @@ impl DesktopWindow {
             self.jobs_ui.selected = None;
             return None;
         }
-        let inspector = &controller.model.jobs;
+        let inspector = controller.model.root.jobs_inspector();
         let jobs = inspector.jobs();
         let selected = inspector.inspected();
         let summary = summary_title(jobs);
@@ -89,7 +90,7 @@ impl DesktopWindow {
                     "down" => 1,
                     _ => return,
                 };
-                let inspector = &this.controller.read(cx).model.jobs;
+                let inspector = this.controller.read(cx).model.root.jobs_inspector();
                 let jobs = inspector.jobs();
                 let current = jobs
                     .iter()
@@ -347,7 +348,7 @@ pub(super) fn control_buttons(
 fn detail(
     id: &CommandJobId,
     running: bool,
-    view: Option<&CommandJobView>,
+    view: Option<&JobOutput>,
     scroll: &ScrollHandle,
     cx: &App,
 ) -> Div {
@@ -393,13 +394,13 @@ fn detail(
             (
                 "stdout",
                 &view.stdout_tail,
-                view.snapshot.stdout_bytes,
+                view.stdout_bytes,
                 t.text.primary,
             ),
             (
                 "stderr",
                 &view.stderr_tail,
-                view.snapshot.stderr_bytes,
+                view.stderr_bytes,
                 t.feedback.warning,
             ),
         ] {

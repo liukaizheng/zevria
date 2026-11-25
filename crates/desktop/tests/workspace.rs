@@ -5,15 +5,16 @@ use zevria_foundation::{
     QuestionRequestId, QuestionResponse, RequestBehavior, SessionMode, SubtaskDescriptor,
     SubtaskId, SubtaskKind, SubtaskStatus, TurnId,
 };
+use zevria_session_api::{PlanEvent, QuestionEvent, SubtaskEvent, TurnEvent};
 use zevria_session_api::{SessionCommand, SessionEvent as E, SessionUpdate as U, TurnCommand};
 use zevria_workflow::{PlanArtifact, PlanHandoff, PlanId, PlanVersion};
 const TURN: TurnId = TurnId::new(7);
 fn start(workspace: &mut WorkspaceModel) {
-    workspace.apply(U::Lifecycle(E::TurnStarted {
+    workspace.apply(U::Lifecycle(E::Turn(TurnEvent::Started {
         turn_id: TURN,
         mode: SessionMode::Build,
         message: Message::user("start"),
-    }));
+    })));
 }
 fn question(kind: QuestionPromptKind) -> QuestionRequest {
     QuestionRequest {
@@ -47,78 +48,78 @@ fn question(kind: QuestionPromptKind) -> QuestionRequest {
 fn child_events_never_promote_root_or_steal_questions() {
     let mut workspace = WorkspaceModel::default();
     let id = SubtaskId::new("child");
-    workspace.apply(U::Lifecycle(E::SubtaskLaunched {
+    workspace.apply(U::Lifecycle(E::Subtask(SubtaskEvent::Launched {
         turn_id: TURN,
         call_id: "call".into(),
         entry_index: 0,
-        descriptor: SubtaskDescriptor {
+        descriptor: Box::new(SubtaskDescriptor {
             id: id.clone(),
             parent_session_id: "parent".into(),
             title: "Inspect".into(),
             kind: SubtaskKind::Explore,
             workspace: None,
             status: SubtaskStatus::Starting,
-        },
-    }));
-    workspace.apply(U::Lifecycle(E::SubtaskSession {
+        }),
+    })));
+    workspace.apply(U::Lifecycle(E::Subtask(SubtaskEvent::Session {
         id: id.clone(),
-        event: Box::new(E::TurnStarted {
+        event: Box::new(E::Turn(TurnEvent::Started {
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("child"),
-        }),
-    }));
+        })),
+    })));
     assert!(!workspace.root.is_busy());
     assert!(workspace.children[0].model.is_busy());
     assert!(workspace.children[0].model.cancel().is_none());
-    workspace.apply(U::Lifecycle(E::SubtaskSession {
+    workspace.apply(U::Lifecycle(E::Subtask(SubtaskEvent::Session {
         id,
-        event: Box::new(E::QuestionAsked {
+        event: Box::new(E::Question(QuestionEvent::Asked {
             turn_id: TURN,
             request: question(QuestionPromptKind::SingleSelect { allow_other: true }),
-        }),
-    }));
-    assert!(workspace.question.is_none());
+        })),
+    })));
+    assert!(workspace.controls.question.is_none());
 }
 #[test]
 fn question_requires_root_acceptance_and_both_close_identities() {
     let mut workspace = WorkspaceModel::default();
     let request = question(QuestionPromptKind::SingleSelect { allow_other: true });
-    workspace.apply(U::Lifecycle(E::QuestionAsked {
+    workspace.apply(U::Lifecycle(E::Question(QuestionEvent::Asked {
         turn_id: TURN,
         request: request.clone(),
-    }));
-    assert!(workspace.question.is_none());
+    })));
+    assert!(workspace.controls.question.is_none());
     start(&mut workspace);
-    workspace.apply(U::Lifecycle(E::QuestionAsked {
+    workspace.apply(U::Lifecycle(E::Question(QuestionEvent::Asked {
         turn_id: TURN,
         request,
-    }));
-    assert!(workspace.question.is_some());
-    workspace.apply(U::Lifecycle(E::QuestionClosed {
+    })));
+    assert!(workspace.controls.question.is_some());
+    workspace.apply(U::Lifecycle(E::Question(QuestionEvent::Closed {
         turn_id: TURN,
         request_id: QuestionRequestId::new("foreign"),
-    }));
-    assert!(workspace.question.is_some());
-    workspace.apply(U::Lifecycle(E::TurnCancelled {
+    })));
+    assert!(workspace.controls.question.is_some());
+    workspace.apply(U::Lifecycle(E::Turn(TurnEvent::Cancelled {
         turn_id: TurnId::new(99),
-    }));
-    assert!(workspace.question.is_some());
-    workspace.apply(U::Lifecycle(E::TurnCompleted {
+    })));
+    assert!(workspace.controls.question.is_some());
+    workspace.apply(U::Lifecycle(E::Turn(TurnEvent::Completed {
         turn_id: TURN,
         message: Message::assistant("done"),
         attempt_id: None,
-    }));
-    assert!(workspace.question.is_none());
+    })));
+    assert!(workspace.controls.question.is_none());
 }
 #[test]
 fn fresh_handoff_is_typed_and_disconnect_clears_modal() {
     let mut workspace = WorkspaceModel::default();
     start(&mut workspace);
-    workspace.apply(U::Lifecycle(E::QuestionAsked {
+    workspace.apply(U::Lifecycle(E::Question(QuestionEvent::Asked {
         turn_id: TURN,
         request: question(QuestionPromptKind::SingleSelect { allow_other: true }),
-    }));
+    })));
     let handoff = PlanHandoff::new(
         PlanArtifact {
             version: PlanVersion {
@@ -131,12 +132,12 @@ fn fresh_handoff_is_typed_and_disconnect_clears_modal() {
         },
         "source",
     );
-    let outcome = workspace.apply(U::Lifecycle(E::FreshPlanHandoffRequested {
-        handoff: handoff.clone(),
-    }));
+    let outcome = workspace.apply(U::Lifecycle(E::Plan(PlanEvent::FreshHandoffRequested {
+        handoff: Box::new(handoff.clone()),
+    })));
     assert_eq!(outcome.fresh, Some(handoff));
     workspace.disconnected();
-    assert!(workspace.question.is_none());
+    assert!(workspace.controls.question.is_none());
     assert!(!workspace.root.is_busy());
 }
 #[test]
@@ -329,9 +330,9 @@ fn shared_grammar_routes_supported_commands_and_retains_unsupported_drafts() {
         workspace.route_input("/subtasks", false),
         InputRoute::Subtasks
     ));
-    workspace.subtasks_open = true;
+    workspace.controls.subtasks_open = true;
     workspace.disconnected();
-    assert!(!workspace.subtasks_open);
+    assert!(!workspace.controls.subtasks_open);
     assert!(matches!(
         workspace.route_input("/model", false),
         InputRoute::Models(zevria_model::models::ModelSelectionScope::SessionAndDefault)
@@ -348,20 +349,57 @@ fn shared_grammar_routes_supported_commands_and_retains_unsupported_drafts() {
         workspace.route_input("/orchestrate", false),
         InputRoute::Notice(_)
     ));
+    workspace.root.apply_selected_mode(SessionMode::Plan);
+    assert!(matches!(
+        workspace.route_input("/orchestrate independent work", false),
+        InputRoute::Notice(notice) if notice.contains("only in Build mode")
+    ));
+    assert!(!workspace.root.is_busy());
 }
+
+#[test]
+fn turn_mode_changes_and_completion_request_skill_completions() {
+    use zevria_instructions::skill::SkillManagementRequest;
+    use zevria_session_api::ManagementCommand;
+
+    for event in [
+        TurnEvent::ModeChanged {
+            mode: SessionMode::Plan,
+        },
+        TurnEvent::Completed {
+            turn_id: TURN,
+            message: Message::assistant("done"),
+            attempt_id: None,
+        },
+    ] {
+        let mut workspace = WorkspaceModel::default();
+        if matches!(&event, TurnEvent::Completed { .. }) {
+            start(&mut workspace);
+        }
+        let reduction = workspace.apply(U::Lifecycle(E::Turn(event)));
+        assert!(reduction.root.is_some());
+        assert!(matches!(
+            workspace.controls.skills.commands.pop_front(),
+            Some(SessionCommand::Manage(ManagementCommand::Skills {
+                request: SkillManagementRequest::List { query }, ..
+            })) if query.is_empty()
+        ));
+    }
+}
+
 #[test]
 fn terminal_subtask_status_does_not_regress_on_late_launch() {
     let mut workspace = WorkspaceModel::default();
     let id = SubtaskId::new("child");
-    workspace.apply(U::Lifecycle(E::SubtaskStatus {
+    workspace.apply(U::Lifecycle(E::Subtask(SubtaskEvent::Status {
         turn_id: TURN,
         id: id.clone(),
         status: SubtaskStatus::Completed,
-    }));
-    workspace.apply(U::Lifecycle(E::SubtaskStatus {
+    })));
+    workspace.apply(U::Lifecycle(E::Subtask(SubtaskEvent::Status {
         turn_id: TURN,
         id,
         status: SubtaskStatus::Starting,
-    }));
+    })));
     assert_eq!(workspace.children[0].status, Some(SubtaskStatus::Completed));
 }

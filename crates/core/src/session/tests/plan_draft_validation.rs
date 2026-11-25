@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::TurnEvent;
 
 struct InvalidDraftTool;
 impl Tool for InvalidDraftTool {
@@ -95,7 +96,7 @@ async fn reducer_rejection_replaces_the_false_save_acknowledgement_and_denies_su
     let results = lifecycle
         .iter()
         .find_map(|event| match event {
-            SessionEvent::ToolResults { metadata, .. } => Some(metadata),
+            SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) => Some(metadata),
             _ => None,
         })
         .unwrap();
@@ -136,7 +137,7 @@ async fn submission_must_equal_the_prospective_working_copy_byte_for_byte() {
             .markdown(),
         text
     );
-    assert!(collect_events(&mut receiver).await.iter().any(|event| matches!(event, SessionEvent::ToolResults { metadata, .. } if metadata.last().unwrap().diagnostic.as_ref().is_some_and(|diagnostic| diagnostic.contains("match the stored Plan working copy")))));
+    assert!(collect_events(&mut receiver).await.iter().any(|event| matches!(event, SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) if metadata.last().unwrap().diagnostic.as_ref().is_some_and(|diagnostic| diagnostic.contains("match the stored Plan working copy")))));
 }
 #[tokio::test]
 async fn ensemble_drafting_is_allowed_before_inspection_without_changing_gate_order() {

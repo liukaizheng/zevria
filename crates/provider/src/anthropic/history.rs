@@ -2,7 +2,10 @@
 //! Request binding is deliberately not cached here: actual system/tools decide
 //! whether native signed thinking survives completion or counting.
 use std::sync::Arc;
-use zevria_anthropic::{Compatibility, project::ValidatedHistory};
+use zevria_anthropic::{
+    Compatibility,
+    project::{self, HistoryOptions, ValidatedHistory},
+};
 use zevria_foundation::ModelProfileRef;
 use zevria_model::{ModelInputIdentity, ModelRequestItem, models::ReplayPreflight};
 
@@ -36,36 +39,20 @@ impl HistoryCache {
         policy: &zevria_foundation::image_accounting::ImageAccountingPolicy,
     ) -> anyhow::Result<ReplayPreflight> {
         let Some(identity) = identity.filter(|identity| identity.len() == input.len()) else {
-            return zevria_anthropic::project::assess_history_with_policy(
+            return project::assess_history(
                 input,
-                target,
-                compatibility,
-                policy,
-                None,
+                HistoryOptions {
+                    policy,
+                    ..HistoryOptions::new(target, compatibility)
+                },
             );
         };
         Ok(self
-            .prepare_with_policy(input, Some(identity), target, compatibility, policy)?
+            .prepare(input, Some(identity), target, compatibility, policy)?
             .assessment)
     }
 
-    #[cfg(test)]
     pub(crate) fn prepare(
-        &mut self,
-        input: &[ModelRequestItem<'_>],
-        identity: Option<&ModelInputIdentity>,
-        target: &ModelProfileRef,
-        compatibility: &Compatibility,
-    ) -> anyhow::Result<HistoryPreparation> {
-        self.prepare_with_policy(
-            input,
-            identity,
-            target,
-            compatibility,
-            &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
-        )
-    }
-    pub(crate) fn prepare_with_policy(
         &mut self,
         input: &[ModelRequestItem<'_>],
         identity: Option<&ModelInputIdentity>,
@@ -104,13 +91,14 @@ impl HistoryCache {
                 None
             }
         });
-        let (assessment, history) = zevria_anthropic::project::assess_and_prepare_history(
+        let (assessment, history) = project::prepare_history(
             input,
-            target,
-            compatibility,
             Some(identity),
-            policy,
-            prefix_media,
+            HistoryOptions {
+                policy,
+                measured_prefix: prefix_media,
+                ..HistoryOptions::new(target, compatibility)
+            },
         )?;
         let prepared = HistoryPreparation {
             assessment,
@@ -173,12 +161,12 @@ mod tests {
                         &policy,
                     )
                     .unwrap();
-                let full = zevria_anthropic::project::assess_history_with_policy(
+                let full = project::assess_history(
                     &input[..end],
-                    &target,
-                    &compatibility,
-                    &policy,
-                    None,
+                    HistoryOptions {
+                        policy: &policy,
+                        ..HistoryOptions::new(&target, &compatibility)
+                    },
                 )
                 .unwrap();
                 assert_eq!(actual, full);
@@ -190,15 +178,8 @@ mod tests {
         );
         let system = serde_json::json!([]);
         let tools = serde_json::Value::Null;
-        let full = zevria_anthropic::project::project_with_compatibility(
-            &input,
-            &target,
-            &compatibility,
-            &system,
-            &tools,
-            false,
-        )
-        .unwrap();
+        let full =
+            project::project(&input, &target, &compatibility, &system, &tools, false).unwrap();
         let cached = cache
             .entry
             .unwrap()
@@ -213,6 +194,7 @@ mod tests {
 
     #[test]
     fn admission_validation_and_binding_share_one_history_but_not_foreign_keys() {
+        let policy = &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved;
         let target = ModelProfileRef::new("anthropic", "model");
         let compatibility = Compatibility::default();
         let user = Message::user("prompt");
@@ -220,18 +202,12 @@ mod tests {
         let identity = ModelInputIdentity::from_items(&input).unwrap();
         let mut cache = HistoryCache::default();
         let assessment = cache
-            .assess(
-                &input,
-                Some(&identity),
-                &target,
-                &compatibility,
-                &zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
-            )
+            .assess(&input, Some(&identity), &target, &compatibility, policy)
             .unwrap();
         let first = cache.entry.as_ref().unwrap().prepared.clone();
         assert_eq!(assessment, first.assessment);
         let again = cache
-            .prepare(&input, None, &target, &compatibility)
+            .prepare(&input, None, &target, &compatibility, policy)
             .unwrap();
         assert_eq!(first.assessment, again.assessment);
         let first = first.history.unwrap();
@@ -242,6 +218,7 @@ mod tests {
                 Some(&identity),
                 &ModelProfileRef::new("other", "model"),
                 &compatibility,
+                policy,
             )
             .unwrap();
         assert!(!Arc::ptr_eq(&first, &different.history.unwrap()));
@@ -254,6 +231,7 @@ mod tests {
                     inline_tools: false,
                     ..compatibility.clone()
                 },
+                policy,
             )
             .unwrap();
         assert!(!Arc::ptr_eq(&first, &different.history.unwrap()));
@@ -264,6 +242,7 @@ mod tests {
                 None,
                 &target,
                 &compatibility,
+                policy,
             )
             .unwrap();
         assert!(!Arc::ptr_eq(&first, &different.history.unwrap()));

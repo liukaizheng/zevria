@@ -168,7 +168,7 @@ async fn late_and_duplicate_comparison_cannot_overwrite_current_request() {
     let mut provider =
         crate::tests::connect_http_test_provider("http://127.0.0.1:9/responses".into()).await;
     // No socket traffic: exercise the bounded ownership ledger directly.
-    provider.transport = OpenAiTransport::WebSocket;
+    provider.responses_transport.prefer_websocket();
     let event = |id: &str, outcome: &str| {
         json!({"type":"response.completed", "response":{"id":id, "prompt_cache_diagnostics":{"type":outcome}}}).to_string()
     };

@@ -6,10 +6,7 @@ use serde_json::json;
 use std::{hint::black_box, time::Duration};
 use zevria_foundation::ModelProfileRef;
 use zevria_model::{ModelInputIdentity, OwnedModelRequestItem, ProviderReplay};
-use zevria_responses::{
-    replay::{PreflightCache, preflight},
-    tools::ToolRendererOptions,
-};
+use zevria_responses::replay::{PreflightCache, preflight};
 
 fn history(count: usize, target: &ModelProfileRef) -> Vec<OwnedModelRequestItem> {
     let mut items = Vec::with_capacity(count);
@@ -45,28 +42,12 @@ fn main() {
             bench.iter(|| black_box(preflight(black_box(&input), &target).unwrap()))
         });
         let mut cache = PreflightCache::default();
-        cache
-            .assess(
-                &input,
-                &identity,
-                &target,
-                true,
-                ToolRendererOptions::default(),
-                true,
-            )
-            .unwrap();
+        cache.assess(&input, &identity, (&target).into()).unwrap();
         group.bench_function("cached_unchanged", |bench| {
             bench.iter(|| {
                 black_box(
                     cache
-                        .assess(
-                            black_box(&input),
-                            &identity,
-                            &target,
-                            true,
-                            ToolRendererOptions::default(),
-                            true,
-                        )
+                        .assess(black_box(&input), &identity, (&target).into())
                         .unwrap(),
                 )
             })
@@ -76,31 +57,11 @@ fn main() {
                 || {
                     let mut cache = PreflightCache::default();
                     cache
-                        .assess(
-                            prefix,
-                            &prefix_identity,
-                            &target,
-                            true,
-                            ToolRendererOptions::default(),
-                            true,
-                        )
+                        .assess(prefix, &prefix_identity, (&target).into())
                         .unwrap();
                     cache
                 },
-                |cache| {
-                    black_box(
-                        cache
-                            .assess(
-                                &input,
-                                &identity,
-                                &target,
-                                true,
-                                ToolRendererOptions::default(),
-                                true,
-                            )
-                            .unwrap(),
-                    )
-                },
+                |cache| black_box(cache.assess(&input, &identity, (&target).into()).unwrap()),
                 BatchSize::PerIteration,
             )
         });
@@ -144,22 +105,13 @@ fn main() {
         bench.iter(|| black_box(preflight(black_box(&input), &target).unwrap()))
     });
     let mut cache = PreflightCache::default();
-    let expected = cache
-        .assess(&input, &identity, &target, true, Default::default(), true)
-        .unwrap();
+    let expected = cache.assess(&input, &identity, (&target).into()).unwrap();
     assert_eq!(expected, preflight(&input, &target).unwrap());
     group.bench_function("cached_unchanged", |bench| {
         bench.iter(|| {
             black_box(
                 cache
-                    .assess(
-                        black_box(&input),
-                        &identity,
-                        &target,
-                        true,
-                        Default::default(),
-                        true,
-                    )
+                    .assess(black_box(&input), &identity, (&target).into())
                     .unwrap(),
             )
         })
@@ -169,23 +121,12 @@ fn main() {
             || {
                 let mut cache = PreflightCache::default();
                 cache
-                    .assess(
-                        prefix,
-                        &prefix_identity,
-                        &target,
-                        true,
-                        Default::default(),
-                        true,
-                    )
+                    .assess(prefix, &prefix_identity, (&target).into())
                     .unwrap();
                 cache
             },
             |cache| {
-                black_box(
-                    cache
-                        .assess(&input, &identity, &target, true, Default::default(), true)
-                        .unwrap(),
-                );
+                black_box(cache.assess(&input, &identity, (&target).into()).unwrap());
             },
             BatchSize::PerIteration,
         )

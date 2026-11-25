@@ -2,6 +2,7 @@
 use super::*;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
+use zevria_session_api::TurnEvent;
 
 #[tokio::test]
 async fn normal_and_worker_resume_store_diagnostics_adjacent_to_actual_transcript() {
@@ -139,14 +140,16 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
                         assert!(
                             !matches!(
                                 event,
-                                zevria_session_api::SessionEvent::TurnFailed { .. }
-                                    | zevria_session_api::SessionEvent::TurnRejected { .. }
+                                zevria_session_api::SessionEvent::Turn(TurnEvent::Failed { .. })
+                                    | zevria_session_api::SessionEvent::Turn(
+                                        TurnEvent::Rejected { .. }
+                                    )
                             ),
                             "{event:?}"
                         );
                         if matches!(
                             event,
-                            zevria_session_api::SessionEvent::TurnCompleted { .. }
+                            zevria_session_api::SessionEvent::Turn(TurnEvent::Completed { .. })
                         ) {
                             break;
                         }

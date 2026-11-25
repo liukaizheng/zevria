@@ -5,6 +5,7 @@ use zevria_model::models::{
     ModelCandidate, ModelManagementRequest as Request, ModelManagementResult as Result,
     ModelSelection, ModelSelectionScope as Scope,
 };
+use zevria_session_api::ManagementEvent;
 fn context() -> ModelContextPolicy {
     ModelContextPolicy {
         profile: ModelProfileRef::new(
@@ -48,9 +49,9 @@ fn catalog(
 ) {
     event(
         controller,
-        E::ModelsResult {
+        E::Manage(ManagementEvent::ModelsResult {
             request_id: id.into(),
-            result: Result::Catalog {
+            result: Box::new(Result::Catalog {
                 mode: SessionMode::Build,
                 scope,
                 current: ModelSelection::new(context().profile, Level::Medium),
@@ -59,8 +60,8 @@ fn catalog(
                     reasoning_levels: vec![Level::Medium, Level::High],
                 }],
                 revision: "r".into(),
-            },
-        },
+            }),
+        }),
         cx,
     );
 }
@@ -126,13 +127,13 @@ fn compact_status_shortcut_and_menu_open_one_session_only_lifecycle(cx: &mut Tes
                 ..
             })
         ));
-        assert!(controller.read_with(cx, |c, _| c.model.models.is_open()));
+        assert!(controller.read_with(cx, |c, _| c.model.controls.models.is_open()));
         event(
             &controller,
-            E::ModelsResult {
+            E::Manage(ManagementEvent::ModelsResult {
                 request_id: id,
-                result: Result::Cancelled,
-            },
+                result: Box::new(Result::Cancelled),
+            }),
             cx,
         );
         assert!(!controller.read_with(cx, |c, _| c.model.root.is_busy()));
@@ -223,9 +224,9 @@ fn search_effort_apply_and_escape_preserve_nonempty_thinking_disclosures_and_foc
     // Persistence already committed; its acknowledgement wins the cancel race.
     event(
         &controller,
-        E::ModelsResult {
+        E::Manage(ManagementEvent::ModelsResult {
             request_id: id,
-            result: Result::Changed {
+            result: Box::new(Result::Changed {
                 role: ModelRole::Build,
                 scope,
                 context: context(),
@@ -233,8 +234,8 @@ fn search_effort_apply_and_escape_preserve_nonempty_thinking_disclosures_and_foc
                 snapshot: None,
                 revision: "r".into(),
                 unchanged: false,
-            },
-        },
+            }),
+        }),
         cx,
     );
     assert_eq!(
@@ -310,7 +311,7 @@ fn native_model_effort_and_apply_buttons_keep_enter_and_space_ownership(cx: &mut
         "a focused effort button does not apply the request"
     );
     assert!(controller.read_with(cx, |c, _| matches!(
-        c.model.models.phase.step(),
+        c.model.controls.models.phase.step(),
         zevria_presentation::models::SelectionStep::Reasoning { selected: 1, .. }
     )));
     cx.update_window(window.into(), |_, window, cx| {
@@ -331,10 +332,10 @@ fn native_model_effort_and_apply_buttons_keep_enter_and_space_ownership(cx: &mut
     );
     event(
         &controller,
-        E::ModelsResult {
+        E::Manage(ManagementEvent::ModelsResult {
             request_id: id,
-            result: Result::Cancelled,
-        },
+            result: Box::new(Result::Cancelled),
+        }),
         cx,
     );
 }
@@ -364,7 +365,7 @@ fn escape_before_catalog_keeps_cancellation_owned_until_acknowledged(cx: &mut Te
     ));
     catalog(&controller, &id, scope, cx);
     assert!(controller.read_with(cx, |c, _| matches!(
-        c.model.models.phase,
+        c.model.controls.models.phase,
         zevria_presentation::models::ModelPhase::Cancelling { .. }
     )));
     cx.update_window(window.into(), |_, window, cx| {
@@ -374,13 +375,13 @@ fn escape_before_catalog_keeps_cancellation_owned_until_acknowledged(cx: &mut Te
     .unwrap();
     event(
         &controller,
-        E::ModelsResult {
+        E::Manage(ManagementEvent::ModelsResult {
             request_id: id,
-            result: Result::Cancelled,
-        },
+            result: Box::new(Result::Cancelled),
+        }),
         cx,
     );
-    assert!(!controller.read_with(cx, |c, _| c.model.models.is_open()));
+    assert!(!controller.read_with(cx, |c, _| c.model.controls.models.is_open()));
 }
 
 #[gpui_kit::test]
@@ -404,9 +405,9 @@ fn conversion_and_partial_save_errors_keep_native_controls_visible_at_minimum_si
             ModelProfileRef::new("other-provider", "other-model-with-a-long-configured-name");
         event(
             &controller,
-            E::ModelsResult {
+            E::Manage(ManagementEvent::ModelsResult {
                 request_id: id.clone(),
-                result: Result::Catalog {
+                result: Box::new(Result::Catalog {
                     mode: SessionMode::Build,
                     scope,
                     current: ModelSelection::new(context().profile, Level::Medium),
@@ -421,8 +422,8 @@ fn conversion_and_partial_save_errors_keep_native_controls_visible_at_minimum_si
                         },
                     ],
                     revision: "r".into(),
-                },
-            },
+                }),
+            }),
             cx,
         );
         cx.update_window(window.into(), |_, window, cx| {
@@ -449,10 +450,10 @@ fn conversion_and_partial_save_errors_keep_native_controls_visible_at_minimum_si
         let preview = zevria_model::models::ModelSelectionPreview { request_id: id.clone(), session_generation: "native-runtime".into(), generation: 19, mode: SessionMode::Build, scope, target, source: ModelSelection::new(context().profile, Level::Medium), revision: "r".into(), reason: "The effective checkpoint contains source-model-only opaque context. Conversion makes a source-model call and can lose detail. ".repeat(8) };
         event(
             &controller,
-            E::ModelsResult {
+            E::Manage(ManagementEvent::ModelsResult {
                 request_id: id.clone(),
-                result: Result::ConfirmationRequired(preview.clone()),
-            },
+                result: Box::new(Result::ConfirmationRequired(preview.clone())),
+            }),
             cx,
         );
         assert!(
@@ -500,10 +501,10 @@ fn conversion_and_partial_save_errors_keep_native_controls_visible_at_minimum_si
             );
             event(
                 &controller,
-                E::ModelsResult {
+                E::Manage(ManagementEvent::ModelsResult {
                     request_id: id,
-                    result: Result::Cancelled,
-                },
+                    result: Box::new(Result::Cancelled),
+                }),
                 cx,
             );
             continue;
@@ -512,7 +513,7 @@ fn conversion_and_partial_save_errors_keep_native_controls_visible_at_minimum_si
                 matches!(receiver.try_recv().unwrap(), SessionCommand::Manage(zevria_session_api::ManagementCommand::Models { request: Request::Confirm { preview: actual }, .. }) if actual == preview)
             );
         }
-        event(&controller, E::ModelsResult { request_id: id.clone(), result: Result::Rejected { code: "session_save_failed".into(), message: "The global default was saved, but the session header could not be written. Fix transcript persistence and retry.".into(), checkpoint_installed: true, current_revision: Some("new-revision".into()) } }, cx);
+        event(&controller, E::Manage(ManagementEvent::ModelsResult { request_id: id.clone(), result: Box::new(Result::Rejected { code: "session_save_failed".into(), message: "The global default was saved, but the session header could not be written. Fix transcript persistence and retry.".into(), checkpoint_installed: true, current_revision: Some("new-revision".into()) }) }), cx);
         assert_eq!(
             controller.read_with(cx, |c, _| c.model.root.session.reasoning(ModelRole::Build)),
             Some(Level::Medium)
@@ -525,10 +526,10 @@ fn conversion_and_partial_save_errors_keep_native_controls_visible_at_minimum_si
         .unwrap();
         event(
             &controller,
-            E::ModelsResult {
+            E::Manage(ManagementEvent::ModelsResult {
                 request_id: id,
-                result: Result::Cancelled,
-            },
+                result: Box::new(Result::Cancelled),
+            }),
             cx,
         );
     }
@@ -554,10 +555,10 @@ fn slash_scopes_consume_only_accepted_commands_and_channel_failure_does_not_stra
         assert!(controller.read_with(cx, |c, _| c.draft.is_empty()));
         event(
             &controller,
-            E::ModelsResult {
+            E::Manage(ManagementEvent::ModelsResult {
                 request_id: id,
-                result: Result::Cancelled,
-            },
+                result: Box::new(Result::Cancelled),
+            }),
             cx,
         );
         controller.update(cx, |c, cx| {
@@ -582,10 +583,10 @@ fn slash_scopes_consume_only_accepted_commands_and_channel_failure_does_not_stra
     );
     event(
         &controller,
-        E::ModelsResult {
+        E::Manage(ManagementEvent::ModelsResult {
             request_id: id,
-            result: Result::Cancelled,
-        },
+            result: Box::new(Result::Cancelled),
+        }),
         cx,
     );
     drop(receiver);
@@ -593,6 +594,8 @@ fn slash_scopes_consume_only_accepted_commands_and_channel_failure_does_not_stra
         c.open_model_picker(Scope::SessionOnly, cx);
     });
     cx.run_until_parked();
-    assert!(!controller.read_with(cx, |c, _| c.model.models.is_open()
-        || c.model.root.is_busy()));
+    assert!(
+        !controller.read_with(cx, |c, _| c.model.controls.models.is_open()
+            || c.model.root.is_busy())
+    );
 }

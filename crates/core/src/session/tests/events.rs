@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::TurnEvent;
 
 #[tokio::test]
 async fn simple_turn_has_authoritative_event_order() {
@@ -31,24 +32,25 @@ async fn simple_turn_has_authoritative_event_order() {
     let events = collect_events(&mut receiver).await;
     assert!(matches!(
         events[0],
-        SessionEvent::TurnStarted {
+        SessionEvent::Turn(TurnEvent::Started {
             mode: SessionMode::Build,
             ..
-        }
+        })
     ));
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, SessionEvent::ContextUsageUpdated { .. }))
-    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::Turn(TurnEvent::ContextUsageUpdated { .. })
+    )));
     assert!(matches!(
         events.last(),
-        Some(SessionEvent::TurnCompleted { .. })
+        Some(SessionEvent::Turn(TurnEvent::Completed { .. }))
     ));
     let calls = events
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::ModelCallStarted { turn_id, call } => Some((*turn_id, *call)),
+            SessionEvent::Turn(TurnEvent::ModelCallStarted { turn_id, call }) => {
+                Some((*turn_id, *call))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -112,11 +114,19 @@ async fn loop_calls_count_dispatches_not_tools_and_restart_for_each_turn() {
     let lifecycle = events
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::TurnStarted { turn_id, .. } => Some((*turn_id, "start", 0)),
-            SessionEvent::ModelCallStarted { turn_id, call } => Some((*turn_id, "call", *call)),
-            SessionEvent::Intermediate { turn_id, .. } => Some((*turn_id, "intermediate", 0)),
-            SessionEvent::ToolResults { turn_id, .. } => Some((*turn_id, "tools", 0)),
-            SessionEvent::TurnCompleted { turn_id, .. } => Some((*turn_id, "complete", 0)),
+            SessionEvent::Turn(TurnEvent::Started { turn_id, .. }) => Some((*turn_id, "start", 0)),
+            SessionEvent::Turn(TurnEvent::ModelCallStarted { turn_id, call }) => {
+                Some((*turn_id, "call", *call))
+            }
+            SessionEvent::Turn(TurnEvent::Intermediate { turn_id, .. }) => {
+                Some((*turn_id, "intermediate", 0))
+            }
+            SessionEvent::Turn(TurnEvent::ToolResults { turn_id, .. }) => {
+                Some((*turn_id, "tools", 0))
+            }
+            SessionEvent::Turn(TurnEvent::Completed { turn_id, .. }) => {
+                Some((*turn_id, "complete", 0))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -224,11 +234,11 @@ async fn replay_message_drives_tools_events_history_and_persistence() {
     let lifecycle = collect_events(&mut receiver).await;
     assert!(lifecycle.iter().any(|event| matches!(
         event,
-        SessionEvent::Intermediate { message, .. } if message == &canonical_tool_message
+        SessionEvent::Turn(TurnEvent::Intermediate { message, .. }) if message == &canonical_tool_message
     )));
     assert!(matches!(
         lifecycle.last(),
-        Some(SessionEvent::TurnCompleted { message, .. }) if message == &canonical_final
+        Some(SessionEvent::Turn(TurnEvent::Completed { message, .. })) if message == &canonical_final
     ));
 
     let requests = requests.lock().expect("requests lock");
@@ -344,21 +354,23 @@ async fn provider_failures_are_recorded_and_emit_an_authoritative_terminal_event
     let events = collect_events(&mut receiver).await;
     assert!(matches!(
         events.first(),
-        Some(SessionEvent::TurnStarted { .. })
+        Some(SessionEvent::Turn(TurnEvent::Started { .. }))
     ));
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, SessionEvent::ContextUsageUpdated { .. }))
-    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::Turn(TurnEvent::ContextUsageUpdated { .. })
+    )));
     assert!(matches!(
         events.last(),
-        Some(SessionEvent::TurnFailed { .. })
+        Some(SessionEvent::Turn(TurnEvent::Failed { .. }))
     ));
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, SessionEvent::ModelCallStarted { call: 1, .. }))
+            .filter(|event| matches!(
+                event,
+                SessionEvent::Turn(TurnEvent::ModelCallStarted { call: 1, .. })
+            ))
             .count(),
         1
     );
@@ -420,32 +432,37 @@ async fn usage_events_report_the_active_profile_role_and_window() {
     let events = collect_events(&mut receiver).await;
     assert!(events.iter().any(|event| matches!(
         event,
-        SessionEvent::UsageUpdated {
+        SessionEvent::Turn(TurnEvent::UsageUpdated {
             usage: actual,
             profile,
             model_role: ModelRole::Build,
             context_window_tokens: 12_345,
             ..
-        } if *actual == usage
+        }) if *actual == usage
             && profile == &ModelProfileRef::new("test-provider", "build-usage")
     )));
     let call = events
         .iter()
-        .position(|event| matches!(event, SessionEvent::ModelCallStarted { .. }))
+        .position(|event| {
+            matches!(
+                event,
+                SessionEvent::Turn(TurnEvent::ModelCallStarted { .. })
+            )
+        })
         .unwrap();
     let usage = events
         .iter()
-        .position(|event| matches!(event, SessionEvent::UsageUpdated { .. }))
+        .position(|event| matches!(event, SessionEvent::Turn(TurnEvent::UsageUpdated { .. })))
         .unwrap();
     let completed = events
         .iter()
-        .position(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+        .position(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
         .unwrap();
     assert!(call < usage && usage < completed);
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, SessionEvent::UsageUpdated { .. }))
+            .filter(|event| matches!(event, SessionEvent::Turn(TurnEvent::UsageUpdated { .. })))
             .count(),
         1
     );

@@ -1,5 +1,6 @@
 //! Production tool/prompt-cache/lifecycle regression, including a fresh runtime on resume.
 use super::*;
+use zevria_session_api::JobEvent;
 #[tokio::test]
 async fn background_jobs_keep_static_prefix_append_only_input_and_resume_without_processes() {
     background_completion_cache_fixture(true).await;
@@ -59,9 +60,9 @@ async fn background_completion_cache_fixture(automatic: bool) {
         while let Some(update) = events.recv().await {
             if matches!(
                 update,
-                SessionUpdate::Lifecycle(SessionEvent::JobContinuationChanged {
+                SessionUpdate::Lifecycle(SessionEvent::Job(JobEvent::ContinuationChanged {
                     mode: Some(SessionMode::Build)
-                })
+                }))
             ) {
                 return;
             }

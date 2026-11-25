@@ -1,6 +1,86 @@
 //! ACP notification normalization and workflow constraint checks.
 
-use super::*;
+use super::attempt::AttemptShared;
+use super::bootstrap::{SafeModeExpectation, SessionConfigurationExpectation};
+use super::failure::{acp_error, set_violation};
+use super::recovery::{config_option_current, config_option_supports};
+use super::wire::{plan_priority_name, plan_status_name, tool_kind_name, tool_status_name};
+use agent_client_protocol::schema::v1::{
+    CancelNotification, ConfigOptionUpdate, ContentBlock, ContentChunk, CurrentModeUpdate,
+    Error as AcpError, Plan, PlanUpdateContent, SessionConfigOptionCategory, SessionNotification,
+    SessionUpdate as AcpSessionUpdate, ToolCall, ToolCallContent, ToolCallUpdate,
+};
+use agent_client_protocol::{Agent, ConnectionTo};
+use zevria_workflow::{
+    AgentPlanEntry, AgentRunEvent, AgentRunLocation, AgentStructuredPlan, AgentUsage,
+};
+
+pub(super) async fn handle_notification(
+    notification: SessionNotification,
+    connection: &ConnectionTo<Agent>,
+    shared: &AttemptShared,
+) -> Result<(), AcpError> {
+    let AttemptShared {
+        log,
+        cancellation,
+        violation,
+        session_gate,
+        configuration_expectation,
+        plan_handoff,
+        ..
+    } = shared;
+    let session_result = session_gate
+        .lock()
+        .expect("ACP session gate lock poisoned")
+        .observe_notification(notification.session_id.0.as_ref());
+    if let Err(error) = session_result {
+        set_violation(violation, error.clone());
+        cancellation.cancel();
+        log.emit(AgentRunEvent::Failure {
+            error: error.clone(),
+        })
+        .await
+        .map_err(acp_error)?;
+        connection.send_notification(CancelNotification::new(notification.session_id))?;
+        return Ok(());
+    }
+
+    let config_violation = if matches!(
+        &notification.update,
+        AcpSessionUpdate::CurrentModeUpdate(_) | AcpSessionUpdate::ConfigOptionUpdate(_)
+    ) {
+        session_configuration_violation(
+            &notification.update,
+            &configuration_expectation
+                .lock()
+                .expect("ACP configuration poisoned"),
+        )
+    } else {
+        None
+    };
+    if let Some(error) = config_violation {
+        set_violation(violation, error.clone());
+        cancellation.cancel();
+        log.emit(AgentRunEvent::Failure { error })
+            .await
+            .map_err(acp_error)?;
+        connection.send_notification(CancelNotification::new(notification.session_id.clone()))?;
+    }
+    if let Some(plan_handoff) = plan_handoff
+        && let Err(error) = plan_handoff.inspect_update(&notification.update)
+    {
+        set_violation(violation, error.clone());
+        cancellation.cancel();
+        log.emit(AgentRunEvent::Failure { error })
+            .await
+            .map_err(acp_error)?;
+        connection.send_notification(CancelNotification::new(notification.session_id.clone()))?;
+    }
+    for event in normalize_notification(notification) {
+        log.emit(event).await.map_err(acp_error)?;
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 #[path = "tool_metadata_tests.rs"]
@@ -161,8 +241,8 @@ pub(super) fn normalize_tool_call(call: ToolCall) -> AgentRunEvent {
     AgentRunEvent::ToolCall {
         id: call.tool_call_id.to_string(),
         title: call.title,
-        kind: wire_name(&call.kind),
-        status: wire_name(&call.status),
+        kind: tool_kind_name(&call.kind).to_owned(),
+        status: tool_status_name(&call.status).to_owned(),
         content: tool_content(call.content),
         locations: call
             .locations
@@ -185,8 +265,16 @@ pub(super) fn normalize_tool_update(update: ToolCallUpdate) -> AgentRunEvent {
     AgentRunEvent::ToolCallUpdate {
         id: update.tool_call_id.to_string(),
         title: update.fields.title,
-        kind: update.fields.kind.as_ref().map(wire_name),
-        status: update.fields.status.as_ref().map(wire_name),
+        kind: update
+            .fields
+            .kind
+            .as_ref()
+            .map(|kind| tool_kind_name(kind).to_owned()),
+        status: update
+            .fields
+            .status
+            .as_ref()
+            .map(|status| tool_status_name(status).to_owned()),
         content: update.fields.content.map(tool_content),
         locations: update.fields.locations.map(|locations| {
             locations
@@ -270,8 +358,8 @@ pub(super) fn normalize_plan_entries(
         .into_iter()
         .map(|entry| AgentPlanEntry {
             content: entry.content,
-            priority: wire_name(&entry.priority),
-            status: wire_name(&entry.status),
+            priority: plan_priority_name(&entry.priority).to_owned(),
+            status: plan_status_name(&entry.status).to_owned(),
         })
         .collect()
 }

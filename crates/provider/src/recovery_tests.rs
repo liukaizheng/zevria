@@ -1,6 +1,7 @@
 //! Coordinated local fault injection; no external provider or multi-minute waits.
 use super::*;
 use std::time::Duration;
+use zevria_session_api::TurnEvent;
 use zevria_session_api::event::{NetworkStatus, NetworkTransport};
 
 fn policy(attempts: usize) -> RecoveryPolicy {
@@ -92,11 +93,11 @@ async fn silent_http_attempts_expire_despite_keepalives_duplicates_and_partial_f
             while let Some(update) = events.recv().await {
                 if matches!(
                     &update,
-                    SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
+                    SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::NetworkStatus {
                         attempt: 1,
                         status: NetworkStatus::Quiet { .. },
                         ..
-                    })
+                    }))
                 ) && let Some(release_headers) = release_headers.take()
                 {
                     release_headers.send(()).unwrap();
@@ -129,11 +130,11 @@ async fn silent_http_attempts_expire_despite_keepalives_duplicates_and_partial_f
             .position(|u| {
                 matches!(
                     u,
-                    SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
+                    SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::NetworkStatus {
                         attempt: 1,
                         status: NetworkStatus::AwaitingResponse,
                         ..
-                    })
+                    }))
                 )
             })
             .expect("the first attempt must reach the response stream");
@@ -142,7 +143,7 @@ async fn silent_http_attempts_expire_despite_keepalives_duplicates_and_partial_f
         // without depending on the scheduler-sensitive total warning count.
         assert!(updates[response_started..].iter().any(|u| matches!(
             u,
-            SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::NetworkStatus {
                 attempt: 1,
                 transport: NetworkTransport::Http,
                 status: NetworkStatus::Quiet {
@@ -150,14 +151,16 @@ async fn silent_http_attempts_expire_despite_keepalives_duplicates_and_partial_f
                     ..
                 },
                 ..
-            })
+            }))
         )));
         let retries = updates
             .iter()
             .filter_map(|u| match u {
-                SessionUpdate::Lifecycle(SessionEvent::TurnRetrying { attempt, error, .. }) => {
-                    Some((*attempt, error.as_str()))
-                }
+                SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Retrying {
+                    attempt,
+                    error,
+                    ..
+                })) => Some((*attempt, error.as_str())),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -219,18 +222,18 @@ async fn warning_does_not_drop_a_partially_read_sse_event() {
     let mut progress_resumed = 0;
     while let Some(update) = receiver.recv().await {
         match update {
-            SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::NetworkStatus {
                 status: NetworkStatus::Quiet { .. },
                 ..
-            }) => {
+            })) => {
                 warnings += 1;
                 resume.take().unwrap().send(()).unwrap();
             }
-            SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::NetworkStatus {
                 status: NetworkStatus::ProgressResumed,
                 ..
-            }) => progress_resumed += 1,
-            SessionUpdate::Lifecycle(SessionEvent::TurnRetrying { .. }) => {
+            })) => progress_resumed += 1,
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Retrying { .. })) => {
                 panic!("partial parser was discarded")
             }
             _ => {}
@@ -299,7 +302,7 @@ async fn websocket_ping_metadata_and_prior_terminals_cannot_keep_an_attempt_aliv
     )
     .await
     .unwrap();
-    assert_eq!(provider.ws.socket_generation, 1);
+    assert_eq!(provider.responses_transport.ws.socket_generation, 1);
     assert_eq!(continuation_response_id(&provider), Some("current"));
     server.await.unwrap();
 }
@@ -421,7 +424,7 @@ async fn core_cancellation_interrupts_every_network_wait_and_next_turn_still_wor
             } else if websocket {
                 let profile = resolved_profile("test", "gpt-test", url, "key", true, ReasoningSummaryLevel::Detailed,
                     ResponsesCompatibilityConfig::default(), BTreeMap::new(), RemoteCompactionConfig::default(), 128_000);
-                OpenAiProvider::unconnected(&profile, ReasoningEffort::Medium, "", "s", "cache").await.unwrap()
+                OpenAiProvider::unconnected(&profile, ReasoningEffort::Medium, "", "s", "cache").unwrap()
             } else { connect_http_test_provider(url).await };
             provider.input_token_count_url = None;
             provider.recovery = RecoveryPolicy { stall_warning: Duration::from_millis(30), backoff_base: Duration::from_secs(60),
@@ -438,18 +441,18 @@ async fn core_cancellation_interrupts_every_network_wait_and_next_turn_still_wor
                 loop {
                     let update = receiver.recv().await.unwrap();
                     if matches!((&update, phase),
-                        (SessionUpdate::Lifecycle(SessionEvent::TurnRetrying { .. }), "backoff") |
-                        (SessionUpdate::Lifecycle(SessionEvent::NetworkStatus { status: NetworkStatus::Quiet { .. }, .. }), "warning") |
-                        (SessionUpdate::Lifecycle(SessionEvent::NetworkStatus { status: NetworkStatus::AwaitingResponse, .. }), "silent" | "ws_stream") |
-                        (SessionUpdate::Lifecycle(SessionEvent::NetworkStatus { status: NetworkStatus::AttemptStarted, .. }), "ws_send")) { break; }
+                        (SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Retrying { .. })), "backoff") |
+                        (SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::NetworkStatus { status: NetworkStatus::Quiet { .. }, .. })), "warning") |
+                        (SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::NetworkStatus { status: NetworkStatus::AwaitingResponse, .. })), "silent" | "ws_stream") |
+                        (SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::NetworkStatus { status: NetworkStatus::AttemptStarted, .. })), "ws_send")) { break; }
                 }
             }
             commands.send(SessionCommand::Control(ControlCommand::CancelTurn { turn_id: Some(TurnId::new(1)) })).unwrap();
             let mut terminals = Vec::new();
             while let Some(update) = receiver.recv().await {
                 if let SessionUpdate::Lifecycle(event) = update {
-                    if matches!(event, SessionEvent::TurnCancelled { .. } | SessionEvent::TurnCompleted { .. } | SessionEvent::TurnFailed { .. }) {
-                        let cancelled = matches!(event, SessionEvent::TurnCancelled { turn_id } if turn_id == TurnId::new(1));
+                    if matches!(event, SessionEvent::Turn(TurnEvent::Cancelled { .. }) | SessionEvent::Turn(TurnEvent::Completed { .. }) | SessionEvent::Turn(TurnEvent::Failed { .. })) {
+                        let cancelled = matches!(event, SessionEvent::Turn(TurnEvent::Cancelled { turn_id }) if turn_id == TurnId::new(1));
                         terminals.push(event);
                         assert!(cancelled, "{phase}: cancellation must settle once");
                         break;
@@ -459,8 +462,8 @@ async fn core_cancellation_interrupts_every_network_wait_and_next_turn_still_wor
             commands.send(submit("next turn")).unwrap();
             loop {
                 if let Some(SessionUpdate::Lifecycle(event)) = receiver.recv().await {
-                    if matches!(event, SessionEvent::TurnCancelled { .. } | SessionEvent::TurnCompleted { .. } | SessionEvent::TurnFailed { .. }) {
-                        assert!(matches!(event, SessionEvent::TurnCompleted { turn_id, .. } if turn_id == TurnId::new(2)), "{phase}: {event:?}");
+                    if matches!(event, SessionEvent::Turn(TurnEvent::Cancelled { .. }) | SessionEvent::Turn(TurnEvent::Completed { .. }) | SessionEvent::Turn(TurnEvent::Failed { .. })) {
+                        assert!(matches!(event, SessionEvent::Turn(TurnEvent::Completed { turn_id, .. }) if turn_id == TurnId::new(2)), "{phase}: {event:?}");
                         terminals.push(event);
                         break;
                     }
@@ -470,7 +473,7 @@ async fn core_cancellation_interrupts_every_network_wait_and_next_turn_still_wor
             task.await.unwrap().unwrap();
             assert_eq!(terminals.len(), 2);
             assert!(!std::iter::from_fn(|| receiver.try_recv().ok()).any(|update| matches!(update,
-                SessionUpdate::Lifecycle(SessionEvent::TurnCancelled { .. } | SessionEvent::TurnFailed { .. } | SessionEvent::TurnCompleted { .. }))));
+                SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Cancelled { .. }) | SessionEvent::Turn(TurnEvent::Failed { .. }) | SessionEvent::Turn(TurnEvent::Completed { .. })))));
             server.await.unwrap();
         }).await.unwrap_or_else(|_| panic!("cancellation did not settle during {phase}"));
     }
@@ -520,7 +523,6 @@ async fn failed_lazy_handshakes_and_http_fallback_share_the_same_attempt_budget(
         "session",
         "cache",
     )
-    .await
     .unwrap();
     let (sender, mut events) = session_event_channel(32);
     run_turn_request_with_recovery(
@@ -542,12 +544,12 @@ async fn failed_lazy_handshakes_and_http_fallback_share_the_same_attempt_budget(
     .unwrap();
     let attempts = std::iter::from_fn(|| events.try_recv().ok())
         .filter_map(|update| match update {
-            SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::NetworkStatus {
                 status: NetworkStatus::AttemptStarted,
                 attempt,
                 transport,
                 ..
-            }) => Some((attempt, transport)),
+            })) => Some((attempt, transport)),
             _ => None,
         })
         .collect::<Vec<_>>();

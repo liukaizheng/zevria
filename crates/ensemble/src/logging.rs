@@ -1,6 +1,108 @@
 //! Ordered worker-log persistence and publication.
 
-use super::*;
+use super::interactive::ReviewPublication;
+use anyhow::Context as _;
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
+use zevria_session_api::{SessionEvent, SessionEventSender, TurnContext};
+use zevria_transcript::{
+    AGENT_RUN_TRANSCRIPT_VERSION, AgentRunProjection, AgentRunTranscriptHeader,
+    AgentRunTranscriptRecord, AgentRunTranscriptWriter,
+};
+#[cfg(test)]
+use zevria_workflow::AgentStructuredPlan;
+use zevria_workflow::{
+    AgentElicitationOutcome, AgentRunDescriptor, AgentRunEvent, AgentRunId, AgentRunOutcome,
+    AgentRunRepair, AgentRunStatus, EnsembleRunId,
+};
+
+pub(super) const RUN_LOG_QUEUE_CAPACITY: usize = 1_024;
+pub(super) const RUN_LOG_BATCH_BYTES: usize = 64 * 1_024;
+pub(super) const RUN_LOG_BATCH_WINDOW: Duration = Duration::from_millis(25);
+
+#[derive(Clone)]
+pub(super) struct RunLog {
+    #[cfg(test)]
+    pub(super) path: PathBuf,
+    pub(super) writer: RunLogWriterHandle,
+    pub(super) failure: Arc<Mutex<Option<String>>>,
+    pub(super) last_permission: Arc<Mutex<Option<PersistedPermissionDecision>>>,
+    pub(super) ignore_recovered_repair: Arc<AtomicBool>,
+    pub(super) review_publication: Arc<Mutex<Option<ReviewPublication>>>,
+    pub(super) event_order: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PersistedPermissionDecision {
+    pub(super) tool_kind: Option<String>,
+    pub(super) decision: String,
+    pub(super) option_id: Option<String>,
+}
+
+impl PersistedPermissionDecision {
+    fn repair(&self) -> Option<AgentRunRepair> {
+        matches!(self.decision.as_str(), "reject_once" | "reject_always").then(|| {
+            AgentRunRepair::HostDeniedPermission {
+                tool_kind: self.tool_kind.clone(),
+                option_id: self.option_id.clone(),
+            }
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct RunLogWriterHandle {
+    pub(super) sender: mpsc::Sender<RunLogWriteCommand>,
+    pub(super) projection: Arc<Mutex<AgentRunProjection>>,
+}
+
+pub(super) enum RunLogWriteCommand {
+    Event {
+        event: Arc<AgentRunEvent>,
+        acknowledgement: Option<oneshot::Sender<Result<(), String>>>,
+    },
+    Record(Box<RunLogRecordCommand>),
+    Barrier {
+        acknowledgement: oneshot::Sender<Result<(), String>>,
+    },
+}
+
+pub(super) struct RunLogRecordCommand {
+    pub(super) record: AgentRunTranscriptRecord,
+    pub(super) publish: bool,
+    pub(super) force_sync: bool,
+    pub(super) acknowledgement: Option<oneshot::Sender<Result<(), String>>>,
+}
+
+#[derive(Clone)]
+pub(super) struct RunLogPublication {
+    pub(super) events: SessionEventSender,
+    pub(super) turn_id: zevria_foundation::TurnId,
+    pub(super) ensemble_run_id: EnsembleRunId,
+    pub(super) agent_run_id: AgentRunId,
+}
+
+pub(super) trait RunLogWriter: Send + 'static {
+    fn append_buffered(&mut self, record: &AgentRunTranscriptRecord) -> anyhow::Result<usize>;
+    fn sync(&mut self) -> anyhow::Result<()>;
+}
+
+impl RunLogWriter for AgentRunTranscriptWriter {
+    fn append_buffered(&mut self, record: &AgentRunTranscriptRecord) -> anyhow::Result<usize> {
+        AgentRunTranscriptWriter::append_buffered(self, record)
+    }
+
+    fn sync(&mut self) -> anyhow::Result<()> {
+        AgentRunTranscriptWriter::sync(self)
+    }
+}
+
+use zevria_session_api::EnsembleEvent;
 
 impl RunLog {
     pub(super) async fn open(
@@ -381,13 +483,14 @@ fn spawn_seeded_run_log_writer<W: RunLogWriter>(
             }
             for (record, publish) in records.drain(..) {
                 if publish && let AgentRunTranscriptRecord::Event { event } = record {
-                    let _ =
-                        runtime.block_on(publication.events.send(SessionEvent::AgentRunUpdated {
+                    let _ = runtime.block_on(publication.events.send(SessionEvent::Ensemble(
+                        EnsembleEvent::AgentRunUpdated {
                             turn_id: publication.turn_id,
                             ensemble_run_id: publication.ensemble_run_id.clone(),
                             agent_run_id: publication.agent_run_id.clone(),
-                            event,
-                        }));
+                            event: Box::new(event),
+                        },
+                    )));
                 }
             }
             for acknowledgement in acknowledgements.drain(..) {

@@ -1,24 +1,25 @@
 use crate::*;
+use crate::{EnsembleEvent, JobEvent, ManagementEvent, SubtaskEvent, TurnEvent};
 
 #[tokio::test]
 async fn non_turn_events_do_not_fence_an_unread_root_preview() {
     for event in [
         SessionEvent::EngineIdle,
-        SessionEvent::JobContinuationChanged {
+        SessionEvent::Job(JobEvent::ContinuationChanged {
             mode: Some(SessionMode::Build),
-        },
-        SessionEvent::ModeResult {
+        }),
+        SessionEvent::Manage(ManagementEvent::ModeResult {
             request_id: "set-mode".into(),
             result: ModeSelectionResult::rejected("busy", "turn in progress"),
-        },
+        }),
         SessionEvent::PersistenceChanged {
             path: "session.jsonl".into(),
             error: Some("fixture error".into()),
         },
-        SessionEvent::SkillsChanged {
+        SessionEvent::Manage(ManagementEvent::SkillsChanged {
             revision: "next".into(),
             counts: crate::skill::SkillCatalogCounts::default(),
-        },
+        }),
     ] {
         let (sender, mut receiver) = session_event_channel(1);
         let reporter = ProgressReporter::new(sender.clone());
@@ -29,7 +30,7 @@ async fn non_turn_events_do_not_fence_an_unread_root_preview() {
             receiver.try_recv(),
             Ok(SessionUpdate::Streams(SessionStreamBatch {
                 root: Some(SessionStreamState {
-                    message: Some(Message::Assistant { .. }),
+                    message: Some(_),
                     ..
                 }),
                 ..
@@ -58,23 +59,23 @@ async fn command_job_events_do_not_fence_an_unread_root_preview() {
         .await
         .unwrap();
     sender
-        .send(SessionEvent::CommandControlResult {
+        .send(SessionEvent::Job(JobEvent::ControlResult {
             request_id: "inspect".into(),
-            result: CommandControlResult::Accepted(job.snapshot()),
-        })
+            result: Box::new(CommandControlResult::Accepted(job.snapshot())),
+        }))
         .await
         .unwrap();
     assert!(matches!(
         receiver.recv().await,
-        Some(SessionUpdate::Lifecycle(
-            SessionEvent::CommandJobUpdated { .. }
-        ))
+        Some(SessionUpdate::Lifecycle(SessionEvent::Job(
+            JobEvent::Updated { .. }
+        )))
     ));
     assert!(matches!(
         receiver.recv().await,
-        Some(SessionUpdate::Lifecycle(
-            SessionEvent::CommandControlResult { .. }
-        ))
+        Some(SessionUpdate::Lifecycle(SessionEvent::Job(
+            JobEvent::ControlResult { .. }
+        )))
     ));
     assert!(matches!(
         receiver.recv().await,
@@ -104,17 +105,19 @@ async fn network_status_is_call_scoped_and_does_not_fence_unread_preview() {
         .await;
     assert!(matches!(
         receiver.recv().await,
-        Some(SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
-            call: 3,
-            attempt: 2,
-            ..
-        }))
+        Some(SessionUpdate::Lifecycle(SessionEvent::Turn(
+            TurnEvent::NetworkStatus {
+                call: 3,
+                attempt: 2,
+                ..
+            }
+        )))
     ));
     assert!(matches!(
         receiver.recv().await,
         Some(SessionUpdate::Streams(SessionStreamBatch {
             root: Some(SessionStreamState {
-                message: Some(Message::Assistant { .. }),
+                message: Some(_),
                 ..
             }),
             ..
@@ -144,14 +147,16 @@ async fn retry_reporter_forwards_delay_and_silent_reporters_suppress_progress() 
         .await;
     assert_eq!(
         receiver.try_recv(),
-        Ok(SessionUpdate::Lifecycle(SessionEvent::TurnRetrying {
-            call: 1,
-            turn_id: turn.id,
-            attempt: 2,
-            retrying_for: std::time::Duration::from_secs(280),
-            retry_after,
-            error: "offline".into(),
-        }))
+        Ok(SessionUpdate::Lifecycle(SessionEvent::Turn(
+            TurnEvent::Retrying {
+                call: 1,
+                turn_id: turn.id,
+                attempt: 2,
+                retrying_for: std::time::Duration::from_secs(280),
+                retry_after,
+                error: "offline".into(),
+            }
+        )))
     );
     assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
 
@@ -201,35 +206,32 @@ fn streaming_updates_coalesce_while_lifecycle_events_stay_bounded() {
     let (events, mut receiver) = session_event_channel(1);
     let turn_id = TurnId::new(9);
     events
-        .try_send(SessionEvent::TurnStarted {
+        .try_send(SessionEvent::Turn(TurnEvent::Started {
             turn_id,
             message: Message::user("question"),
             mode: SessionMode::Build,
-        })
+        }))
         .expect("the sole lifecycle slot is available");
 
     for index in 0..1_000 {
-        events
-            .try_send(SessionEvent::AssistantStreamUpdated {
-                turn_id,
-                snapshot: (Message::assistant(format!("draft {index}"))).into(),
-            })
-            .expect("stream updates replace the watch value instead of queueing");
+        events.stream_updated(turn_id, Message::assistant(format!("draft {index}")));
     }
 
     assert!(matches!(
-        events.try_send(SessionEvent::TurnCompleted {
+        events.try_send(SessionEvent::Turn(TurnEvent::Completed {
             attempt_id: None,
             turn_id,
             message: Message::assistant("done"),
-        }),
+        })),
         Err(mpsc::error::TrySendError::Full(_))
     ));
     events.stream_updated(turn_id, Message::assistant("latest after full"));
 
     assert!(matches!(
         receiver.try_recv(),
-        Ok(SessionUpdate::Lifecycle(SessionEvent::TurnStarted { .. }))
+        Ok(SessionUpdate::Lifecycle(SessionEvent::Turn(
+            TurnEvent::Started { .. }
+        )))
     ));
     let batch = match receiver.try_recv().expect("latest stream batch") {
         SessionUpdate::Streams(batch) => batch,
@@ -243,7 +245,7 @@ fn streaming_updates_coalesce_while_lifecycle_events_stay_bounded() {
             // the failed try_send consumes nothing, and this is 1,002.
             revision: 1_002,
             turn_id,
-            message: Some(Message::assistant("latest after full")),
+            message: Some(Message::assistant("latest after full").into()),
         })
     );
 }
@@ -280,7 +282,7 @@ fn slow_consumers_receive_only_the_latest_large_indexed_answer_and_collector_rev
         panic!("latest preview")
     };
     let root = batch.root.unwrap();
-    assert_eq!(root.attempt.as_ref(), Some(&attempt));
+    assert_eq!(root.attempt.as_deref(), Some(&attempt));
     assert_eq!(
         zevria_content::assistant_plain_text(root.message.as_ref().unwrap()),
         answer
@@ -297,14 +299,14 @@ async fn model_call_markers_are_lossless_and_fence_root_and_forwarded_previews()
     let (sender, mut receiver) = session_event_channel(4);
     let turn_id = TurnId::new(3);
     let child_id = SubtaskId::generate();
-    let child_call = SessionEvent::SubtaskSession {
+    let child_call = SessionEvent::Subtask(SubtaskEvent::Session {
         id: child_id.clone(),
-        event: Box::new(SessionEvent::ModelCallStarted {
+        event: Box::new(SessionEvent::Turn(TurnEvent::ModelCallStarted {
             turn_id: TurnId::new(1),
             call: 2,
-        }),
-    };
-    let root_call = SessionEvent::ModelCallStarted { turn_id, call: 1 };
+        })),
+    });
+    let root_call = SessionEvent::Turn(TurnEvent::ModelCallStarted { turn_id, call: 1 });
     sender.send(root_call.clone()).await.unwrap();
     sender.stream_updated(turn_id, Message::assistant("root preview"));
     sender.send(child_call.clone()).await.unwrap();
@@ -313,7 +315,7 @@ async fn model_call_markers_are_lossless_and_fence_root_and_forwarded_previews()
         SessionStreamState {
             turn_id: TurnId::new(1),
             revision: 1,
-            message: Some(Message::assistant("child preview")),
+            message: Some(Message::assistant("child preview").into()),
             attempt: None,
         },
     );
@@ -341,15 +343,15 @@ async fn agent_previews_coalesce_and_lossless_updates_create_boundaries() {
     let agent_run_id = AgentRunId::new();
     for text in ["hello ", "world"] {
         sender
-            .send(SessionEvent::AgentRunUpdated {
+            .send(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
                 turn_id,
                 ensemble_run_id: ensemble_run_id.clone(),
                 agent_run_id: agent_run_id.clone(),
-                event: AgentRunEvent::AgentMessage {
+                event: Box::new(AgentRunEvent::AgentMessage {
                     text: text.to_string(),
                     message_id: Some("message-1".to_string()),
-                },
-            })
+                }),
+            }))
             .await
             .expect("preview publishes");
     }
@@ -358,29 +360,29 @@ async fn agent_previews_coalesce_and_lossless_updates_create_boundaries() {
         update => panic!("expected streams, got {update:?}"),
     };
     assert!(matches!(
-        &batch.agent_runs.first().expect("one worker preview").event,
+        &*batch.agent_runs.first().expect("one worker preview").event,
         AgentRunEvent::AgentMessage { text, .. } if text == "hello world"
     ));
 
     sender
-        .send(SessionEvent::AgentRunUpdated {
+        .send(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
             turn_id,
             ensemble_run_id: ensemble_run_id.clone(),
             agent_run_id: agent_run_id.clone(),
-            event: AgentRunEvent::Status {
+            event: Box::new(AgentRunEvent::Status {
                 status: AgentRunStatus::Running,
                 detail: None,
-            },
-        })
+            }),
+        }))
         .await
         .expect("lossless status publishes");
     assert!(matches!(
         receiver.recv().await,
-        Some(SessionUpdate::Lifecycle(SessionEvent::AgentRunUpdated {
-            event: AgentRunEvent::Status { .. },
+        Some(SessionUpdate::Lifecycle(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
+            event,
             ..
-        }))
-    ));
+        })))
+     if matches!(event.as_ref(), AgentRunEvent::Status { .. })));
     assert_eq!(
         receiver.try_recv(),
         Err(mpsc::error::TryRecvError::Empty),
@@ -388,15 +390,15 @@ async fn agent_previews_coalesce_and_lossless_updates_create_boundaries() {
     );
 
     sender
-        .send(SessionEvent::AgentRunUpdated {
+        .send(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
             turn_id,
             ensemble_run_id,
             agent_run_id: agent_run_id.clone(),
-            event: AgentRunEvent::AgentMessage {
+            event: Box::new(AgentRunEvent::AgentMessage {
                 text: "fresh".to_string(),
                 message_id: Some("message-1".to_string()),
-            },
-        })
+            }),
+        }))
         .await
         .expect("new segment publishes");
     let batch = match receiver.recv().await.expect("fresh preview") {
@@ -404,7 +406,7 @@ async fn agent_previews_coalesce_and_lossless_updates_create_boundaries() {
         update => panic!("expected streams, got {update:?}"),
     };
     assert!(matches!(
-        &batch.agent_runs.first().expect("one worker preview").event,
+        &*batch.agent_runs.first().expect("one worker preview").event,
         AgentRunEvent::AgentMessage { text, .. } if text == "fresh"
     ));
 }
@@ -414,17 +416,19 @@ fn terminal_subtask_evicts_stream_and_receiver_bookkeeping() {
     let (sender, mut receiver) = session_event_channel(2);
     let id = SubtaskId::new("child");
     let turn_id = TurnId::new(1);
-    let status = |status| SessionEvent::SubtaskStatus {
-        id: id.clone(),
-        turn_id,
-        status,
+    let status = |status| {
+        SessionEvent::Subtask(SubtaskEvent::Status {
+            id: id.clone(),
+            turn_id,
+            status,
+        })
     };
     sender.try_send(status(SubtaskStatus::Running)).unwrap();
     receiver.try_recv().unwrap();
     let preview = SessionStreamState {
         revision: 0,
         turn_id,
-        message: Some(Message::assistant("child preview")),
+        message: Some(Message::assistant("child preview").into()),
         attempt: None,
     };
     sender.set_subtask_stream(id.clone(), preview.clone());
@@ -462,15 +466,15 @@ fn agent_finish_evicts_old_state_but_preserves_a_new_attempt() {
             );
         };
         sender
-            .try_send(SessionEvent::AgentRunUpdated {
+            .try_send(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
                 turn_id,
                 ensemble_run_id: ensemble_run_id.clone(),
                 agent_run_id: id.clone(),
-                event: AgentRunEvent::Status {
+                event: Box::new(AgentRunEvent::Status {
                     status: AgentRunStatus::Running,
                     detail: None,
-                },
-            })
+                }),
+            }))
             .unwrap();
         receiver.try_recv().unwrap();
         assert!(
@@ -482,10 +486,10 @@ fn agent_finish_evicts_old_state_but_preserves_a_new_attempt() {
         assert!(receiver.agent_run_fences.contains_key(&id));
         assert_eq!(receiver.agent_run_emitted.len(), 1);
         sender
-            .try_send(SessionEvent::AgentRunFinished {
+            .try_send(SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished {
                 turn_id,
                 ensemble_run_id: ensemble_run_id.clone(),
-                outcome: AgentRunOutcome {
+                outcome: Box::new(AgentRunOutcome {
                     descriptor: zevria_workflow::AgentRunDescriptor {
                         id: id.clone(),
                         agent: "worker".into(),
@@ -503,17 +507,17 @@ fn agent_finish_evicts_old_state_but_preserves_a_new_attempt() {
                     user_decisions: vec![],
                     decision_ids: vec![],
                     unavailable_decisions: vec![],
-                },
-            })
+                }),
+            }))
             .unwrap();
         if new_attempt {
             preview("next");
         }
         assert!(matches!(
             receiver.try_recv(),
-            Ok(SessionUpdate::Lifecycle(
-                SessionEvent::AgentRunFinished { .. }
-            ))
+            Ok(SessionUpdate::Lifecycle(SessionEvent::Ensemble(
+                EnsembleEvent::AgentRunFinished { .. }
+            )))
         ));
         assert!(receiver.agent_run_emitted.is_empty());
         assert!(!receiver.agent_run_fences.contains_key(&id));
@@ -525,7 +529,7 @@ fn agent_finish_evicts_old_state_but_preserves_a_new_attempt() {
                 panic!("expected next preview");
             };
             assert!(
-                matches!(&batch.agent_runs[0].event, AgentRunEvent::AgentMessage { text, .. } if text == "next")
+                matches!(&*batch.agent_runs[0].event, AgentRunEvent::AgentMessage { text, .. } if text == "next")
             );
         }
         assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
@@ -540,63 +544,63 @@ async fn protocol_diagnostics_do_not_split_agent_message_previews() {
     let agent_run_id = AgentRunId::new();
 
     sender
-        .send(SessionEvent::AgentRunUpdated {
+        .send(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
             turn_id,
             ensemble_run_id: ensemble_run_id.clone(),
             agent_run_id: agent_run_id.clone(),
-            event: AgentRunEvent::AgentMessage {
+            event: Box::new(AgentRunEvent::AgentMessage {
                 text: "I".to_string(),
                 message_id: Some("message-1".to_string()),
-            },
-        })
+            }),
+        }))
         .await
         .expect("first token publishes");
     assert!(matches!(
         receiver.recv().await,
         Some(SessionUpdate::Streams(SessionStreamBatch { agent_runs, .. }))
             if matches!(
-                &agent_runs.first().expect("one worker preview").event,
+                &*agent_runs.first().expect("one worker preview").event,
                 AgentRunEvent::AgentMessage { text, .. } if text == "I"
             )
     ));
 
     sender
-        .send(SessionEvent::AgentRunUpdated {
+        .send(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
             turn_id,
             ensemble_run_id: ensemble_run_id.clone(),
             agent_run_id: agent_run_id.clone(),
-            event: AgentRunEvent::Protocol {
+            event: Box::new(AgentRunEvent::Protocol {
                 direction: crate::AgentProtocolDirection::AgentToClient,
                 json: "token packet".to_string(),
-            },
-        })
+            }),
+        }))
         .await
         .expect("protocol diagnostic publishes");
     assert!(matches!(
         receiver.recv().await,
-        Some(SessionUpdate::Lifecycle(SessionEvent::AgentRunUpdated {
-            event: AgentRunEvent::Protocol { .. },
+        Some(SessionUpdate::Lifecycle(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
+            event,
             ..
-        }))
-    ));
+        })))
+     if matches!(event.as_ref(), AgentRunEvent::Protocol { .. })));
 
     sender
-        .send(SessionEvent::AgentRunUpdated {
+        .send(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
             turn_id,
             ensemble_run_id,
             agent_run_id: agent_run_id.clone(),
-            event: AgentRunEvent::AgentMessage {
+            event: Box::new(AgentRunEvent::AgentMessage {
                 text: "’ll inspect".to_string(),
                 message_id: Some("message-1".to_string()),
-            },
-        })
+            }),
+        }))
         .await
         .expect("second token publishes");
     assert!(matches!(
         receiver.recv().await,
         Some(SessionUpdate::Streams(SessionStreamBatch { agent_runs, .. }))
             if matches!(
-                &agent_runs.first().expect("one worker preview").event,
+                &*agent_runs.first().expect("one worker preview").event,
                 AgentRunEvent::AgentMessage { text, .. } if text == "I’ll inspect"
             )
     ));
@@ -609,39 +613,39 @@ async fn unread_thought_survives_protocol_and_message_preview_burst() {
     let ensemble_run_id = EnsembleRunId::new();
     let agent_run_id = AgentRunId::new();
     sender
-        .send(SessionEvent::AgentRunUpdated {
+        .send(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
             turn_id,
             ensemble_run_id: ensemble_run_id.clone(),
             agent_run_id: agent_run_id.clone(),
-            event: AgentRunEvent::Thought {
+            event: Box::new(AgentRunEvent::Thought {
                 text: "private analysis".to_string(),
                 message_id: Some("thought-1".to_string()),
-            },
-        })
+            }),
+        }))
         .await
         .expect("thought preview");
     sender
-        .send(SessionEvent::AgentRunUpdated {
+        .send(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
             turn_id,
             ensemble_run_id: ensemble_run_id.clone(),
             agent_run_id: agent_run_id.clone(),
-            event: AgentRunEvent::Protocol {
+            event: Box::new(AgentRunEvent::Protocol {
                 direction: crate::AgentProtocolDirection::AgentToClient,
                 json: "interleaved packet".to_string(),
-            },
-        })
+            }),
+        }))
         .await
         .expect("protocol lifecycle");
     sender
-        .send(SessionEvent::AgentRunUpdated {
+        .send(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
             turn_id,
             ensemble_run_id,
             agent_run_id,
-            event: AgentRunEvent::AgentMessage {
+            event: Box::new(AgentRunEvent::AgentMessage {
                 text: "public report".to_string(),
                 message_id: Some("message-1".to_string()),
-            },
-        })
+            }),
+        }))
         .await
         .expect("message preview");
 
@@ -651,27 +655,25 @@ async fn unread_thought_survives_protocol_and_message_preview_burst() {
             if matches!(
                 agent_runs.as_slice(),
                 [AgentRunStreamState {
-                    event: AgentRunEvent::Thought { text, .. },
-                    ..
-                }] if text == "private analysis"
+                    event, ..
+                }] if matches!(event.as_ref(), AgentRunEvent::Thought { text, .. } if text == "private analysis")
             )
     ));
     assert!(matches!(
         receiver.recv().await,
-        Some(SessionUpdate::Lifecycle(SessionEvent::AgentRunUpdated {
-            event: AgentRunEvent::Protocol { .. },
+        Some(SessionUpdate::Lifecycle(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
+            event,
             ..
-        }))
-    ));
+        })))
+     if matches!(event.as_ref(), AgentRunEvent::Protocol { .. })));
     assert!(matches!(
         receiver.recv().await,
         Some(SessionUpdate::Streams(SessionStreamBatch { agent_runs, .. }))
             if matches!(
                 agent_runs.as_slice(),
                 [AgentRunStreamState {
-                    event: AgentRunEvent::AgentMessage { text, .. },
-                    ..
-                }] if text == "public report"
+                    event, ..
+                }] if matches!(event.as_ref(), AgentRunEvent::AgentMessage { text, .. } if text == "public report")
             )
     ));
 }
@@ -680,34 +682,34 @@ async fn unread_thought_survives_protocol_and_message_preview_burst() {
 async fn unread_root_lifecycle_events_fence_older_streams() {
     let turn_id = TurnId::new(12);
     let fencing_events = [
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id,
             message: Message::assistant("committed tool call"),
-        },
-        SessionEvent::ToolResults {
+        }),
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id,
             message: Message::user("tool result"),
             metadata: Vec::new(),
-        },
-        SessionEvent::TurnCompleted {
+        }),
+        SessionEvent::Turn(TurnEvent::Completed {
             attempt_id: None,
             turn_id,
             message: Message::assistant("done"),
-        },
-        SessionEvent::TurnFailed {
+        }),
+        SessionEvent::Turn(TurnEvent::Failed {
             turn_id,
             error: "failed".to_string(),
-        },
-        SessionEvent::TurnCancelled { turn_id },
-        SessionEvent::TurnRetrying {
+        }),
+        SessionEvent::Turn(TurnEvent::Cancelled { turn_id }),
+        SessionEvent::Turn(TurnEvent::Retrying {
             call: 1,
             turn_id,
             attempt: 1,
             retrying_for: std::time::Duration::from_secs(280),
             retry_after: std::time::Duration::from_millis(500),
             error: "disconnected".to_string(),
-        },
+        }),
     ];
 
     for event in fencing_events {
@@ -734,18 +736,18 @@ async fn a_consumed_preview_precedes_and_is_then_cleared_by_lifecycle() {
         receiver.recv().await,
         Some(SessionUpdate::Streams(SessionStreamBatch {
             root: Some(SessionStreamState {
-                message: Some(Message::Assistant { .. }),
+                message: Some(_),
                 ..
             }),
             ..
         }))
     ));
 
-    let committed = SessionEvent::Intermediate {
+    let committed = SessionEvent::Turn(TurnEvent::Intermediate {
         attempt_id: None,
         turn_id,
         message: Message::assistant("committed"),
-    };
+    });
     sender
         .send(committed.clone())
         .await
@@ -761,11 +763,11 @@ async fn a_post_lifecycle_preview_survives_while_the_older_preview_is_discarded(
     let (sender, mut receiver) = session_event_channel(8);
     let turn_id = TurnId::new(14);
     sender.stream_updated(turn_id, Message::assistant("old preview"));
-    let committed = SessionEvent::Intermediate {
+    let committed = SessionEvent::Turn(TurnEvent::Intermediate {
         attempt_id: None,
         turn_id,
         message: Message::assistant("tool call"),
-    };
+    });
     sender
         .send(committed.clone())
         .await
@@ -779,7 +781,7 @@ async fn a_post_lifecycle_preview_survives_while_the_older_preview_is_discarded(
     };
     assert_eq!(
         batch.root.map(|state| state.message),
-        Some(Some(Message::assistant("new preview")))
+        Some(Some(Message::assistant("new preview").into()))
     );
     assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
 }
@@ -798,20 +800,20 @@ async fn child_forwarding_through_the_parent_fences_an_unread_child_preview() {
     };
     parent_sender.set_subtask_stream(child_id.clone(), child_stream);
 
-    let child_commit = SessionEvent::Intermediate {
+    let child_commit = SessionEvent::Turn(TurnEvent::Intermediate {
         attempt_id: None,
         turn_id,
         message: Message::assistant("child commit"),
-    };
+    });
     child_sender
         .send(child_commit.clone())
         .await
         .expect("child lifecycle queues");
     let forwarded = match child_receiver.recv().await.expect("child lifecycle") {
-        SessionUpdate::Lifecycle(event) => SessionEvent::SubtaskSession {
+        SessionUpdate::Lifecycle(event) => SessionEvent::Subtask(SubtaskEvent::Session {
             id: child_id,
             event: Box::new(event),
-        },
+        }),
         update => panic!("expected child lifecycle, got {update:?}"),
     };
     parent_sender
@@ -863,7 +865,7 @@ fn continuing_agent_previews_move_the_growing_text_without_copying_earlier_segme
             let key = &snapshot.active_agent_runs[&agent];
             let current = &snapshot.agent_runs[key];
             let (AgentRunEvent::AgentMessage { text, .. } | AgentRunEvent::Thought { text, .. }) =
-                &current.event
+                &*current.event
             else {
                 panic!("readable preview")
             };
@@ -886,5 +888,5 @@ fn continuing_agent_previews_move_the_growing_text_without_copying_earlier_segme
         2,
         "thought/message boundaries retain the unread prior row"
     );
-    assert!(snapshot.agent_runs.values().any(|state| matches!(&state.event, AgentRunEvent::AgentMessage { text, .. } if text == &format!("start{}", " more".repeat(256)))));
+    assert!(snapshot.agent_runs.values().any(|state| matches!(&*state.event, AgentRunEvent::AgentMessage { text, .. } if text == &format!("start{}", " more".repeat(256)))));
 }

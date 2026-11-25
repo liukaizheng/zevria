@@ -36,7 +36,9 @@ use continuation::{full_transmission, select_transmission};
 #[cfg(test)]
 use driver::RequestMode;
 #[cfg(test)]
-pub(crate) use errors::{is_websocket_disconnect, message_reports_upstream_disconnect};
+pub(crate) use errors::is_websocket_disconnect;
+#[cfg(test)]
+pub(crate) use errors::message_reports_upstream_disconnect;
 use maintenance::count_full_input_tokens;
 use maintenance::run_remote_compaction;
 pub(crate) use prepare::PreparedRequest;
@@ -109,7 +111,7 @@ pub(crate) async fn run_turn_request(
         .expect("test request prompt");
     let prepared = prepare_turn_request(&model_request, openai).await?;
     let policy = RecoveryPolicy::default();
-    let response = if openai.transport == OpenAiTransport::Http {
+    let response = if openai.transport() == OpenAiTransport::Http {
         run_prepared_with_recovery(&prepared, openai, state, progress, &policy).await?
     } else {
         let recovery = Recovery::new(&policy);
@@ -128,7 +130,8 @@ pub(crate) async fn run_turn_request(
             &policy,
             attempt_progress,
         )
-        .await?
+        .await
+        .map_err(crate::recovery::AttemptError::into_error)?
     };
     state.history.push(prompt);
     state.history_replays.push(None);
@@ -247,19 +250,24 @@ impl ModelProvider for OpenAiProvider {
 
     fn reset(&mut self) {
         Diagnostics::reset(self, "engine_reset");
-        if self.transport == OpenAiTransport::WebSocket {
-            self.ws.invalidate_continuation("engine_reset");
-            self.ws.pending_done_response_id = None;
+        if self.transport() == OpenAiTransport::WebSocket {
+            self.responses_transport
+                .ws
+                .invalidate_continuation("engine_reset");
+            self.responses_transport.ws.pending_done_response_id = None;
         }
     }
 
     fn cancel(&mut self) {
-        if self.transport == OpenAiTransport::WebSocket {
-            self.ws
+        if self.transport() == OpenAiTransport::WebSocket {
+            self.responses_transport
+                .ws
                 .session
                 .terminate(OpenAiWebSocketTerminalCategory::LocalCancellation);
-            self.ws.invalidate_continuation("turn_cancelled");
-            self.ws.pending_done_response_id = None;
+            self.responses_transport
+                .ws
+                .invalidate_continuation("turn_cancelled");
+            self.responses_transport.ws.pending_done_response_id = None;
         }
     }
 }

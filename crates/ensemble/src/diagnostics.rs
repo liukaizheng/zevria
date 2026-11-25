@@ -1,6 +1,32 @@
 //! Bounded, best-effort raw ACP diagnostics.
 
-use super::*;
+use super::logging::RunLog;
+use agent_client_protocol::LineDirection;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use tokio::sync::{mpsc, oneshot};
+use zevria_workflow::{AgentProtocolDirection, AgentRunEvent};
+
+pub(super) const DEBUG_LOG_QUEUE_CAPACITY: usize = 64;
+pub(super) const RAW_DIAGNOSTIC_MAX_LINE_BYTES: usize = 256 * 1_024;
+pub(super) const RAW_DIAGNOSTIC_MAX_RUN_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Clone)]
+pub(super) struct RawDiagnosticSender {
+    sender: mpsc::Sender<RawDiagnosticMessage>,
+    pub(super) dropped_lines: Arc<AtomicU64>,
+}
+
+enum RawDiagnosticMessage {
+    Line(String, LineDirection),
+    Barrier(oneshot::Sender<()>),
+}
+
+pub(super) struct RawDiagnosticSink {
+    sender: RawDiagnosticSender,
+    task: tokio::task::JoinHandle<()>,
+    log: RunLog,
+}
 
 impl RawDiagnosticSender {
     pub(super) fn record(&self, line: &str, direction: LineDirection) {

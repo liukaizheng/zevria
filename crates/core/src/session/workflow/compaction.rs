@@ -16,6 +16,7 @@ use zevria_model::compaction::{
     CompactionBackend, CompactionCheckpoint, CompactionTrigger, select_recent_user_messages,
 };
 use zevria_model::request::{CompactResult, ModelRequest, ModelRequestItem, OwnedModelRequestItem};
+use zevria_session_api::TurnEvent;
 use zevria_session_api::event::{ProgressReporter, SessionEvent, SessionEventSender};
 use zevria_session_api::provider::ModelProvider;
 use zevria_session_api::turn::TurnContext;
@@ -244,10 +245,10 @@ impl<P: ModelProvider> SessionEngine<P> {
         source: &CompactionSource,
     ) -> anyhow::Result<CompactionCheckpoint> {
         let _ = events
-            .send(SessionEvent::CompactionStarted {
+            .send(SessionEvent::Turn(TurnEvent::CompactionStarted {
                 turn_id: turn.id,
                 trigger,
-            })
+            }))
             .await;
 
         let context = self.context_policy(policy.model_role).clone();
@@ -337,11 +338,11 @@ impl<P: ModelProvider> SessionEngine<P> {
     ) -> Result<(), SessionReplayError> {
         self.ensure_replay_valid()?;
         let _ = events
-            .send(SessionEvent::CompactionCompleted {
+            .send(SessionEvent::Turn(TurnEvent::CompactionCompleted {
                 turn_id: turn.id,
                 trigger,
                 backend,
-            })
+            }))
             .await;
         Ok(())
     }

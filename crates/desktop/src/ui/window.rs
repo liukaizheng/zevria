@@ -103,6 +103,7 @@ impl DesktopWindow {
                                 this.controller
                                     .read(cx)
                                     .model
+                                    .controls
                                     .registry
                                     .classify_prompt(&prompt),
                                 Ok(zevria_presentation::command::ClassifiedInput::Builtin(_))
@@ -176,7 +177,7 @@ impl DesktopWindow {
             .then(|| controller.draft.clone());
         let mode = controller.model.root.next_mode();
         let live = controller.phase == Phase::Live;
-        let inspecting = controller.model.selected_child.is_some();
+        let inspecting = controller.model.controls.selected_child.is_some();
         let jobs_visible = live && controller.model.jobs_panel_visible();
         let subtasks_visible = live && controller.model.subtasks_panel_visible();
         let plan = controller
@@ -242,7 +243,7 @@ impl DesktopWindow {
                 let index = model
                     .children
                     .iter()
-                    .position(|child| model.selected_child.as_ref() == Some(&child.id))
+                    .position(|child| model.controls.selected_child.as_ref() == Some(&child.id))
                     .map_or(0, |index| index + 1);
                 self.subtasks_ui.list_scroll.scroll_to_item(index);
                 window.focus(&self.subtasks_ui.list_focus, cx);
@@ -282,7 +283,7 @@ impl DesktopWindow {
         self.sync_model_picker(window, cx);
     }
     pub(super) fn request_replace(&mut self, replacement: Replacement, cx: &mut Context<Self>) {
-        if self.controller.read(cx).model.models.is_open() {
+        if self.controller.read(cx).model.controls.models.is_open() {
             return;
         }
         if self.controller.read(cx).model.root.is_busy() {
@@ -295,7 +296,7 @@ impl DesktopWindow {
         }
     }
     pub(super) fn perform_replace(&mut self, replacement: Replacement, cx: &mut Context<Self>) {
-        if self.controller.read(cx).model.models.is_open() {
+        if self.controller.read(cx).model.controls.models.is_open() {
             return;
         }
         self.controller
@@ -327,7 +328,7 @@ impl DesktopWindow {
         }
     }
     pub(super) fn open_workspace(&mut self, cx: &mut Context<Self>) {
-        if self.controller.read(cx).model.models.is_open()
+        if self.controller.read(cx).model.controls.models.is_open()
             || self.controller.read(cx).capturing_dialog
         {
             return;
@@ -377,7 +378,7 @@ impl DesktopWindow {
         }));
     }
     pub(super) fn cancel(&mut self, cx: &mut Context<Self>) {
-        if self.controller.read(cx).model.models.is_open() {
+        if self.controller.read(cx).model.controls.models.is_open() {
             self.controller
                 .update(cx, |this, cx| this.cancel_model_selection(cx));
             return;
@@ -389,7 +390,7 @@ impl DesktopWindow {
             return;
         }
         let controller = self.controller.read(cx);
-        if let Some(question) = &controller.model.question {
+        if let Some(question) = &controller.model.controls.question {
             if !question.request.dismissible {
                 return;
             }
@@ -428,8 +429,8 @@ impl DesktopWindow {
     ) {
         let model = &self.controller.read(cx).model;
         if self.pending_replace.is_some()
-            || model.models.is_open()
-            || model.question.is_some()
+            || model.controls.models.is_open()
+            || model.controls.question.is_some()
             || self.screen(cx).is_some()
         {
             return;
@@ -440,11 +441,11 @@ impl DesktopWindow {
         let controller = self.controller.read(cx);
         if self.pending_replace.is_some()
             || controller.capturing_dialog
-            || controller.model.models.is_open()
+            || controller.model.controls.models.is_open()
         {
             return;
         }
-        if controller.model.question.is_some() {
+        if controller.model.controls.question.is_some() {
             self.controller
                 .update(cx, |controller, cx| controller.answer_question(false, cx));
         } else if controller.model.root.workflow.dialog().is_some() {
@@ -480,6 +481,7 @@ impl DesktopWindow {
         let transcript_shown = self.screen(cx).is_none();
         let model = &self.controller.read(cx).model;
         if let Some(child) = model
+            .controls
             .selected_child
             .as_ref()
             .and_then(|id| model.children.iter().find(|c| &c.id == id))
@@ -693,7 +695,7 @@ impl Render for DesktopWindow {
                 this.with_transcript(cx, |view, cx| view.expand_all(window, cx));
             }))
             .on_action(cx.listener(|this, _: &actions::PreviousTurn, _, cx| {
-                if this.controller.read(cx).model.models.is_open() {
+                if this.controller.read(cx).model.controls.models.is_open() {
                     return;
                 }
                 this.transcript.update(cx, |view, cx| {
@@ -701,7 +703,7 @@ impl Render for DesktopWindow {
                 });
             }))
             .on_action(cx.listener(|this, _: &actions::NextTurn, _, cx| {
-                if this.controller.read(cx).model.models.is_open() {
+                if this.controller.read(cx).model.controls.models.is_open() {
                     return;
                 }
                 this.transcript.update(cx, |view, cx| {
@@ -709,14 +711,14 @@ impl Render for DesktopWindow {
                 });
             }))
             .on_action(cx.listener(|this, _: &actions::JumpToBeginning, _, cx| {
-                if this.controller.read(cx).model.models.is_open() {
+                if this.controller.read(cx).model.controls.models.is_open() {
                     return;
                 }
                 this.transcript
                     .update(cx, |view, cx| view.jump_to_beginning(cx));
             }))
             .on_action(cx.listener(|this, _: &actions::JumpToLatest, _, cx| {
-                if this.controller.read(cx).model.models.is_open() {
+                if this.controller.read(cx).model.controls.models.is_open() {
                     return;
                 }
                 this.transcript
@@ -775,7 +777,14 @@ impl Render for DesktopWindow {
                 .child(div().flex_1().min_h_0().child(self.transcript.clone()));
             if let Some(question) = self.question_dialog(window, cx) {
                 center = center.child(question);
-            } else if self.controller.read(cx).model.selected_child.is_none() {
+            } else if self
+                .controller
+                .read(cx)
+                .model
+                .controls
+                .selected_child
+                .is_none()
+            {
                 center = center.child(self.composer_view(window, cx));
             }
             center = center.child(self.status_bar(cx));

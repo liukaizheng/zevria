@@ -1,6 +1,7 @@
 //! Work counts around real async acceptance, not just synchronous preparation.
 use super::*;
 use crate::session::pipeline_probe;
+use zevria_session_api::TurnEvent;
 use zevria_transcript::replay_probe::measure_instruction_replay_async;
 
 fn fixture() -> (tempfile::TempDir, SessionEngine<ScriptedProvider>) {
@@ -141,8 +142,8 @@ async fn acceptance_prepares_once_validates_once_and_reuses_the_exact_counted_re
                 assert!(matches!(
                     acceptance.as_slice(),
                     [
-                        SessionEvent::ModeChanged { .. },
-                        SessionEvent::TurnStarted { .. }
+                        SessionEvent::Turn(TurnEvent::ModeChanged { .. }),
+                        SessionEvent::Turn(TurnEvent::Started { .. })
                     ]
                 ));
                 let _ = engine.run_turn(&accepted, &events, &turn).await;
@@ -336,16 +337,23 @@ async fn checkpoint_versions_reuse_preparation_and_identity_with_one_remeasureme
             let published = collect_events(&mut receiver).await;
             let started = published
                 .iter()
-                .position(|event| matches!(event, SessionEvent::TurnStarted { .. }));
+                .position(|event| matches!(event, SessionEvent::Turn(TurnEvent::Started { .. })));
             assert_eq!(started.is_none(), rejected);
             if let Some(started) = started {
                 let compacted = published
                     .iter()
-                    .position(|event| matches!(event, SessionEvent::CompactionCompleted { .. }))
+                    .position(|event| {
+                        matches!(
+                            event,
+                            SessionEvent::Turn(TurnEvent::CompactionCompleted { .. })
+                        )
+                    })
                     .unwrap();
                 let mode = published
                     .iter()
-                    .position(|event| matches!(event, SessionEvent::ModeChanged { .. }))
+                    .position(|event| {
+                        matches!(event, SessionEvent::Turn(TurnEvent::ModeChanged { .. }))
+                    })
                     .unwrap();
                 assert!(compacted < mode && mode < started);
             }

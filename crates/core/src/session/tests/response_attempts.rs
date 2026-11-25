@@ -3,6 +3,7 @@ use zevria_content::HostedActivity;
 use zevria_content::HostedActivityStatus as Status;
 use zevria_content::ResponseAttempt;
 use zevria_content::ResponseAttemptOutcome as Outcome;
+use zevria_session_api::{SubtaskEvent, TurnEvent};
 
 #[path = "recoverable_batches.rs"]
 mod recoverable_batches;
@@ -95,16 +96,11 @@ fn activity_round_trip_is_model_and_capacity_inert() {
 async fn collector_clones_keep_observations_when_delivery_is_cancelled() {
     let (events, mut receiver) = session_event_channel(1);
     let progress = ProgressReporter::new(events.clone());
+    events.stream_cleared(TurnId::new(0));
     events
-        .send(SessionEvent::StreamCleared {
+        .send(SessionEvent::Turn(TurnEvent::Recovered {
             turn_id: TurnId::new(0),
-        })
-        .await
-        .unwrap();
-    events
-        .send(SessionEvent::TurnRecovered {
-            turn_id: TurnId::new(0),
-        })
+        }))
         .await
         .unwrap();
     let observed = attempt();
@@ -230,16 +226,21 @@ async fn every_model_exit_flushes_retry_trail_before_terminal_publication() {
         let lifecycle = collect_events(&mut receiver).await;
         let final_activity = lifecycle
             .iter()
-            .rposition(|event| matches!(event, SessionEvent::ResponseAttemptUpdated { .. }))
+            .rposition(|event| {
+                matches!(
+                    event,
+                    SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated { .. })
+                )
+            })
             .unwrap();
         let terminal = lifecycle
             .iter()
             .position(|event| {
                 matches!(
                     event,
-                    SessionEvent::TurnCompleted { .. }
-                        | SessionEvent::TurnFailed { .. }
-                        | SessionEvent::TurnCancelled { .. }
+                    SessionEvent::Turn(TurnEvent::Completed { .. })
+                        | SessionEvent::Turn(TurnEvent::Failed { .. })
+                        | SessionEvent::Turn(TurnEvent::Cancelled { .. })
                 )
             })
             .unwrap();
@@ -372,9 +373,9 @@ impl ModelProvider for BackpressuredProvider {
             // Fill the lossless queue, then prove the activity send is pending.
             progress
                 .events()
-                .send(SessionEvent::TurnRecovered {
+                .send(SessionEvent::Turn(TurnEvent::Recovered {
                     turn_id: progress.turn().id,
-                })
+                }))
                 .await
                 .unwrap();
             let update = progress.attempt_updated(attempt());
@@ -487,16 +488,16 @@ async fn independent_hosted_updates_do_not_fence_root_or_child_previews() {
     let turn_id = TurnId::new(3);
     events.stream_updated(turn_id, Message::assistant("existing answer"));
     events
-        .send(SessionEvent::ResponseAttemptUpdated {
+        .send(SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated {
             turn_id,
-            attempt: attempt(),
-        })
+            attempt: Box::new(attempt()),
+        }))
         .await
         .unwrap();
     let first = receiver.try_recv().unwrap();
     assert!(matches!(
         first,
-        SessionUpdate::Lifecycle(SessionEvent::ResponseAttemptUpdated { .. })
+        SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated { .. }))
     ));
     assert!(
         matches!(receiver.try_recv().unwrap(),SessionUpdate::Streams(batch) if batch.root.is_some())
@@ -512,22 +513,22 @@ async fn independent_hosted_updates_do_not_fence_root_or_child_previews() {
             attempt: None,
             revision: 0,
             turn_id,
-            message: Some(Message::assistant("child answer")),
+            message: Some(Message::assistant("child answer").into()),
         },
     );
     events
-        .send(SessionEvent::SubtaskSession {
+        .send(SessionEvent::Subtask(SubtaskEvent::Session {
             id: child.clone(),
-            event: Box::new(SessionEvent::ResponseAttemptUpdated {
+            event: Box::new(SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated {
                 turn_id,
-                attempt: attempt(),
-            }),
-        })
+                attempt: Box::new(attempt()),
+            })),
+        }))
         .await
         .unwrap();
     assert!(matches!(
         receiver.try_recv().unwrap(),
-        SessionUpdate::Lifecycle(SessionEvent::SubtaskSession { .. })
+        SessionUpdate::Lifecycle(SessionEvent::Subtask(SubtaskEvent::Session { .. }))
     ));
     assert!(
         matches!(receiver.try_recv().unwrap(),SessionUpdate::Streams(batch) if batch.subtasks.contains_key(&child))
@@ -718,7 +719,7 @@ mod recovery_lifecycle {
             )),
             fail_write
         );
-        assert!(updates.iter().any(|event| matches!(event, SessionEvent::TurnCompleted { attempt_id: Some(id), .. } if id == &attempt.id)));
+        assert!(updates.iter().any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { attempt_id: Some(id), .. }) if id == &attempt.id)));
         if let Some(blocker) = &mut blocker {
             assert_eq!(
                 std::fs::read(blocker.backup_path()).unwrap(),
@@ -754,9 +755,9 @@ mod recovery_lifecycle {
                 // must still be serviced by core without draining this channel.
                 while progress
                     .events()
-                    .try_send(SessionEvent::TurnRecovered {
+                    .try_send(SessionEvent::Turn(TurnEvent::Recovered {
                         turn_id: TurnId::new(999),
-                    })
+                    }))
                     .is_ok()
                 {}
                 let mut attempt = readable_attempt();
@@ -1007,7 +1008,10 @@ mod recovery_lifecycle {
             !collect_events(&mut receiver)
                 .await
                 .iter()
-                .any(|event| matches!(event, SessionEvent::ResponseAttemptUpdated { .. }))
+                .any(|event| matches!(
+                    event,
+                    SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated { .. })
+                ))
         );
     }
 
@@ -1092,9 +1096,9 @@ impl ModelProvider for FinalProvider {
             if self.block_frontend {
                 while progress
                     .events()
-                    .try_send(SessionEvent::TurnRecovered {
+                    .try_send(SessionEvent::Turn(TurnEvent::Recovered {
                         turn_id: TurnId::new(999),
-                    })
+                    }))
                     .is_ok()
                 {}
             }
@@ -1159,7 +1163,7 @@ async fn success_is_finalized_from_the_record_and_live_only_activity_is_not_pers
     let live = updates
         .iter()
         .find_map(|event| match event {
-            SessionEvent::ResponseAttemptUpdated { attempt, .. }
+            SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated { attempt, .. })
                 if attempt.outcome == Outcome::Completed =>
             {
                 Some(attempt)
@@ -1174,17 +1178,17 @@ async fn success_is_finalized_from_the_record_and_live_only_activity_is_not_pers
         "live-only search is dropped, not merged"
     );
     assert!(!serde_json::to_string(record).unwrap().contains(&live.id));
-    let attempt = updates.iter().position(|event| matches!(event, SessionEvent::ResponseAttemptUpdated { attempt, .. } if attempt.id == live.id)).unwrap();
+    let attempt = updates.iter().position(|event| matches!(event, SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated { attempt, .. }) if attempt.id == live.id)).unwrap();
     let usage = updates
         .iter()
-        .position(|event| matches!(event, SessionEvent::UsageUpdated { .. }))
+        .position(|event| matches!(event, SessionEvent::Turn(TurnEvent::UsageUpdated { .. })))
         .unwrap();
-    let terminal = updates.iter().position(|event| matches!(event, SessionEvent::TurnCompleted { attempt_id: Some(id), .. } if id == &live.id)).unwrap();
+    let terminal = updates.iter().position(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { attempt_id: Some(id), .. }) if id == &live.id)).unwrap();
     assert!(attempt < usage && usage < terminal);
     assert_eq!(
         updates
             .iter()
-            .filter(|event| matches!(event, SessionEvent::UsageUpdated { .. }))
+            .filter(|event| matches!(event, SessionEvent::Turn(TurnEvent::UsageUpdated { .. })))
             .count(),
         1
     );
@@ -1240,16 +1244,16 @@ async fn completed_response_that_loses_the_cancellation_race_is_interrupted_reco
                 .contains("committed answer"))
     );
     let updates = collect_events(&mut receiver).await;
-    let closure = updates.iter().position(|event| matches!(event, SessionEvent::ResponseAttemptUpdated { attempt, .. } if attempt.outcome == Outcome::Interrupted)).unwrap();
+    let closure = updates.iter().position(|event| matches!(event, SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated { attempt, .. }) if attempt.outcome == Outcome::Interrupted)).unwrap();
     let terminal = updates
         .iter()
-        .position(|event| matches!(event, SessionEvent::TurnCancelled { .. }))
+        .position(|event| matches!(event, SessionEvent::Turn(TurnEvent::Cancelled { .. })))
         .unwrap();
     assert!(closure < terminal);
     assert!(
         !updates
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
     );
 }
 
@@ -1389,7 +1393,7 @@ async fn deferred_ensemble_final_publishes_attempt_before_turn_completed_without
     assert!(
         !updates
             .iter()
-            .any(|event| matches!(event, SessionEvent::UsageUpdated { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::UsageUpdated { .. })))
     );
     engine
         .finalize_turn(
@@ -1402,22 +1406,22 @@ async fn deferred_ensemble_final_publishes_attempt_before_turn_completed_without
         .await
         .unwrap();
     updates.extend(collect_events(&mut receiver).await);
-    let display = updates.iter().position(|event| matches!(event, SessionEvent::ResponseAttemptUpdated { attempt, .. } if attempt.outcome == Outcome::Completed)).unwrap();
+    let display = updates.iter().position(|event| matches!(event, SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated { attempt, .. }) if attempt.outcome == Outcome::Completed)).unwrap();
     let terminal = updates
         .iter()
         .position(|event| {
             matches!(
                 event,
-                SessionEvent::TurnCompleted {
+                SessionEvent::Turn(TurnEvent::Completed {
                     attempt_id: Some(_),
                     ..
-                }
+                })
             )
         })
         .unwrap();
     let usage = updates
         .iter()
-        .position(|event| matches!(event, SessionEvent::UsageUpdated { .. }))
+        .position(|event| matches!(event, SessionEvent::Turn(TurnEvent::UsageUpdated { .. })))
         .unwrap();
     assert!(display < usage && usage < terminal);
     let items = zevria_transcript::load(engine.conversation.path()).unwrap();

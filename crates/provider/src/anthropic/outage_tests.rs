@@ -1,5 +1,6 @@
 use super::*;
 use std::{io, time::Duration};
+use zevria_session_api::TurnEvent;
 
 #[tokio::test]
 async fn retry_hints_for_unavailable_and_overloaded_use_upcoming_attempts_and_identical_wire() {
@@ -38,13 +39,13 @@ async fn retry_hints_for_unavailable_and_overloaded_use_upcoming_attempts_and_id
         .unwrap();
     let retries = std::iter::from_fn(|| events.try_recv().ok())
         .filter_map(|update| match update {
-            SessionUpdate::Lifecycle(SessionEvent::TurnRetrying {
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Retrying {
                 attempt,
                 retry_after,
                 retrying_for,
                 error,
                 ..
-            }) => {
+            })) => {
                 assert!(error.contains("request_hint"));
                 assert!(retrying_for < Duration::from_secs(300));
                 Some((attempt, retry_after))
@@ -100,9 +101,11 @@ async fn closed_port_exhaustion_has_the_shared_display_and_original_os_cause() {
     assert!(error.chain().any(|cause| cause.is::<reqwest::Error>()));
     let retry = std::iter::from_fn(|| events.try_recv().ok())
         .find_map(|update| match update {
-            SessionUpdate::Lifecycle(SessionEvent::TurnRetrying { attempt, error, .. }) => {
-                Some((attempt, error))
-            }
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Retrying {
+                attempt,
+                error,
+                ..
+            })) => Some((attempt, error)),
             _ => None,
         })
         .unwrap();

@@ -5,6 +5,8 @@ use agent_client_protocol::schema::v1::{ContentBlock, SessionNotification};
 use agent_client_protocol::{Agent, Channel, Client};
 use rig_core::message::Message;
 use std::time::Duration;
+use zevria_session_api::SessionStreamState;
+use zevria_session_api::TurnEvent;
 use zevria_session_api::event::{NetworkStatus, NetworkTransport};
 
 struct NoopLifecycle;
@@ -74,22 +76,24 @@ async fn live_network_diagnostics_are_quiet_until_stall_or_retry_and_preserve_st
                 let turn_id = TurnId::new(index as u64 + 1);
                 let _pending =
                     live.begin_prompt(zevria_content::UserPrompt::from_text("prompt"))?;
-                live.handle_event(SessionEvent::TurnStarted {
+                live.handle_event(SessionEvent::Turn(TurnEvent::Started {
                     turn_id,
                     message: Message::user("prompt"),
                     mode: SessionMode::Build,
-                })?;
+                }))?;
                 let transport = if index % 2 == 0 {
                     NetworkTransport::WebSocket
                 } else {
                     NetworkTransport::Http
                 };
-                let status = |call, attempt, status| SessionEvent::NetworkStatus {
-                    turn_id,
-                    call,
-                    attempt,
-                    transport,
-                    status,
+                let status = |call, attempt, status| {
+                    SessionEvent::Turn(TurnEvent::NetworkStatus {
+                        turn_id,
+                        call,
+                        attempt,
+                        transport,
+                        status,
+                    })
                 };
                 let routine_phases = || {
                     [
@@ -102,10 +106,10 @@ async fn live_network_diagnostics_are_quiet_until_stall_or_retry_and_preserve_st
                 for phase in routine_phases() {
                     live.handle_event(status(1, 1, phase))?; // no routine diagnostics
                 }
-                live.handle_event(SessionEvent::AssistantStreamUpdated {
+                live.handle_assistant_snapshot(SessionStreamState::new(
                     turn_id,
-                    snapshot: (Message::assistant("prefix")).into(),
-                })?;
+                    (Message::assistant("prefix")).into(),
+                ))?;
                 let quiet = NetworkStatus::Quiet {
                     idle_for: Duration::from_secs(30),
                     will_retry: index % 2 == 0,
@@ -114,28 +118,31 @@ async fn live_network_diagnostics_are_quiet_until_stall_or_retry_and_preserve_st
                 live.handle_event(status(1, 1, quiet.clone()))?;
                 live.handle_event(status(1, 1, quiet.clone()))?; // no duplicate warning
                 live.handle_event(status(99, 1, quiet.clone()))?; // stale call: no diagnostic or reset
-                live.handle_event(SessionEvent::AssistantStreamUpdated {
+                live.handle_assistant_snapshot(SessionStreamState::new(
                     turn_id,
-                    snapshot: Message::assistant("prefix continued").into(),
-                })?;
+                    Message::assistant("prefix continued").into(),
+                ))?;
                 live.handle_event(status(1, 1, NetworkStatus::ProgressResumed))?;
-                live.handle_event(SessionEvent::TurnRetrying {
+                live.handle_event(SessionEvent::Turn(TurnEvent::Retrying {
                     call: 1,
                     turn_id,
                     attempt: 2,
                     retrying_for: std::time::Duration::from_secs(280),
                     retry_after: delay,
                     error: "offline".into(),
-                })?;
+                }))?;
                 for phase in routine_phases() {
                     live.handle_event(status(1, 2, phase))?; // recovery details remain visible
                 }
                 live.handle_event(status(1, 1, quiet.clone()))?; // stale attempt
-                live.handle_event(SessionEvent::AssistantStreamUpdated {
+                live.handle_assistant_snapshot(SessionStreamState::new(
                     turn_id,
-                    snapshot: (Message::assistant("prefix resumed")).into(),
-                })?;
-                live.handle_event(SessionEvent::ModelCallStarted { turn_id, call: 2 })?;
+                    (Message::assistant("prefix resumed")).into(),
+                ))?;
+                live.handle_event(SessionEvent::Turn(TurnEvent::ModelCallStarted {
+                    turn_id,
+                    call: 2,
+                }))?;
                 for phase in routine_phases() {
                     live.handle_event(status(2, 1, phase))?; // a new call starts quietly again
                 }
@@ -147,31 +154,31 @@ async fn live_network_diagnostics_are_quiet_until_stall_or_retry_and_preserve_st
                             root: Some(zevria_session_api::SessionStreamState {
                                 revision: 1,
                                 turn_id,
-                                message,
+                                message: message.map(Arc::new),
                                 attempt: None,
                             }),
                             ..Default::default()
                         },
                     ))?;
                 }
-                live.handle_event(SessionEvent::AssistantStreamUpdated {
+                live.handle_assistant_snapshot(SessionStreamState::new(
                     turn_id,
-                    snapshot: Message::assistant("late preview").into(),
-                })?;
-                live.handle_event(SessionEvent::Intermediate {
+                    Message::assistant("late preview").into(),
+                ))?;
+                live.handle_event(SessionEvent::Turn(TurnEvent::Intermediate {
                     turn_id,
                     message: Message::assistant("late tool round"),
                     attempt_id: None,
-                })?;
-                live.handle_event(SessionEvent::TurnCompleted {
+                }))?;
+                live.handle_event(SessionEvent::Turn(TurnEvent::Completed {
                     turn_id,
                     message: Message::assistant("late completion"),
                     attempt_id: None,
-                })?;
+                }))?;
                 let state = live.state.lock().unwrap();
-                assert!(state.network_scope.is_none());
+                assert!(state.projection.network_scope.is_none());
                 assert!(
-                    state.streams.is_empty(),
+                    state.projection.streams.is_empty(),
                     "late previews must not recreate turn state"
                 );
             }

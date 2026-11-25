@@ -385,8 +385,8 @@ async fn real_parent_recovers_a_ready_native_zevria_child_from_public_transcript
     })
     .await
     .expect("native Ready session reconnects without unsolicited model work");
-    assert!(state.confirmation.is_none());
-    assert_eq!(state.accepted_generation, 1);
+    assert!(state.proposals.confirmation.is_none());
+    assert_eq!(state.inputs.accepted_generation, 1);
     let receipt = WorkerConfirmationReceipt {
         request_id: WorkerControlId::new(),
         target: WorkerControlTarget {

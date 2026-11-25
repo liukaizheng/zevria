@@ -45,6 +45,7 @@ fn persisted_same_mode_append_preserves_measured_image_baseline() {
     assert!(!engine.context.usage[&profile].unmeasured_images);
 }
 use super::*;
+use zevria_session_api::TurnEvent;
 
 fn image_prompt() -> zevria_content::UserPrompt {
     zevria_content::UserPrompt::new(vec![zevria_content::PromptBlock::Image(
@@ -113,11 +114,12 @@ async fn three_image_tool_rounds_count_once_when_usage_covers_images_and_recount
         assert!(
             updates
                 .iter()
-                .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+                .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
         );
         assert!(!updates.iter().any(|event| matches!(
             event,
-            SessionEvent::TurnFailed { .. } | SessionEvent::TurnRejected { .. }
+            SessionEvent::Turn(TurnEvent::Failed { .. })
+                | SessionEvent::Turn(TurnEvent::Rejected { .. })
         )));
         assert_eq!(engine.provider.requests.lock().unwrap().len(), 4);
         assert_eq!(calls.lock().unwrap().len(), 3);
@@ -151,7 +153,7 @@ async fn three_image_tool_rounds_count_once_when_usage_covers_images_and_recount
             assert!(
                 updates
                     .iter()
-                    .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+                    .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
             );
             assert_eq!(counts.load(Ordering::SeqCst), expected);
         }
@@ -216,11 +218,12 @@ async fn tool_result_images_trigger_exact_counts_and_usage_covers_only_existing_
             assert!(
                 updates
                     .iter()
-                    .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+                    .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
             );
             assert!(!updates.iter().any(|event| matches!(
                 event,
-                SessionEvent::TurnFailed { .. } | SessionEvent::TurnRejected { .. }
+                SessionEvent::Turn(TurnEvent::Failed { .. })
+                    | SessionEvent::Turn(TurnEvent::Rejected { .. })
             )));
             assert_eq!(
                 counts.load(Ordering::SeqCst),
@@ -414,13 +417,13 @@ async fn safe_token_rejection_compacts_and_retries_only_the_pending_round() {
         assert_eq!(
             updates
                 .iter()
-                .any(|event| matches!(event, SessionEvent::TurnCompleted { .. })),
+                .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. }))),
             !reject_again
         );
         assert_eq!(
             updates
                 .iter()
-                .any(|event| matches!(event, SessionEvent::TurnFailed { .. })),
+                .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Failed { .. }))),
             reject_again
         );
         let rejections = engine.conversation.items().iter().filter(|item| matches!(item,TranscriptItem::IncompleteResponse(record) if record.input_rejection.is_some())).collect::<Vec<_>>();
@@ -493,7 +496,7 @@ async fn ambiguous_or_upload_size_failures_never_authorize_context_replay() {
             collect_events(&mut receiver)
                 .await
                 .iter()
-                .any(|event| matches!(event, SessionEvent::TurnFailed { .. }))
+                .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Failed { .. })))
         );
         assert_eq!(engine.provider.requests.lock().unwrap().len(), 1);
         assert!(
@@ -537,7 +540,7 @@ async fn unresolved_image_admission_is_explicit_and_transitions_back_to_usage() 
     let before = updates
         .iter()
         .find_map(|event| match event {
-            SessionEvent::ContextUsageUpdated { snapshot, .. } => Some(snapshot),
+            SessionEvent::Turn(TurnEvent::ContextUsageUpdated { snapshot, .. }) => Some(snapshot),
             _ => None,
         })
         .unwrap();
@@ -549,7 +552,7 @@ async fn unresolved_image_admission_is_explicit_and_transitions_back_to_usage() 
     assert!(
         updates
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
     );
     let restored = engine.restored_model_contexts().unwrap();
     // An in-memory compatible baseline survives local restoration snapshots.
@@ -663,7 +666,7 @@ async fn observed_output_hosted_activity_or_accepted_response_veto_pre_execution
             1,
             "observed activity forbids a new upstream invocation"
         );
-        assert!(collect_events(&mut receiver).await.iter().any(|event| matches!(event,SessionEvent::TurnFailed {error,..} if error.contains("refusing automatic replay"))));
+        assert!(collect_events(&mut receiver).await.iter().any(|event| matches!(event,SessionEvent::Turn(TurnEvent::Failed {error,..}) if error.contains("refusing automatic replay"))));
         assert!(
             !engine
                 .conversation
@@ -756,7 +759,7 @@ async fn rejection_recovery_stops_for_resumed_disarm_spent_predictive_budget_or_
         assert!(
             updates
                 .iter()
-                .any(|event| matches!(event, SessionEvent::TurnFailed { .. })),
+                .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Failed { .. }))),
             "{case}"
         );
         assert_eq!(

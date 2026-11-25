@@ -20,6 +20,7 @@ use zevria_model::telemetry::TokenUsage;
 use zevria_session_api::event::{ProgressReporter, SessionEvent, SessionEventSender};
 use zevria_session_api::provider::ModelProvider;
 use zevria_session_api::turn::TurnContext;
+use zevria_session_api::{PlanEvent, TurnEvent};
 use zevria_transcript::SessionReplayError;
 use zevria_transcript::transcript::TranscriptItem;
 use zevria_workflow::ensemble::{EnsembleRecord, EnsembleWorkflow};
@@ -104,10 +105,10 @@ impl<P: ModelProvider> SessionEngine<P> {
         {
             let _ = progress
                 .events()
-                .send(SessionEvent::ResponseAttemptUpdated {
+                .send(SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated {
                     turn_id: progress.turn().id,
-                    attempt,
-                })
+                    attempt: Box::new(attempt),
+                }))
                 .await;
         }
         Ok(())
@@ -217,10 +218,10 @@ impl<P: ModelProvider> SessionEngine<P> {
         let completion_result = {
             let _ = progress
                 .events()
-                .send(SessionEvent::ModelCallStarted {
+                .send(SessionEvent::Turn(TurnEvent::ModelCallStarted {
                     turn_id: progress.turn().id,
                     call,
-                })
+                }))
                 .await;
             timings.advance(crate::session::kernel::timing::RoundPhase::Model);
             let completion = self.provider.complete(request, request_progress);
@@ -420,11 +421,11 @@ impl<P: ModelProvider> SessionEngine<P> {
         if disposition == ResponseDisposition::Intermediate {
             let _ = progress
                 .events()
-                .send(SessionEvent::Intermediate {
+                .send(SessionEvent::Turn(TurnEvent::Intermediate {
                     turn_id: progress.turn().id,
                     message: assistant,
                     attempt_id,
-                })
+                }))
                 .await;
             Ok(CommittedResponse {
                 message: None,
@@ -513,11 +514,11 @@ impl<P: ModelProvider> SessionEngine<P> {
         submission_gate.apply_batch(&batch);
         let _ = progress
             .events()
-            .send(SessionEvent::ToolResults {
+            .send(SessionEvent::Turn(TurnEvent::ToolResults {
                 turn_id: progress.turn().id,
                 message: batch.message,
                 metadata: batch.metadata,
-            })
+            }))
             .await;
         self.emit_plan_state_if_changed(previous_plan, progress.events())
             .await?;
@@ -824,15 +825,15 @@ impl<P: ModelProvider> SessionEngine<P> {
             None => None,
         };
         let terminal = if persistence == FinalResponsePersistence::Recovered {
-            SessionEvent::TurnRecovered { turn_id: turn.id }
+            SessionEvent::Turn(TurnEvent::Recovered { turn_id: turn.id })
         } else {
-            SessionEvent::TurnCompleted {
+            SessionEvent::Turn(TurnEvent::Completed {
                 turn_id: turn.id,
                 attempt_id: output.attempt_id,
                 message: output
                     .message
                     .expect("live completion has a final response"),
-            }
+            })
         };
         self.commit_turn_completion(
             accepted,
@@ -907,12 +908,12 @@ impl<P: ModelProvider> SessionEngine<P> {
                 self.plan_projection_warnings.remove(&artifact.version.id);
                 None
             }
-            Err((path, error)) => Some(SessionEvent::PlanProjectionWarning {
+            Err((path, error)) => Some(SessionEvent::Plan(PlanEvent::ProjectionWarning {
                 version: artifact.version,
                 draft: None,
                 path,
                 error,
-            }),
+            })),
         });
         let _ = events.send(terminal).await;
         self.emit_plan_state_if_changed(previous, events).await?;

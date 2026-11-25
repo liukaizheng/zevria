@@ -1,8 +1,9 @@
 //! Responses errors responsibilities.
-use crate::http::{HttpAttemptError, diagnostic_detail};
+use crate::http::diagnostic_detail;
+use crate::recovery::AttemptError;
 use tokio_tungstenite::tungstenite::Error as WebSocketError;
-use zevria_model::ModelInputTooLarge;
 use zevria_model::openai::ResponseStatus;
+use zevria_model::{ModelInputTooLarge, RetryCategory};
 use zevria_responses::wire::CompletionResponse as OpenAiCompletionResponse;
 
 use crate::websocket_session::OpenAiWebSocketTerminalCategory;
@@ -17,14 +18,14 @@ pub(crate) struct WebSocketDisconnected {
     pub(super) context: &'static str,
     pub(super) source: Option<WebSocketError>,
     pub(super) server_reason: Option<String>,
-    pub(super) terminal_category: &'static str,
+    pub(super) terminal_category: OpenAiWebSocketTerminalCategory,
 }
 
 impl WebSocketDisconnected {
     pub(super) fn new(
         context: &'static str,
         source: WebSocketError,
-        terminal_category: &'static str,
+        terminal_category: OpenAiWebSocketTerminalCategory,
     ) -> Self {
         Self {
             context,
@@ -34,7 +35,10 @@ impl WebSocketDisconnected {
         }
     }
 
-    pub(super) fn without_source(context: &'static str, terminal_category: &'static str) -> Self {
+    pub(super) fn without_source(
+        context: &'static str,
+        terminal_category: OpenAiWebSocketTerminalCategory,
+    ) -> Self {
         Self {
             context,
             source: None,
@@ -46,7 +50,7 @@ impl WebSocketDisconnected {
     pub(super) fn from_server_reason(
         context: &'static str,
         server_reason: String,
-        terminal_category: &'static str,
+        terminal_category: OpenAiWebSocketTerminalCategory,
     ) -> Self {
         Self {
             context,
@@ -60,11 +64,13 @@ impl WebSocketDisconnected {
         context: &'static str,
         terminal: OpenAiWebSocketTerminalCategory,
     ) -> Self {
-        Self::without_source(context, terminal.as_str())
+        Self::without_source(context, terminal)
     }
+}
 
-    pub(super) fn terminal_category(&self) -> &'static str {
-        self.terminal_category
+impl From<WebSocketDisconnected> for AttemptError {
+    fn from(error: WebSocketDisconnected) -> Self {
+        Self::retryable(error.terminal_category.retry_category(), error)
     }
 }
 
@@ -94,6 +100,7 @@ impl std::error::Error for WebSocketDisconnected {
 }
 
 /// Whether a failed turn was caused by a dropped websocket connection.
+#[cfg(test)]
 pub(crate) fn is_websocket_disconnect(error: &anyhow::Error) -> bool {
     error.downcast_ref::<WebSocketDisconnected>().is_some()
 }
@@ -157,48 +164,24 @@ pub(super) fn transient_response_code(code: Option<&str>) -> bool {
     matches!(code, Some("server_error" | "rate_limit_exceeded"))
 }
 
-#[derive(Debug)]
-pub(super) struct TransientResponseError {
-    pub(super) category: &'static str,
-    pub(super) source: anyhow::Error,
-}
-impl std::fmt::Display for TransientResponseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.source.fmt(f)
-    }
-}
-impl std::error::Error for TransientResponseError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.source.as_ref())
-    }
-}
-
-pub(super) fn classify_response_failure(
-    size: bool,
-    transient: bool,
-    error: anyhow::Error,
-) -> anyhow::Error {
-    if size {
-        ModelInputTooLarge::new(error).into()
-    } else if transient {
-        TransientResponseError {
-            category: "response_failed_transient",
-            source: error,
-        }
-        .into()
+fn classify_response_failure(size: bool, transient: bool, error: anyhow::Error) -> AttemptError {
+    let error = classify_input_size(size, error);
+    if !size && transient {
+        AttemptError::retryable(RetryCategory::ResponseFailedTransient, error)
     } else {
-        error
+        AttemptError::terminal(error)
     }
 }
 
 pub(super) fn response_attempt_error(
-    error: anyhow::Error,
+    error: AttemptError,
     request_id: &Option<String>,
-) -> HttpAttemptError {
-    if let Some(transient) = error.downcast_ref::<TransientResponseError>() {
-        HttpAttemptError::retryable_response(transient.category, error, request_id)
-    } else {
-        HttpAttemptError::terminal_response(error, request_id)
+) -> AttemptError {
+    match error {
+        AttemptError::Retryable {
+            category, error, ..
+        } => AttemptError::retryable_response(category, error, request_id),
+        AttemptError::Terminal { error, .. } => AttemptError::terminal_response(error, request_id),
     }
 }
 
@@ -272,7 +255,7 @@ pub(super) fn validation_input_size_rejection(value: &serde_json::Value) -> bool
 pub(super) fn done_failure_error(
     response: &serde_json::Value,
     status: &ResponseStatus,
-) -> anyhow::Error {
+) -> AttemptError {
     let id = response
         .get("id")
         .and_then(serde_json::Value::as_str)
@@ -296,7 +279,7 @@ pub(super) fn done_failure_error(
     )
 }
 
-pub(super) fn response_failure_error(response: &OpenAiCompletionResponse) -> anyhow::Error {
+pub(super) fn response_failure_error(response: &OpenAiCompletionResponse) -> AttemptError {
     let detail = response
         .error
         .as_ref()

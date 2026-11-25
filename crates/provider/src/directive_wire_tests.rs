@@ -13,6 +13,7 @@ use zevria_instructions::skill::SkillSource;
 use zevria_instructions::skill::SkillsConfig;
 use zevria_model::OwnedModelRequestItem;
 use zevria_session_api::TurnCommand;
+use zevria_session_api::TurnEvent;
 
 #[tokio::test]
 async fn request_activation_correction_and_standard_reset_preserve_wire_prefix_and_reconnect() {
@@ -65,7 +66,7 @@ async fn request_activation_correction_and_standard_reset_preserve_wire_prefix_a
                 input.push(OwnedModelRequestItem::RequestInstruction(
                     RequestDirective::correction(orchestrated.clone()),
                 ));
-                provider.ws.reconnect().await.unwrap();
+                provider.responses_transport.ws.reconnect().await.unwrap();
             } else {
                 input.push(OwnedModelRequestItem::message(Message::user(format!(
                     "prompt {index}"
@@ -91,7 +92,7 @@ async fn request_activation_correction_and_standard_reset_preserve_wire_prefix_a
                 model_role: ModelRole::Build,
                 allowed_tool_names: None,
             };
-            let prepared = crate::turn::prepare_turn_request(&request, &mut provider)
+            let prepared = crate::responses::prepare_turn_request(&request, &mut provider)
                 .await
                 .unwrap();
             full.push(prepared.full_input.clone());
@@ -249,7 +250,8 @@ async fn run_command(engine: &mut SessionEngine<OpenAiProvider>, command: Sessio
             assert!(
                 !matches!(
                     event,
-                    SessionEvent::TurnFailed { .. } | SessionEvent::TurnRejected { .. }
+                    SessionEvent::Turn(TurnEvent::Failed { .. })
+                        | SessionEvent::Turn(TurnEvent::Rejected { .. })
                 ),
                 "{event:?}"
             );

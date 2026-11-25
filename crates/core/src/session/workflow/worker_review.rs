@@ -4,6 +4,7 @@ use crate::session::turn::execution::Failure;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use zevria_session_api::EnsembleEvent;
 use zevria_session_api::event::{SessionEvent, SessionEventSender};
 use zevria_session_api::provider::ModelProvider;
 use zevria_session_api::turn::TurnContext;
@@ -185,7 +186,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 if &state.outcome() != outcome {
                     return Err(anyhow::anyhow!("frozen outcome differs from root review").into());
                 }
-                if !state.abandoned {
+                if !state.is_abandoned() {
                     state
                         .apply(&WorkerReviewEvent::Sealed)
                         .map_err(anyhow::Error::msg)?;
@@ -220,12 +221,12 @@ impl<P: ModelProvider> SessionEngine<P> {
                     .iter_mut()
                     .find(|state| state.descriptor.id == update.worker_id)
                     .ok_or_else(|| anyhow::anyhow!("foreign worker recovery evidence"))?;
-                if !state.abandoned {
+                if !state.is_abandoned() {
                     self.commit_worker_transition(start, state, update.event, None)?;
                 }
             }
         }
-        if states.iter().all(|state| state.abandoned) {
+        if states.iter().all(|state| state.is_abandoned()) {
             for state in &states {
                 publish_worker_review(events, turn, start, state).await;
             }
@@ -234,10 +235,10 @@ impl<P: ModelProvider> SessionEngine<P> {
         // Interrupted prompts may already have reached the provider. Do not
         // resend their text. Preserve the fallback and require explicit retry.
         for state in &mut states {
-            if state.abandoned {
+            if state.is_abandoned() {
                 continue;
             }
-            if resume && state.image_capability.is_some() {
+            if resume && state.images.image_capability.is_some() {
                 self.commit_worker_transition(
                     start,
                     state,
@@ -248,13 +249,13 @@ impl<P: ModelProvider> SessionEngine<P> {
                     None,
                 )?;
             }
-            if let Some(input) = state.active.clone() {
+            if let Some(input) = state.inputs.active.clone() {
                 let event = WorkerReviewEvent::Interrupted {
                     generation: input.generation,
                 };
                 self.commit_worker_transition(start, state, event, None)?;
             }
-            if state.accepted_generation == 0 {
+            if state.inputs.accepted_generation == 0 {
                 self.commit_worker_transition(
                     start,
                     state,
@@ -309,7 +310,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                     let rejected_control = control.clone();
                     let reject = |detail| WorkerControlResult::rejected(rejected_control.clone(), detail);
                     if control.request_id.0.trim().is_empty() || control.request_id.0.len() > 128 {
-                        let _ = events.send(SessionEvent::WorkerControlResult { result: reject("invalid control request identity") }).await;
+                        let _ = events.send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { result: Box::new(reject("invalid control request identity")) })).await;
                         continue;
                     }
                     if let Some(prior) = results.get(&control.request_id) {
@@ -319,32 +320,32 @@ impl<P: ModelProvider> SessionEngine<P> {
                             same = matches_accepted_control(&prior.control, &control) => same,
                         };
                         let result = if same { prior.clone() } else { reject("request ID was already used for a different action") };
-                        let _ = events.send(SessionEvent::WorkerControlResult { result }).await;
+                        let _ = events.send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { result: Box::new(result) })).await;
                         continue;
                     }
                     let Some(index) = states.iter().position(|state| state.descriptor.id == control.target.worker_id) else {
-                        let _ = events.send(SessionEvent::WorkerControlResult { result: reject("foreign worker target") }).await;
+                        let _ = events.send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { result: Box::new(reject("foreign worker target")) })).await;
                         continue;
                     };
                     if control.target.run_id != start.run_id || control.target.turn_id != turn.id {
-                        let _ = events.send(SessionEvent::WorkerControlResult { result: reject("stale worker turn or run") }).await;
+                        let _ = events.send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { result: Box::new(reject("stale worker turn or run")) })).await;
                         continue;
                     }
                     let state = &states[index];
-                    if state.abandoned {
-                        let _ = events.send(SessionEvent::WorkerControlResult { result: reject("worker is permanently abandoned for this run") }).await;
+                    if state.is_abandoned() {
+                        let _ = events.send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { result: Box::new(reject("worker is permanently abandoned for this run")) })).await;
                         continue;
                     }
                     if let WorkerControlAction::SendFeedback { text } = &mut control.action {
-                        if text.has_images() && state.image_capability != Some(true) {
-                            let _ = events.send(SessionEvent::WorkerControlResult { result: reject("worker image capability is unsupported or not yet negotiated; draft was not accepted") }).await;
+                        if text.has_images() && state.images.image_capability != Some(true) {
+                            let _ = events.send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { result: Box::new(reject("worker image capability is unsupported or not yet negotiated; draft was not accepted")) })).await;
                             continue;
                         }
                         match super::prompt::prepare_new_prompt(std::mem::take(text), turn).await {
                             Ok(prepared) => *text = prepared,
                             Err(crate::session::turn::execution::Rejection::Cancelled) => return Err(Failure::Cancelled),
                             Err(error) => {
-                                let _ = events.send(SessionEvent::WorkerControlResult { result: reject(&format!("image preparation: {error:?}")) }).await;
+                                let _ = events.send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { result: Box::new(reject(&format!("image preparation: {error:?}"))) })).await;
                                 continue;
                             }
                         }
@@ -354,18 +355,18 @@ impl<P: ModelProvider> SessionEngine<P> {
                     let transition: Result<Option<WorkerReviewEvent>, String> = match &control.action {
                         WorkerControlAction::SendFeedback { text } => {
                             if let Err(error) = text.validate() { Err(error.to_string()) }
-                            else if text.has_images() && state.image_capability != Some(true) { Err("worker image capability is unsupported or not yet negotiated; draft was not accepted".into()) }
+                            else if text.has_images() && state.images.image_capability != Some(true) { Err("worker image capability is unsupported or not yet negotiated; draft was not accepted".into()) }
                             else if text.is_blank() || text.text_len() > MAX_WORKER_FEEDBACK_BYTES { Err("feedback requires text or an image, with at most 64 KiB of text".into()) }
                             else if let Err(error) = zevria_workflow::ensemble::validate_synthesis_image_budget(&start.prompt, states.as_slice(), Some(text)) { Err(format!("synthesis image evidence budget: {error}")) }
-                            else if state.pending.len() >= WORKER_CONTROL_CAPACITY { Err("worker feedback queue is full; draft was not accepted".into()) }
+                            else if state.inputs.pending.len() >= WORKER_CONTROL_CAPACITY { Err("worker feedback queue is full; draft was not accepted".into()) }
                             else {
-                                let input = WorkerInput { generation: state.accepted_generation + 1, request_id: control.request_id.clone(), kind: WorkerPromptKind::UserFeedback, text: text.clone() };
+                                let input = WorkerInput { generation: state.inputs.accepted_generation + 1, request_id: control.request_id.clone(), kind: WorkerPromptKind::UserFeedback, text: text.clone() };
                                 actor_command = Some(WorkerActorCommand::Prompt(input.clone()));
                                 Ok(Some(WorkerReviewEvent::InputAccepted { input }))
                             }
                         }
                         WorkerControlAction::Confirm { expected_revision } | WorkerControlAction::Baseline { expected_revision } => {
-                            if let Some(error) = &state.synthesis_error { Err(error.clone()) }
+                            if let Some(error) = &state.proposals.synthesis_error { Err(error.clone()) }
                             else if state.eligible_snapshot().map(|plan| &plan.revision) != Some(expected_revision) { Err("displayed revision is stale or not confirmable; wait for queued work and publish a fresh plan".into()) }
                             else if let Err(error) = zevria_workflow::ensemble::validate_synthesis_image_budget(&start.prompt, states.as_slice(), None) { Err(format!("synthesis image evidence budget: {error}")) }
                             else if let Err(error) = zevria_workflow::validate_worker_synthesis_payload(EnsembleWorkflow::Plan, &state.outcome(), launcher.max_synthesis_bytes_per_agent()) { Err(error.to_string()) }
@@ -377,7 +378,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                             }
                         }
                         WorkerControlAction::Unconfirm { expected_revision } => {
-                            if state.confirmation.as_ref().map(|receipt| &receipt.revision) != Some(expected_revision) { Err("worker is not confirmed at the displayed revision".into()) }
+                            if state.proposals.confirmation.as_ref().map(|receipt| &receipt.revision) != Some(expected_revision) { Err("worker is not confirmed at the displayed revision".into()) }
                             else { Ok(Some(WorkerReviewEvent::Withdrawn { request_id: control.request_id.clone() })) }
                         }
                         WorkerControlAction::Unbaseline { expected_revision } => {
@@ -393,10 +394,10 @@ impl<P: ModelProvider> SessionEngine<P> {
                         }
                         WorkerControlAction::Retry => {
                             if !state.quiescent() { Err("worker still has active or queued input".into()) }
-                            else if state.failed_image_input.is_some() && state.image_capability != Some(true) { Err("the failed image input is retained; reconnect to an image-capable worker before retrying".into()) }
+                            else if state.images.failed_image_input.is_some() && state.images.image_capability != Some(true) { Err("the failed image input is retained; reconnect to an image-capable worker before retrying".into()) }
                             else {
-                                let input = WorkerInput { generation: state.accepted_generation + 1, request_id: control.request_id.clone(), kind: WorkerPromptKind::RecoveryContinuation,
-                                    text: if let Some(failed) = &state.failed_image_input { failed.text.clone() } else if state.evidence.acp_session_id.is_none() { start.prompt.clone() } else { "Continue the interrupted planning interaction in this session. Publish the complete Markdown proposal when ready.".into() } };
+                                let input = WorkerInput { generation: state.inputs.accepted_generation + 1, request_id: control.request_id.clone(), kind: WorkerPromptKind::RecoveryContinuation,
+                                    text: if let Some(failed) = &state.images.failed_image_input { failed.text.clone() } else if state.evidence.acp_session_id.is_none() { start.prompt.clone() } else { "Continue the interrupted planning interaction in this session. Publish the complete Markdown proposal when ready.".into() } };
                                 actor_command = Some(WorkerActorCommand::Prompt(input.clone()));
                                 Ok(Some(WorkerReviewEvent::InputAccepted { input }))
                             }
@@ -404,7 +405,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                     };
                     let transition = match transition {
                         Ok(transition) => transition,
-                        Err(detail) => { let _ = events.send(SessionEvent::WorkerControlResult { result: reject(&detail) }).await; continue; }
+                        Err(detail) => { let _ = events.send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { result: Box::new(reject(&detail)) })).await; continue; }
                     };
                     let mut replacements = Vec::new();
                     let mut affected = vec![control.target.worker_id.clone()];
@@ -412,7 +413,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                         let changes = match zevria_workflow::validate_worker_review_event(states, &control.target.worker_id, event) {
                             Ok(changes) => changes,
                             Err(error) => {
-                                let _ = events.send(SessionEvent::WorkerControlResult { result: reject(&error) }).await;
+                                let _ = events.send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { result: Box::new(reject(&error)) })).await;
                                 continue;
                             }
                         };
@@ -432,11 +433,11 @@ impl<P: ModelProvider> SessionEngine<P> {
                     for (i, state) in &replacements { proposed[*i] = state; }
                     if matches!(control.action, WorkerControlAction::Confirm { .. } | WorkerControlAction::Baseline { .. })
                         && let Err(error) = zevria_workflow::validate_worker_synthesis_payload(EnsembleWorkflow::Plan, &proposed[index].outcome(), launcher.max_synthesis_bytes_per_agent()) {
-                        let _ = events.send(SessionEvent::WorkerControlResult { result: reject(&error.to_string()) }).await;
+                        let _ = events.send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { result: Box::new(reject(&error.to_string())) })).await;
                         continue;
                     }
-                    let seals = proposed.iter().any(|state| !state.abandoned)
-                        && proposed.iter().all(|state| state.abandoned || state.confirmed_plan().is_some());
+                    let seals = proposed.iter().any(|state| !state.is_abandoned())
+                        && proposed.iter().all(|state| state.is_abandoned() || state.confirmed_plan().is_some());
                     if seals || matches!(control.action, WorkerControlAction::SendFeedback { .. } | WorkerControlAction::Confirm { .. } | WorkerControlAction::Baseline { .. } | WorkerControlAction::Retry) {
                         let preflight = if seals {
                             let outcomes = proposed.iter().copied().map(WorkerReviewState::outcome).collect::<Vec<_>>();
@@ -449,7 +450,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                             self.preflight_potential_synthesis(start, proposed.iter().copied(), launcher.max_synthesis_bytes_per_agent(), turn).await
                         };
                         if let Err(error) = preflight {
-                            let _ = events.send(SessionEvent::WorkerControlResult { result: reject(&format!("synthesis evidence preflight: {error}")) }).await;
+                            let _ = events.send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { result: Box::new(reject(&format!("synthesis evidence preflight: {error}"))) })).await;
                             continue;
                         }
                     }
@@ -457,7 +458,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                     let mut result = WorkerControlResult { control: control.clone(), accepted: true, detail: match &control.action {
                         WorkerControlAction::SendFeedback { .. } => "Feedback durably accepted and queued on this worker session.",
                         WorkerControlAction::Confirm { .. } => "Exact proposal revision confirmed; reopenable until all participating workers confirm.",
-                        WorkerControlAction::Abandon => if states.iter().enumerate().all(|(other, state)| other == index || state.abandoned) {
+                        WorkerControlAction::Abandon => if states.iter().enumerate().all(|(other, state)| other == index || state.is_abandoned()) {
                             "Last worker abandoned; ensemble cancelled. No synthesis or Plan publication."
                         } else {
                             zevria_workflow::ensemble::WORKER_ABANDONMENT_REASON
@@ -469,7 +470,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                         WorkerControlAction::CancelPrompt => "Worker-local cancellation durably requested for this input generation.",
                     }.into() };
                     if matches!(control.action, WorkerControlAction::Baseline { .. })
-                        && let Some(previous) = states.iter().find(|state| state.baseline.is_some()) {
+                        && let Some(previous) = states.iter().find(|state| state.proposals.baseline.is_some()) {
                         result.detail.push_str(&format!(" Replaced baseline {} ({}); its confirmation was retained.", previous.descriptor.label, previous.descriptor.id));
                     }
                     if seals {
@@ -489,9 +490,9 @@ impl<P: ModelProvider> SessionEngine<P> {
                             abandon_actor(execution, &states[index], &control.request_id);
                         }
                         results.insert(control.request_id.clone(), result.clone());
-                        let _ = events.send(SessionEvent::WorkerControlResult { result }).await;
+                        let _ = events.send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { result: Box::new(result) })).await;
                         for state in states.iter_mut() {
-                            if !state.abandoned {
+                            if !state.is_abandoned() {
                                 state.apply(&WorkerReviewEvent::Sealed).map_err(anyhow::Error::msg)?;
                             }
                             publish_worker_review(events, turn, start, state).await;
@@ -508,7 +509,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                             let mirror = if worker_id == &control.target.worker_id { event.clone() }
                                 else { WorkerReviewEvent::BaselineCleared { request_id: control.request_id.clone() } };
                             if let Some(actor) = execution.commands.get(worker_id)
-                                && !states.iter().any(|state| &state.descriptor.id == worker_id && state.abandoned) {
+                                && !states.iter().any(|state| &state.descriptor.id == worker_id && state.is_abandoned()) {
                                 let _ = actor.send(WorkerActorCommand::Mirror(mirror));
                             }
                         }
@@ -516,14 +517,14 @@ impl<P: ModelProvider> SessionEngine<P> {
                         self.commit(TranscriptItem::Ensemble(Box::new(EnsembleRecord::ControlResult { run_id: start.run_id.clone(), result: result.clone() })))?;
                     }
                     results.insert(control.request_id.clone(), result.clone());
-                    let _ = events.send(SessionEvent::WorkerControlResult { result }).await;
+                    let _ = events.send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { result: Box::new(result) })).await;
                     for worker_id in &affected {
                         let state = states.iter().find(|state| &state.descriptor.id == worker_id).expect("affected worker");
                         publish_worker_review(events, turn, start, state).await;
                     }
-                    if states[index].abandoned {
+                    if states[index].is_abandoned() {
                         abandon_actor(execution, &states[index], &control.request_id);
-                        if states.iter().all(|state| state.abandoned) {
+                        if states.iter().all(|state| state.is_abandoned()) {
                             return Err(Failure::Cancelled);
                         }
                     }
@@ -535,7 +536,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 update = execution.updates.recv() => {
                     let update = update.ok_or_else(|| review_interrupted("worker update channel closed before confirmation"))?;
                     let state = states.iter_mut().find(|state| state.descriptor.id == update.worker_id).ok_or_else(|| anyhow::anyhow!("foreign worker update"))?;
-                    if state.abandoned || matches!(update.event, WorkerReviewEvent::Abandoned { .. } | WorkerReviewEvent::Confirmed { .. } | WorkerReviewEvent::BaselineMarked { .. } | WorkerReviewEvent::BaselineCleared { .. } | WorkerReviewEvent::Withdrawn { .. } | WorkerReviewEvent::Sealed) {
+                    if state.is_abandoned() || matches!(update.event, WorkerReviewEvent::Abandoned { .. } | WorkerReviewEvent::Confirmed { .. } | WorkerReviewEvent::BaselineMarked { .. } | WorkerReviewEvent::BaselineCleared { .. } | WorkerReviewEvent::Withdrawn { .. } | WorkerReviewEvent::Sealed) {
                         tracing::debug!(worker = %update.worker_id, "ignored excluded-worker update or worker-origin abandonment mirror");
                         continue;
                     }
@@ -556,11 +557,11 @@ impl<P: ModelProvider> SessionEngine<P> {
         limit: usize,
         turn: &TurnContext,
     ) -> Result<(), Failure> {
-        if state.abandoned {
+        if state.is_abandoned() {
             return Ok(());
         }
         let mut checked = state.clone();
-        checked.synthesis_error = None;
+        checked.proposals.synthesis_error = None;
         let error = if let Some(snapshot) = checked.eligible_snapshot() {
             let direct_error = if start.publishes_confirmed_worker_plan() {
                 DirectWorkerPlan::validate(snapshot.plan.markdown.clone().unwrap_or_default())
@@ -579,8 +580,11 @@ impl<P: ModelProvider> SessionEngine<P> {
                 },
                 revision: snapshot.revision.clone(),
             };
-            checked.confirmation.get_or_insert_with(|| marking.clone());
-            checked.baseline = Some(marking);
+            checked
+                .proposals
+                .confirmation
+                .get_or_insert_with(|| marking.clone());
+            checked.proposals.baseline = Some(marking);
             direct_error.or_else(|| {
                 zevria_workflow::validate_worker_synthesis_payload(
                     EnsembleWorkflow::Plan,
@@ -593,7 +597,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         } else {
             None
         };
-        if state.synthesis_error != error {
+        if state.proposals.synthesis_error != error {
             self.commit_worker_transition(
                 start,
                 state,
@@ -676,7 +680,9 @@ async fn settle_worker_controls(
             )
         };
         let _ = events
-            .send(SessionEvent::WorkerControlResult { result })
+            .send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult {
+                result: Box::new(result),
+            }))
             .await;
     }
     // Reject already-routed controls ordered after the seal; never silently
@@ -699,7 +705,9 @@ async fn settle_worker_controls(
             )
         };
         let _ = events
-            .send(SessionEvent::WorkerControlResult { result })
+            .send(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult {
+                result: Box::new(result),
+            }))
             .await;
     }
 }
@@ -827,14 +835,14 @@ async fn publish_worker_review(
     state: &WorkerReviewState,
 ) {
     let _ = events
-        .send(SessionEvent::WorkerReviewUpdated {
+        .send(SessionEvent::Ensemble(EnsembleEvent::WorkerReviewUpdated {
             target: WorkerControlTarget {
                 turn_id: turn.id,
                 run_id: start.run_id.clone(),
                 worker_id: state.descriptor.id.clone(),
             },
             state: Box::new(state.clone()),
-        })
+        }))
         .await;
 }
 

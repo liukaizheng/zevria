@@ -1,4 +1,6 @@
 use super::*;
+use zevria_session_api::SessionStreamState;
+use zevria_session_api::TurnEvent;
 
 #[path = "inline_web_interaction_tests.rs"]
 mod interaction;
@@ -87,13 +89,13 @@ fn visible(conversation: &ConversationState) -> Vec<String> {
 fn publish(app: &mut App, attempt: ResponseAttempt) {
     apply_turn_event(
         app,
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: AssistantStreamSnapshot {
+        SessionStreamState::new(
+            TEST_TURN_ID,
+            AssistantStreamSnapshot {
                 message: Some(Message::assistant("must not duplicate the generic tail")),
                 attempt: Some(attempt),
             },
-        },
+        ),
     );
 }
 
@@ -102,15 +104,15 @@ fn hosted_header_stays_live_while_its_native_command_executes() {
     let mut app = App::new();
     let now = Instant::now();
     for event in [
-        SessionEvent::TurnStarted {
+        SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("search then run"),
             mode: SessionMode::Build,
-        },
-        SessionEvent::ModelCallStarted {
+        }),
+        SessionEvent::Turn(TurnEvent::ModelCallStarted {
             turn_id: TEST_TURN_ID,
             call: 1,
-        },
+        }),
     ] {
         assert!(app.reduce_at(event, now).is_empty());
     }
@@ -124,21 +126,21 @@ fn hosted_header_stays_live_while_its_native_command_executes() {
     ));
     attempt.close(Outcome::Completed);
     assert!(
-        app.reduce_at(
-            SessionEvent::AssistantStreamUpdated {
-                turn_id: TEST_TURN_ID,
-                snapshot: AssistantStreamSnapshot {
+        app.apply_stream_at(
+            SessionStreamState::new(
+                TEST_TURN_ID,
+                AssistantStreamSnapshot {
                     message: None,
                     attempt: Some(attempt.clone())
-                },
-            },
+                }
+            ),
             now + Duration::from_secs(1)
         )
         .is_empty()
     );
     assert!(
         app.reduce_at(
-            SessionEvent::Intermediate {
+            SessionEvent::Turn(TurnEvent::Intermediate {
                 turn_id: TEST_TURN_ID,
                 attempt_id: Some(attempt.id.clone()),
                 message: assistant_message(vec![tool_call(
@@ -147,7 +149,7 @@ fn hosted_header_stays_live_while_its_native_command_executes() {
                     "command",
                     json!({"command":"slow command"})
                 )]),
-            },
+            }),
             now + Duration::from_secs(2)
         )
         .is_empty()
@@ -168,7 +170,7 @@ fn hosted_header_stays_live_while_its_native_command_executes() {
     }
     assert!(
         app.reduce_at(
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 turn_id: TEST_TURN_ID,
                 message: Message::tool_result(
                     rig_core::message::CallId::from_wire("slow"),
@@ -182,7 +184,7 @@ fn hosted_header_stays_live_while_its_native_command_executes() {
                     ToolCallOutcome::Success,
                     Vec::new()
                 )],
-            },
+            }),
             now + Duration::from_secs(70)
         )
         .is_empty()
@@ -190,10 +192,10 @@ fn hosted_header_stays_live_while_its_native_command_executes() {
     attempt.touch();
     assert!(
         app.reduce_at(
-            SessionEvent::ResponseAttemptUpdated {
+            SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated {
                 turn_id: TEST_TURN_ID,
-                attempt
-            },
+                attempt: Box::new(attempt)
+            }),
             now + Duration::from_secs(90)
         )
         .is_empty()
@@ -208,15 +210,15 @@ fn hosted_header_stays_live_while_its_native_command_executes() {
 #[test]
 fn native_web_content_replaces_pending_header_and_keeps_its_call_on_revisions() {
     let mut app = App::new();
-    app.reduce_without_effects(SessionEvent::TurnStarted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
         turn_id: TEST_TURN_ID,
         message: Message::user("search"),
         mode: SessionMode::Build,
-    });
-    app.reduce_without_effects(SessionEvent::ModelCallStarted {
+    }));
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::ModelCallStarted {
         turn_id: TEST_TURN_ID,
         call: 1,
-    });
+    }));
     assert!(app.render_parts().pending_header);
     let mut attempt = ordered_attempt();
     attempt.presentation.clear(); // Web activity alone owns the current header.
@@ -228,20 +230,20 @@ fn native_web_content_replaces_pending_header_and_keeps_its_call_on_revisions() 
             .count(),
         1
     );
-    app.reduce_without_effects(SessionEvent::Intermediate {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Intermediate {
         turn_id: TEST_TURN_ID,
         message: Message::assistant("canonical"),
         attempt_id: Some(attempt.id.clone()),
-    });
-    app.reduce_without_effects(SessionEvent::ModelCallStarted {
+    }));
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::ModelCallStarted {
         turn_id: TEST_TURN_ID,
         call: 2,
-    });
+    }));
     attempt.close(Outcome::Completed);
-    app.reduce_without_effects(SessionEvent::ResponseAttemptUpdated {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated {
         turn_id: TEST_TURN_ID,
-        attempt,
-    });
+        attempt: Box::new(attempt),
+    }));
     let text = rendered_text(&mut app, 120, 40);
     assert_eq!(
         text.matches("● Assistant · #(1 - 1)").count(),
@@ -249,11 +251,11 @@ fn native_web_content_replaces_pending_header_and_keeps_its_call_on_revisions() 
         "old activity cannot be relabeled"
     );
     assert_eq!(text.matches("● Assistant · #(1 - 2)").count(), 1);
-    app.reduce_without_effects(SessionEvent::TurnCompleted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Completed {
         turn_id: TEST_TURN_ID,
         message: Message::assistant("final"),
         attempt_id: None,
-    });
+    }));
     assert_eq!(
         rendered_text(&mut app, 120, 40)
             .matches("● Assistant · #(1 - 2)")
@@ -269,15 +271,15 @@ fn hosted_headers_keep_ticking_in_history_without_rebuilding_bodies_and_freeze_o
             let mut app = App::new();
             let now = Instant::now();
             for event in [
-                SessionEvent::TurnStarted {
+                SessionEvent::Turn(TurnEvent::Started {
                     turn_id: TEST_TURN_ID,
                     message: Message::user("search"),
                     mode: SessionMode::Build,
-                },
-                SessionEvent::ModelCallStarted {
+                }),
+                SessionEvent::Turn(TurnEvent::ModelCallStarted {
                     turn_id: TEST_TURN_ID,
                     call: 1,
-                },
+                }),
             ] {
                 assert!(app.reduce_at(event, now).is_empty());
             }
@@ -286,14 +288,14 @@ fn hosted_headers_keep_ticking_in_history_without_rebuilding_bodies_and_freeze_o
                 attempt.presentation.clear();
             }
             assert!(
-                app.reduce_at(
-                    SessionEvent::AssistantStreamUpdated {
-                        turn_id: TEST_TURN_ID,
-                        snapshot: AssistantStreamSnapshot {
+                app.apply_stream_at(
+                    SessionStreamState::new(
+                        TEST_TURN_ID,
+                        AssistantStreamSnapshot {
                             message: None,
                             attempt: Some(attempt.clone())
-                        },
-                    },
+                        }
+                    ),
                     now + Duration::from_secs(1)
                 )
                 .is_empty()
@@ -317,11 +319,11 @@ fn hosted_headers_keep_ticking_in_history_without_rebuilding_bodies_and_freeze_o
             if intermediate {
                 assert!(
                     app.reduce_at(
-                        SessionEvent::Intermediate {
+                        SessionEvent::Turn(TurnEvent::Intermediate {
                             turn_id: TEST_TURN_ID,
                             message: Message::assistant("canonical"),
                             attempt_id: Some(attempt.id.clone()),
-                        },
+                        }),
                         now + Duration::from_secs(70)
                     )
                     .is_empty()
@@ -329,10 +331,10 @@ fn hosted_headers_keep_ticking_in_history_without_rebuilding_bodies_and_freeze_o
             }
             assert!(
                 app.reduce_at(
-                    SessionEvent::ModelCallStarted {
+                    SessionEvent::Turn(TurnEvent::ModelCallStarted {
                         turn_id: TEST_TURN_ID,
                         call: 2
-                    },
+                    }),
                     now + Duration::from_secs(80)
                 )
                 .is_empty()
@@ -340,10 +342,10 @@ fn hosted_headers_keep_ticking_in_history_without_rebuilding_bodies_and_freeze_o
             attempt.close(Outcome::Completed);
             assert!(
                 app.reduce_at(
-                    SessionEvent::ResponseAttemptUpdated {
+                    SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated {
                         turn_id: TEST_TURN_ID,
-                        attempt
-                    },
+                        attempt: Box::new(attempt)
+                    }),
                     now + Duration::from_secs(82)
                 )
                 .is_empty()
@@ -354,11 +356,11 @@ fn hosted_headers_keep_ticking_in_history_without_rebuilding_bodies_and_freeze_o
             assert!(text.contains("● Assistant · #(1 - 2) · 2s"));
             assert!(
                 app.reduce_at(
-                    SessionEvent::TurnCompleted {
+                    SessionEvent::Turn(TurnEvent::Completed {
                         turn_id: TEST_TURN_ID,
                         message: Message::assistant("final"),
                         attempt_id: None,
-                    },
+                    }),
                     now + Duration::from_secs(85)
                 )
                 .is_empty()
@@ -378,39 +380,39 @@ fn every_accepted_terminal_freezes_retained_hosted_output_and_stale_terminals_do
         let mut app = App::new();
         let now = Instant::now();
         for event in [
-            SessionEvent::TurnStarted {
+            SessionEvent::Turn(TurnEvent::Started {
                 turn_id: TEST_TURN_ID,
                 message: Message::user("search"),
                 mode: SessionMode::Build,
-            },
-            SessionEvent::ModelCallStarted {
+            }),
+            SessionEvent::Turn(TurnEvent::ModelCallStarted {
                 turn_id: TEST_TURN_ID,
                 call: 1,
-            },
+            }),
         ] {
             assert!(app.reduce_at(event, now).is_empty());
         }
         let header = app.render_parts().assistant_header.unwrap();
         let attempt = ordered_attempt();
         assert!(
-            app.reduce_at(
-                SessionEvent::AssistantStreamUpdated {
-                    turn_id: TEST_TURN_ID,
-                    snapshot: AssistantStreamSnapshot {
+            app.apply_stream_at(
+                SessionStreamState::new(
+                    TEST_TURN_ID,
+                    AssistantStreamSnapshot {
                         message: None,
                         attempt: Some(attempt.clone())
-                    },
-                },
+                    }
+                ),
                 now + Duration::from_secs(2)
             )
             .is_empty()
         );
         assert!(
             app.reduce_at(
-                SessionEvent::TurnFailed {
+                SessionEvent::Turn(TurnEvent::Failed {
                     turn_id: TurnId::new(99),
                     error: "stale failure".into()
-                },
+                }),
                 now + Duration::from_secs(4)
             )
             .is_empty()
@@ -418,25 +420,25 @@ fn every_accepted_terminal_freezes_retained_hosted_output_and_stale_terminals_do
         app.observe_clock(now + Duration::from_secs(6));
         assert!(rendered_text(&mut app, 120, 40).contains("● Assistant · #(1 - 1) · 6s"));
         let event = match terminal {
-            0 => SessionEvent::TurnCompleted {
+            0 => SessionEvent::Turn(TurnEvent::Completed {
                 turn_id: TEST_TURN_ID,
                 message: Message::assistant("canonical"),
                 attempt_id: Some(attempt.id),
-            },
-            1 => SessionEvent::TurnRecovered {
+            }),
+            1 => SessionEvent::Turn(TurnEvent::Recovered {
                 turn_id: TEST_TURN_ID,
-            },
-            2 => SessionEvent::TurnFailed {
+            }),
+            2 => SessionEvent::Turn(TurnEvent::Failed {
                 turn_id: TEST_TURN_ID,
                 error: "failed".into(),
-            },
-            3 => SessionEvent::TurnRejected {
+            }),
+            3 => SessionEvent::Turn(TurnEvent::Rejected {
                 turn_id: TEST_TURN_ID,
                 error: "rejected".into(),
-            },
-            _ => SessionEvent::TurnCancelled {
+            }),
+            _ => SessionEvent::Turn(TurnEvent::Cancelled {
                 turn_id: TEST_TURN_ID,
-            },
+            }),
         };
         assert!(
             app.reduce_at(event, now + Duration::from_secs(7))
@@ -679,11 +681,11 @@ fn live_committed_and_restored_responses_have_identical_order_without_sidecars()
     let before = visible(app.conversation_projection_mut());
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnCompleted {
+        SessionEvent::Turn(TurnEvent::Completed {
             turn_id: TEST_TURN_ID,
             message: record.message().unwrap().clone(),
             attempt_id: Some(attempt.id),
-        },
+        }),
     );
     assert_eq!(visible(app.conversation_projection_mut()), before);
     let mut restored = App::new();
@@ -706,10 +708,7 @@ fn headings_follow_visible_runs_across_committed_and_streamed_boundaries() {
     app.seed_history_entry(history_message(message("two")));
     apply_turn_event(
         &mut app,
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: (message("three")).into(),
-        },
+        SessionStreamState::new(TEST_TURN_ID, (message("three")).into()),
     );
     assert_eq!(
         rendered_text(&mut app, 80, 20).matches("reasoning").count(),

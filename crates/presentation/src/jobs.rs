@@ -1,7 +1,7 @@
 //! Ephemeral root command jobs, never restored from transcript or turn-gated.
 use crate::{shell, status_icon::StatusIcon};
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::HashMap,
     time::{Duration, Instant},
 };
 use zevria_foundation::{
@@ -9,6 +9,7 @@ use zevria_foundation::{
     CommandJobSnapshot, CommandJobStatus, CommandJobView, RETAINED_FINISHED_COMMAND_JOBS,
     command_job_duration, command_job_line_for,
 };
+use zevria_session_api::JobEvent;
 use zevria_session_api::{
     CommandControl, CommandControlAction as Request, CommandControlResult as Reply, ControlCommand,
     SessionCommand, SessionEvent,
@@ -116,6 +117,26 @@ pub enum JobsMessage {
     Rejected(String),
 }
 
+/// Tails are the only per-inspection data kept outside the snapshot store.
+#[derive(Debug)]
+pub struct JobOutput {
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+    pub stdout_bytes: usize,
+    pub stderr_bytes: usize,
+}
+
+impl From<&CommandJobView> for JobOutput {
+    fn from(view: &CommandJobView) -> Self {
+        Self {
+            stdout_tail: view.stdout_tail.clone(),
+            stderr_tail: view.stderr_tail.clone(),
+            stdout_bytes: view.snapshot.stdout_bytes,
+            stderr_bytes: view.snapshot.stderr_bytes,
+        }
+    }
+}
+
 /// The session-global command control surface shared by the desktop and TUI.
 /// Inspect reads bounded, non-consuming tails; controls only target the given job.
 #[derive(Debug)]
@@ -124,14 +145,19 @@ pub struct JobsInspector {
     open: bool,
     jobs: Vec<CommandJobSnapshot>,
     inspect: Option<CommandJobId>,
-    detail: Option<CommandJobView>,
+    detail: Option<JobOutput>,
     pending: HashMap<String, Purpose>,
-    next_id: u64,
     generation: u64,
     last_refresh: Option<Instant>,
     refresh_again: bool,
     message: Option<JobsMessage>,
-    pub commands: VecDeque<SessionCommand>,
+    pub commands: crate::outbox::CommandOutbox,
+}
+
+impl Default for JobsInspector {
+    fn default() -> Self {
+        Self::new("jobs-")
+    }
 }
 
 impl JobsInspector {
@@ -143,12 +169,11 @@ impl JobsInspector {
             inspect: None,
             detail: None,
             pending: HashMap::new(),
-            next_id: 0,
             generation: 0,
             last_refresh: None,
             refresh_again: false,
             message: None,
-            commands: VecDeque::new(),
+            commands: Default::default(),
         }
     }
 
@@ -160,11 +185,37 @@ impl JobsInspector {
         &self.jobs
     }
 
+    pub fn running_count(&self) -> usize {
+        self.jobs
+            .iter()
+            .filter(|job| !job.status.is_terminal())
+            .count()
+    }
+
+    pub fn job_for_call(&self, call: &str) -> Option<&CommandJobSnapshot> {
+        self.jobs
+            .iter()
+            .rev()
+            .find(|job| job.call_id.as_deref() == Some(call))
+    }
+
+    pub fn disconnect(&mut self) {
+        self.open = false;
+        self.inspect = None;
+        self.detail = None;
+        self.pending.clear();
+        self.commands.clear();
+        self.refresh_again = false;
+        self.last_refresh = None;
+        self.message = None;
+        self.prune();
+    }
+
     pub fn inspected(&self) -> Option<&CommandJobId> {
         self.inspect.as_ref()
     }
 
-    pub fn detail(&self) -> Option<&CommandJobView> {
+    pub fn detail(&self) -> Option<&JobOutput> {
         self.detail.as_ref()
     }
 
@@ -240,8 +291,7 @@ impl JobsInspector {
         if self.pending.len() >= 32 {
             return false;
         }
-        self.next_id += 1;
-        let request_id = format!("{}{}", self.prefix, self.next_id);
+        let request_id = crate::outbox::RequestIdAllocator::allocate(self.prefix);
         self.pending.insert(request_id.clone(), purpose);
         self.commands
             .push_back(SessionCommand::Control(ControlCommand::Command(
@@ -284,15 +334,16 @@ impl JobsInspector {
         }
     }
 
-    fn update(&mut self, job: CommandJobSnapshot) {
+    fn update(&mut self, job: &CommandJobSnapshot, observe: &mut impl FnMut(&CommandJobSnapshot)) {
         if let Some(old) = self.jobs.iter_mut().find(|j| j.id == job.id) {
             if old.status.is_terminal() && !job.status.is_terminal() {
                 return;
             }
-            *old = job;
+            old.clone_from(job);
         } else {
-            self.jobs.push(job);
+            self.jobs.push(job.clone());
         }
+        observe(job);
         self.jobs.sort_by_key(|j| j.started_at);
         self.prune();
     }
@@ -327,17 +378,26 @@ impl JobsInspector {
 
     /// Apply job events and correlated replies. Closed-surface control failures
     /// go back to the caller for display in the conversation.
-    pub fn event(&mut self, event: &SessionEvent) -> Option<String> {
+    #[cfg(test)]
+    fn event(&mut self, event: &SessionEvent) -> Option<String> {
+        self.reduce(event, |_| {})
+    }
+
+    pub(crate) fn reduce(
+        &mut self,
+        event: &SessionEvent,
+        mut observe: impl FnMut(&CommandJobSnapshot),
+    ) -> Option<String> {
         match event {
-            SessionEvent::CommandJobUpdated { job } => {
+            SessionEvent::Job(JobEvent::Updated { job }) => {
                 self.generation = self.generation.wrapping_add(1);
-                self.update(job.clone());
+                self.update(job, &mut observe);
                 self.refresh();
             }
-            SessionEvent::CommandControlResult { request_id, result } => {
+            SessionEvent::Job(JobEvent::ControlResult { request_id, result }) => {
                 let purpose = self.pending.remove(request_id)?;
                 let mut notice = None;
-                match (&purpose, result) {
+                match (&purpose, result.as_ref()) {
                     (Purpose::Inspect(id, generation), Reply::Inspected(views))
                         if *generation == self.generation =>
                     {
@@ -346,11 +406,14 @@ impl JobsInspector {
                                 .retain(|j| views.iter().any(|v| v.snapshot.id == j.id));
                         }
                         for view in views {
-                            self.update(view.snapshot.clone());
+                            self.update(&view.snapshot, &mut observe);
                         }
                         if self.open && id == &self.inspect {
                             self.detail = id.as_ref().and_then(|id| {
-                                views.iter().find(|v| &v.snapshot.id == id).cloned()
+                                views
+                                    .iter()
+                                    .find(|v| &v.snapshot.id == id)
+                                    .map(JobOutput::from)
                             });
                         }
                     }
@@ -360,7 +423,7 @@ impl JobsInspector {
                     (Purpose::Control(generation), Reply::Accepted(job)) => {
                         if *generation == self.generation {
                             self.generation = self.generation.wrapping_add(1);
-                            self.update(job.clone());
+                            self.update(job, &mut observe);
                         }
                         if self.open {
                             self.message = Some(JobsMessage::Accepted);
@@ -466,61 +529,6 @@ pub fn tail_byte_label(bytes: usize) -> String {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct CommandJobsState {
-    jobs: BTreeMap<CommandJobId, CommandJobSnapshot>,
-    calls: HashMap<String, CommandJobId>,
-}
-impl CommandJobsState {
-    pub fn update(&mut self, job: CommandJobSnapshot) {
-        if self
-            .jobs
-            .get(&job.id)
-            .is_some_and(|old| old.status.is_terminal() && !job.status.is_terminal())
-        {
-            return;
-        }
-        if let Some(call) = &job.call_id {
-            self.calls.insert(call.clone(), job.id.clone());
-        }
-        self.jobs.insert(job.id.clone(), job);
-        let mut finished: Vec<_> = self
-            .jobs
-            .values()
-            .filter(|j| j.status.is_terminal())
-            .map(|j| (j.finished_at, j.id.clone(), j.mode))
-            .collect();
-        finished.sort_by_key(|j| j.0);
-        let mut background = finished
-            .iter()
-            .filter(|j| j.2 == CommandJobMode::Background)
-            .count();
-        for (_, id, mode) in finished {
-            if mode == CommandJobMode::Foreground || background > RETAINED_FINISHED_COMMAND_JOBS {
-                if mode == CommandJobMode::Background {
-                    background -= 1;
-                }
-                if let Some(job) = self.jobs.remove(&id)
-                    && let Some(call) = job.call_id
-                {
-                    self.calls.remove(&call);
-                }
-            }
-        }
-    }
-    pub fn iter(&self) -> impl Iterator<Item = &CommandJobSnapshot> {
-        self.jobs.values()
-    }
-    pub fn running_count(&self) -> usize {
-        self.jobs
-            .values()
-            .filter(|j| !j.status.is_terminal())
-            .count()
-    }
-    pub fn job_for_call(&self, call: &str) -> Option<&CommandJobSnapshot> {
-        self.calls.get(call).and_then(|id| self.jobs.get(id))
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,10 +574,10 @@ mod tests {
         request: CommandControl,
         result: Reply,
     ) -> Option<String> {
-        inspector.event(&SessionEvent::CommandControlResult {
+        inspector.event(&SessionEvent::Job(JobEvent::ControlResult {
             request_id: request.request_id,
-            result,
-        })
+            result: Box::new(result),
+        }))
     }
 
     fn view(snapshot: CommandJobSnapshot, stdout: &str) -> CommandJobView {
@@ -588,7 +596,7 @@ mod tests {
             job.id = CommandJobId::new(format!("job-{n}"));
             job.started_at += Duration::from_secs(10 - n);
             exited(&mut job, 0);
-            inspector.event(&SessionEvent::CommandJobUpdated { job });
+            inspector.event(&SessionEvent::Job(JobEvent::Updated { job: Box::new(job) }));
         }
         assert_eq!(inspector.jobs().len(), 8);
         assert_eq!(inspector.jobs()[0].id, CommandJobId::new("job-7"));
@@ -600,10 +608,12 @@ mod tests {
         inspector.show();
         let first = request(&mut inspector);
         let stale = running(CommandJobMode::Foreground);
-        inspector.event(&SessionEvent::CommandJobUpdated { job: stale.clone() });
+        inspector.event(&SessionEvent::Job(JobEvent::Updated {
+            job: Box::new(stale.clone()),
+        }));
         let mut job = stale.clone();
         exited(&mut job, 0);
-        inspector.event(&SessionEvent::CommandJobUpdated { job });
+        inspector.event(&SessionEvent::Job(JobEvent::Updated { job: Box::new(job) }));
         reply(
             &mut inspector,
             first,
@@ -625,7 +635,8 @@ mod tests {
         assert!(JobsInspector::can_background(&job));
         inspector.move_to_background(job.id.clone());
         let background = request(&mut inspector);
-        assert_eq!(background.request_id, "desktop.jobs.1");
+        assert!(background.request_id.starts_with("desktop.jobs."));
+        let background_id = background.request_id.clone();
         assert!(matches!(&background.action, Request::MoveToBackground { id } if id == &job.id));
         job.mode = CommandJobMode::Background;
         assert!(reply(&mut inspector, background, Reply::Accepted(job.clone())).is_none());
@@ -634,16 +645,17 @@ mod tests {
 
         inspector.terminate(job.id.clone());
         let stop = request(&mut inspector);
+        assert_ne!(stop.request_id, background_id);
         assert!(matches!(&stop.action, Request::Terminate { id } if id == &job.id));
         let rejected = Reply::Rejected {
             message: "job unavailable".into(),
         };
         assert!(
             inspector
-                .event(&SessionEvent::CommandControlResult {
+                .event(&SessionEvent::Job(JobEvent::ControlResult {
                     request_id: "tui.jobs.2".into(),
-                    result: rejected.clone(),
-                })
+                    result: Box::new(rejected.clone()),
+                }))
                 .is_none()
         );
         assert_eq!(
@@ -871,7 +883,9 @@ mod tests {
                 stdout_bytes: 0,
                 stderr_bytes: 0,
             };
-            model.reduce(zevria_session_api::SessionEvent::CommandJobUpdated { job: job.clone() });
+            model.reduce(zevria_session_api::SessionEvent::Job(JobEvent::Updated {
+                job: Box::new(job.clone()),
+            }));
             assert_eq!(model.running_job_count(), 1);
             let mut done = job;
             done.status = CommandJobStatus::Exited {
@@ -880,7 +894,9 @@ mod tests {
                 signal: None,
             };
             done.finished_at = Some(std::time::SystemTime::now());
-            model.reduce(zevria_session_api::SessionEvent::CommandJobUpdated { job: done });
+            model.reduce(zevria_session_api::SessionEvent::Job(JobEvent::Updated {
+                job: Box::new(done),
+            }));
         }
         assert_eq!(model.running_job_count(), 0);
         assert_eq!(model.jobs().iter().count(), 8);

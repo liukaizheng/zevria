@@ -15,11 +15,10 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 use std::time::Instant;
-use zevria_foundation::CommandJobSnapshot;
+use zevria_foundation::{CommandJobId, CommandJobSnapshot};
 use zevria_presentation::jobs::{
     JobRow, JobsInspector, JobsMessage, summary_title, tail_byte_label, terminal_tail_text,
 };
-use zevria_session_api::SessionEvent;
 use zevria_tui_widgets::overlay::{ListAction, ListNav, modal};
 
 pub(crate) fn job_ink(icon: StatusIcon) -> Color {
@@ -33,7 +32,6 @@ pub(crate) fn job_ink(icon: StatusIcon) -> Color {
 }
 
 pub(crate) struct JobsOverlay {
-    pub inspector: JobsInspector,
     follow: bool,
     nav: ListNav,
     keys: ChordState,
@@ -43,7 +41,6 @@ pub(crate) struct JobsOverlay {
 impl Default for JobsOverlay {
     fn default() -> Self {
         Self {
-            inspector: JobsInspector::new("tui.jobs."),
             follow: false,
             nav: ListNav::default(),
             keys: ChordState::default(),
@@ -53,18 +50,14 @@ impl Default for JobsOverlay {
 }
 
 impl JobsOverlay {
-    pub fn is_open(&self) -> bool {
-        self.inspector.is_open()
-    }
-
-    pub fn show(&mut self) {
-        if !self.is_open() {
+    pub fn show(&mut self, inspector: &mut JobsInspector) {
+        if !inspector.is_open() {
             self.opened_at = Instant::now();
             self.follow = false;
             self.keys.clear();
             self.nav.request_reveal();
             self.invalidate_geometry();
-            self.inspector.show();
+            inspector.show();
         }
     }
 
@@ -72,28 +65,28 @@ impl JobsOverlay {
         self.nav.invalidate_geometry();
     }
 
-    fn selected(&self) -> Option<&CommandJobSnapshot> {
-        if let Some(id) = self.inspector.inspected() {
-            self.inspector.jobs().iter().find(|job| &job.id == id)
+    fn selected<'a>(&self, inspector: &'a JobsInspector) -> Option<&'a CommandJobSnapshot> {
+        if let Some(id) = inspector.inspected() {
+            inspector.jobs().iter().find(|job| &job.id == id)
         } else {
-            self.inspector.jobs().get(self.nav.selected)
+            inspector.jobs().get(self.nav.selected)
         }
     }
 
-    pub fn context(&self) -> KeyContext {
-        if self.inspector.inspected().is_some() {
+    pub fn context(&self, inspector: &JobsInspector) -> KeyContext {
+        if inspector.inspected().is_some() {
             KeyContext::JobsInspect
         } else {
             KeyContext::JobsList
         }
     }
 
-    pub fn hint_eligibility(&self) -> Eligibility {
+    pub fn hint_eligibility(&self, inspector: &JobsInspector) -> Eligibility {
         let mut hints = Eligibility::default();
         hints
             .labels
             .extend([(Action::Confirm, "inspect"), (Action::Back, "list")]);
-        let job = self.selected();
+        let job = self.selected(inspector);
         if job.is_none() {
             hints.disabled.push(Action::Confirm);
         }
@@ -106,22 +99,24 @@ impl JobsOverlay {
         hints
     }
 
-    pub fn event(&mut self, event: &SessionEvent) -> Option<String> {
-        if !matches!(
-            event,
-            SessionEvent::CommandJobUpdated { .. } | SessionEvent::CommandControlResult { .. }
-        ) {
-            return None;
-        }
-        let inspecting = self.inspector.inspected().is_some();
-        let selected = self.selected().map(|job| job.id.clone());
-        let notice = self.inspector.event(event);
-        if self.inspector.inspected().is_none() {
+    pub fn selection_anchor(&self, inspector: &JobsInspector) -> (bool, Option<CommandJobId>) {
+        (
+            inspector.inspected().is_some(),
+            self.selected(inspector).map(|job| job.id.clone()),
+        )
+    }
+
+    pub fn reconcile(
+        &mut self,
+        inspector: &JobsInspector,
+        (inspecting, selected): (bool, Option<CommandJobId>),
+    ) {
+        if inspector.inspected().is_none() {
             if inspecting {
                 self.return_to_list();
             }
             if let Some(id) = selected
-                && let Some(index) = self.inspector.jobs().iter().position(|job| job.id == id)
+                && let Some(index) = inspector.jobs().iter().position(|job| job.id == id)
                 && index != self.nav.selected
             {
                 self.nav.selected = index;
@@ -130,9 +125,8 @@ impl JobsOverlay {
             self.nav.selected = self
                 .nav
                 .selected
-                .min(self.inspector.jobs().len().saturating_sub(1));
+                .min(inspector.jobs().len().saturating_sub(1));
         }
-        notice
     }
 
     fn return_to_list(&mut self) {
@@ -141,64 +135,70 @@ impl JobsOverlay {
         self.nav.request_reveal();
     }
 
-    pub fn handle_input(&mut self, key: KeyEvent) {
-        let Some(action) = self.keys.resolve(self.context(), key) else {
+    pub fn handle_input(&mut self, inspector: &mut JobsInspector, key: KeyEvent) {
+        let Some(action) = self.keys.resolve(self.context(inspector), key) else {
             return;
         };
-        if self.hint_eligibility().disabled.contains(&action) {
+        if self.hint_eligibility(inspector).disabled.contains(&action) {
             return;
         }
         match action {
-            Action::Cancel | Action::Close => self.inspector.close(),
+            Action::Cancel | Action::Close => inspector.close(),
             Action::Back => {
-                self.inspector.back();
+                inspector.back();
                 self.return_to_list();
             }
-            Action::Confirm if self.inspector.inspected().is_none() => {
-                if let Some(job) = self.selected() {
-                    self.inspector.inspect(job.id.clone());
+            Action::Confirm if inspector.inspected().is_none() => {
+                if let Some(job) = self.selected(inspector) {
+                    inspector.inspect(job.id.clone());
                     self.follow = true;
                 }
             }
             Action::Terminate | Action::MoveToBackground => {
-                if let Some(job) = self.selected() {
+                if let Some(job) = self.selected(inspector) {
                     let id = job.id.clone();
                     if action == Action::Terminate {
-                        self.inspector.terminate(id);
+                        inspector.terminate(id);
                     } else {
-                        self.inspector.move_to_background(id);
+                        inspector.move_to_background(id);
                     }
                 }
             }
             _ => {
                 if let Some(action) = action.list_action() {
-                    if self.inspector.inspected().is_some() {
+                    if inspector.inspected().is_some() {
                         self.nav.pan(action);
                         self.follow = action == ListAction::End
                             || self.nav.viewport.top() >= self.nav.viewport.max_top();
                     } else {
-                        self.nav.handle(action, self.inspector.jobs().len());
+                        self.nav.handle(action, inspector.jobs().len());
                     }
                 }
             }
         }
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, inspector: &JobsInspector, frame: &mut Frame, area: Rect) {
         let spin = ((self.opened_at.elapsed().as_millis() / 250) % 4) as usize;
         let title_width = usize::from(area.width.saturating_sub(2));
-        let inspected = self.inspector.inspected();
-        let row = inspected.and_then(|_| self.selected()).map(JobRow::from);
+        let inspected = inspector.inspected();
+        let row = inspected
+            .and_then(|_| self.selected(inspector))
+            .map(JobRow::from);
         let title = row.as_ref().map_or_else(
             || {
                 Line::raw(truncate_display_width(
-                    &format!(" {} ", summary_title(self.inspector.jobs())),
+                    &format!(" {} ", summary_title(inspector.jobs())),
                     title_width,
                 ))
             },
             |row| inspect_title(row, title_width, spin),
         );
-        let footer = hint_line(self.context(), &self.hint_eligibility(), title_width);
+        let footer = hint_line(
+            self.context(inspector),
+            &self.hint_eligibility(inspector),
+            title_width,
+        );
         let mut inner = modal(frame, area, title, footer);
         let width = usize::from(inner.width);
         let muted = Style::new().fg(theme().text.muted);
@@ -213,7 +213,7 @@ impl JobsOverlay {
             inner.y = inner.y.saturating_add(1);
             inner.height -= 1;
         }
-        if let Some(message) = self.inspector.message()
+        if let Some(message) = inspector.message()
             && inner.height > 1
         {
             let (text, style) = match message {
@@ -237,14 +237,14 @@ impl JobsOverlay {
             );
         }
         let (lines, entries) = if inspected.is_some() {
-            (self.detail_lines(row.as_ref()), Vec::new())
-        } else if self.inspector.jobs().is_empty() {
+            (self.detail_lines(inspector, row.as_ref()), Vec::new())
+        } else if inspector.jobs().is_empty() {
             (
                 vec![Line::styled("No commands in this session.", muted)],
                 Vec::new(),
             )
         } else {
-            let lines = list_lines(self.inspector.jobs(), width, spin);
+            let lines = list_lines(inspector.jobs(), width, spin);
             let entries = (0..lines.len())
                 .map(|n| crate::viewport::RowRange::from_start_len(n, 1))
                 .collect();
@@ -285,21 +285,21 @@ impl JobsOverlay {
         crate::viewport::render_scrollbar(frame, area, &self.nav.viewport);
     }
 
-    fn detail_lines(&self, row: Option<&JobRow>) -> Vec<Line<'static>> {
+    fn detail_lines(&self, inspector: &JobsInspector, row: Option<&JobRow>) -> Vec<Line<'static>> {
         let t = theme();
         let mut lines = Vec::new();
-        if let Some(detail) = self.inspector.detail() {
+        if let Some(detail) = inspector.detail() {
             for (name, tail, bytes, color) in [
                 (
                     "stdout",
                     &detail.stdout_tail,
-                    detail.snapshot.stdout_bytes,
+                    detail.stdout_bytes,
                     t.text.primary,
                 ),
                 (
                     "stderr",
                     &detail.stderr_tail,
-                    detail.snapshot.stderr_bytes,
+                    detail.stderr_bytes,
                     t.feedback.warning,
                 ),
             ] {
@@ -322,7 +322,7 @@ impl JobsOverlay {
         if lines.is_empty() {
             let text = if row.is_some_and(|row| row.icon != StatusIcon::Running) {
                 "No output."
-            } else if self.inspector.detail().is_some() {
+            } else if inspector.detail().is_some() {
                 "No output yet."
             } else {
                 "Loading output tails…"

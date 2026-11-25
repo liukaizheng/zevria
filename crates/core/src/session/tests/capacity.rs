@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::TurnEvent;
 
 #[test]
 fn capacity_assessment_boundaries_and_authority_are_shared() {
@@ -61,21 +62,21 @@ async fn blocked_lifecycle_is_sequenced_only_after_capacity_is_reserved() {
     let (sender, mut receiver) = session_event_channel(1);
     let turn_id = TurnId::new(17);
     sender
-        .try_send(SessionEvent::TurnStarted {
+        .try_send(SessionEvent::Turn(TurnEvent::Started {
             turn_id,
             message: Message::user("question"),
             mode: SessionMode::Build,
-        })
+        }))
         .expect("queue starts available");
 
     let blocked_sender = sender.clone();
     let blocked = tokio::spawn(async move {
         blocked_sender
-            .send(SessionEvent::Intermediate {
+            .send(SessionEvent::Turn(TurnEvent::Intermediate {
                 attempt_id: None,
                 turn_id,
                 message: Message::assistant("commit"),
-            })
+            }))
             .await
             .expect("capacity eventually opens");
     });
@@ -84,12 +85,16 @@ async fn blocked_lifecycle_is_sequenced_only_after_capacity_is_reserved() {
 
     assert!(matches!(
         receiver.recv().await,
-        Some(SessionUpdate::Lifecycle(SessionEvent::TurnStarted { .. }))
+        Some(SessionUpdate::Lifecycle(SessionEvent::Turn(
+            TurnEvent::Started { .. }
+        )))
     ));
     blocked.await.expect("blocked publisher completes");
     assert!(matches!(
         receiver.recv().await,
-        Some(SessionUpdate::Lifecycle(SessionEvent::Intermediate { .. }))
+        Some(SessionUpdate::Lifecycle(SessionEvent::Turn(
+            TurnEvent::Intermediate { .. }
+        )))
     ));
     assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
 }
@@ -148,13 +153,13 @@ async fn provider_failure_after_submit_plan_leaves_workflow_planning() {
     assert_eq!(requests.lock().unwrap().len(), 2);
     let events = collect_events(&mut receiver).await;
     assert!(events.iter().any(|event| {
-        matches!(event, SessionEvent::TurnFailed { error, .. }
+        matches!(event, SessionEvent::Turn(TurnEvent::Failed { error, .. })
             if error.contains("scripted failure before the final Plan response"))
     }));
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
     );
     assert_eq!(
         zevria_transcript::load(engine.conversation.path()).unwrap(),
@@ -233,7 +238,7 @@ async fn model_proposed_skill_uses_exact_capacity_instead_of_legacy_tracker_tota
             .iter()
             .any(|event| matches!(
                 event,
-                SessionEvent::ToolResults { metadata, .. }
+                SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. })
                     if metadata[0].outcome == ToolCallOutcome::Success
             ))
     );
@@ -278,7 +283,7 @@ async fn provider_failure_resets_provider_and_next_prompt_recovers() {
         .await
         .unwrap();
     assert!(collect_events(&mut receiver).await.iter().any(
-        |event| matches!(event, SessionEvent::TurnFailed { error, .. }
+        |event| matches!(event, SessionEvent::Turn(TurnEvent::Failed { error, .. })
                 if error.contains("scripted continuation failure"))
     ));
     assert_eq!(engine.provider().resets, 1);
@@ -298,7 +303,7 @@ async fn provider_failure_resets_provider_and_next_prompt_recovers() {
         .await
         .unwrap();
     assert!(collect_events(&mut receiver).await.iter().any(
-        |event| matches!(event, SessionEvent::TurnCompleted { message, .. }
+        |event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { message, .. })
                 if message == &Message::assistant("recovered"))
     ));
     assert_eq!(*tool_calls.lock().unwrap(), ["once"]);
@@ -357,18 +362,19 @@ async fn finite_tool_continuations_complete_with_sequential_calls_and_preserved_
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .filter(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
             .count(),
         1
     );
     assert!(!events.iter().any(|event| matches!(
         event,
-        SessionEvent::TurnFailed { .. } | SessionEvent::TurnRejected { .. }
+        SessionEvent::Turn(TurnEvent::Failed { .. })
+            | SessionEvent::Turn(TurnEvent::Rejected { .. })
     )));
     let calls = events
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::ModelCallStarted { call, .. } => Some(*call),
+            SessionEvent::Turn(TurnEvent::ModelCallStarted { call, .. }) => Some(*call),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -382,7 +388,7 @@ async fn finite_tool_continuations_complete_with_sequential_calls_and_preserved_
     let results = events
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::ToolResults { message, .. } => Some(message.clone()),
+            SessionEvent::Turn(TurnEvent::ToolResults { message, .. }) => Some(message.clone()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -461,14 +467,13 @@ async fn ensemble_review_capacity_uses_review_profile_not_build_profile() {
     // No compaction call can rescue non-compactable overhead.
     assert!(requests.lock().expect("requests").is_empty());
     let events = collect_events(&mut receiver).await;
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, SessionEvent::ModelCallStarted { .. }))
-    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        SessionEvent::Turn(TurnEvent::ModelCallStarted { .. })
+    )));
     assert!(events.iter().any(|event| matches!(
         event,
-        SessionEvent::TurnFailed { error, .. }
+        SessionEvent::Turn(TurnEvent::Failed { error, .. })
             if error.contains("prepared review request") && error.contains("review-small")
     )));
 }

@@ -1,7 +1,7 @@
 //! TEMPORARY ignored probe, no live APIs. See docs/cache-diagnostics.md.
 //! Allocator counting is inactive except for the explicit measured invocation.
 use super::*;
-use crate::turn::{cache_preparation_probe_support::derive, prepare_turn_request};
+use crate::responses::{cache_preparation_probe_support::derive, prepare_turn_request};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     sync::atomic::AtomicBool,
@@ -40,7 +40,7 @@ unsafe impl GlobalAlloc for Counting {
 async fn prepared(
     request: &ModelRequest<'_>,
     provider: &mut OpenAiProvider,
-) -> crate::turn::PreparedRequest {
+) -> crate::responses::PreparedRequest {
     let prepared = prepare_turn_request(request, provider).await.unwrap();
     #[cfg(feature = "cache-diagnostics")]
     let prepared = crate::cache_diagnostics::dispatch(prepared, provider);
@@ -106,10 +106,10 @@ async fn cache_preparation_probe() {
         .unwrap();
         #[cfg(feature = "cache-diagnostics")]
         crate::cache_diagnostics::finish(&seed, &mut provider, Some(&response));
-        provider.ws.continuation = Some(
+        provider.responses_transport.ws.continuation = Some(
             ContinuationState::after_response(
                 &seed,
-                provider.ws.socket_generation,
+                provider.responses_transport.ws.socket_generation,
                 "resp_probe".into(),
                 &response,
             )

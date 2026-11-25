@@ -1,21 +1,25 @@
 use super::*;
 use crate::app::{ComposerChrome, ConversationTail};
 use zevria_session_api::ModeSelectionResult;
+use zevria_session_api::{ManagementEvent, PlanEvent, TurnEvent};
 
 fn select_command(app: &mut App, text: &str) -> (String, SessionMode) {
     enter_insert(app);
     app.set_input_for_test(text, text.len());
-    let Some(UiAction::SetMode { request_id, mode }) = app.handle_event(ctrl_enter()) else {
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Manage(
+        zevria_session_api::ManagementCommand::SetMode { request_id, mode },
+    ))) = app.handle_event(ctrl_enter())
+    else {
         panic!("mode command must use management, not a turn");
     };
     (request_id, mode)
 }
 
 fn accepted(app: &mut App, request_id: String, mode: SessionMode, changed: bool) {
-    app.reduce_without_effects(SessionEvent::ModeResult {
+    app.reduce_without_effects(SessionEvent::Manage(ManagementEvent::ModeResult {
         request_id,
         result: ModeSelectionResult::Accepted { mode, changed },
-    });
+    }));
 }
 
 #[test]
@@ -32,18 +36,20 @@ fn orchestration_completion_retains_draft_and_recall_preserves_explicit_behavior
     app.set_input_for_test(draft, draft.len());
     assert!(matches!(
         app.handle_event(ctrl_enter()),
-        Some(UiAction::Submit {
-            behavior: zevria_foundation::RequestBehavior::Orchestrate,
-            mode: SessionMode::Build,
-            ..
-        })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Submit {
+                behavior: zevria_foundation::RequestBehavior::Orchestrate,
+                mode: SessionMode::Build,
+                ..
+            }
+        )))
     ));
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnRejected {
+        SessionEvent::Turn(TurnEvent::Rejected {
             turn_id: TEST_TURN_ID,
             error: "concurrency limit is one".into(),
-        },
+        }),
     );
     assert_eq!(app.input(), draft);
     let request =
@@ -62,14 +68,33 @@ fn orchestration_completion_retains_draft_and_recall_preserves_explicit_behavior
     assert_eq!(app.input(), draft);
     assert!(matches!(
         app.handle_event(ctrl_enter()),
-        Some(UiAction::EditTranscript(TranscriptEdit {
-            replacement: TranscriptEditReplacement::Message {
-                behavior: zevria_foundation::RequestBehavior::Orchestrate,
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::EditTranscript(TranscriptEdit {
+                replacement: TranscriptEditReplacement::Message {
+                    behavior: zevria_foundation::RequestBehavior::Orchestrate,
+                    ..
+                },
                 ..
-            },
-            ..
-        }))
+            })
+        )))
     ));
+}
+
+#[test]
+fn direct_orchestration_in_plan_mode_keeps_the_draft_without_submitting() {
+    let mut app = App::new();
+    app.set_mode_for_test(SessionMode::Plan);
+    enter_insert(&mut app);
+    let draft = "/orchestrate implement independent parts";
+    app.set_input_for_test(draft, draft.len());
+
+    assert_eq!(app.handle_event(ctrl_enter()), None);
+    assert_eq!(app.input(), draft);
+    assert_eq!(app.next_mode(), SessionMode::Plan);
+    assert!(!app.is_busy());
+    assert!(
+        matches!(app.history(), [HistoryEntry::Error(error)] if error.contains("only in Build mode"))
+    );
 }
 
 #[test]
@@ -91,7 +116,7 @@ fn literal_recall_and_removed_orchestration_prefix_are_standard_requests() {
         ctrl_e(&mut app);
         assert_eq!(app.input(), format!(" {literal}"));
         assert!(
-            matches!(app.handle_event(ctrl_enter()), Some(UiAction::EditTranscript(TranscriptEdit { replacement: TranscriptEditReplacement::Message { behavior: RequestBehavior::Standard, text, .. }, .. })) if text.text_projection() == literal)
+            matches!(app.handle_event(ctrl_enter()), Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(zevria_session_api::TurnCommand::EditTranscript(TranscriptEdit { replacement: TranscriptEditReplacement::Message { behavior: RequestBehavior::Standard, text, .. }, .. })))) if text.text_projection() == literal)
         );
     }
     let mut app = App::new();
@@ -111,13 +136,15 @@ fn literal_recall_and_removed_orchestration_prefix_are_standard_requests() {
     app.set_input_for_test("independent work", 16);
     assert!(matches!(
         app.handle_event(ctrl_enter()),
-        Some(UiAction::EditTranscript(TranscriptEdit {
-            replacement: TranscriptEditReplacement::Message {
-                behavior: RequestBehavior::Standard,
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::EditTranscript(TranscriptEdit {
+                replacement: TranscriptEditReplacement::Message {
+                    behavior: RequestBehavior::Standard,
+                    ..
+                },
                 ..
-            },
-            ..
-        }))
+            })
+        )))
     ));
 }
 
@@ -163,22 +190,22 @@ fn pending_mode_selection_locks_input_management_and_unrelated_turn_events() {
     assert!(app.begin_model_management().is_none());
     assert!(app.input().is_empty());
     for event in [
-        SessionEvent::TurnStarted {
+        SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             mode: SessionMode::Plan,
             message: Message::user("stale turn"),
-        },
-        SessionEvent::CompactionStarted {
+        }),
+        SessionEvent::Turn(TurnEvent::CompactionStarted {
             turn_id: TEST_TURN_ID,
             trigger: CompactionTrigger::Manual,
-        },
-        SessionEvent::TurnRejected {
+        }),
+        SessionEvent::Turn(TurnEvent::Rejected {
             turn_id: TEST_TURN_ID,
             error: "stale rejection".into(),
-        },
-        SessionEvent::TurnCancelled {
+        }),
+        SessionEvent::Turn(TurnEvent::Cancelled {
             turn_id: TEST_TURN_ID,
-        },
+        }),
     ] {
         app.reduce_without_effects(event);
         assert!(app.mode_selection_pending());
@@ -195,24 +222,24 @@ fn wrong_request_wrong_mode_and_duplicate_acknowledgements_are_inert() {
     let (id, mode) = select_command(&mut app, "/plan");
     accepted(&mut app, "previous-session".into(), mode, true);
     accepted(&mut app, id.clone(), SessionMode::Build, true);
-    app.reduce_without_effects(SessionEvent::ModeResult {
+    app.reduce_without_effects(SessionEvent::Manage(ManagementEvent::ModeResult {
         request_id: "previous-session".into(),
         result: ModeSelectionResult::Rejected {
             code: "stale".into(),
             message: "not visible".into(),
         },
-    });
+    }));
     assert!(app.mode_selection_pending());
     assert_eq!(app.next_mode(), SessionMode::Build);
     assert!(app.history().is_empty());
     accepted(&mut app, id.clone(), mode, true);
-    app.reduce_without_effects(SessionEvent::ModeResult {
+    app.reduce_without_effects(SessionEvent::Manage(ManagementEvent::ModeResult {
         request_id: id.clone(),
         result: ModeSelectionResult::Rejected {
             code: "duplicate".into(),
             message: "not visible".into(),
         },
-    });
+    }));
     accepted(&mut app, id, mode, true);
     assert_eq!(app.next_mode(), mode);
     assert!(app.history().is_empty());
@@ -236,13 +263,13 @@ fn selection_error_restores_exact_command_draft_and_never_overwrites_newer_input
         if let Some(newer) = newer {
             app.set_input_for_test(newer, 3);
         }
-        app.reduce_without_effects(SessionEvent::ModeResult {
+        app.reduce_without_effects(SessionEvent::Manage(ManagementEvent::ModeResult {
             request_id: id,
             result: ModeSelectionResult::Rejected {
                 code: "save_failed".into(),
                 message: "Selection was not persisted".into(),
             },
-        });
+        }));
         assert_eq!(app.next_mode(), SessionMode::Plan);
         assert!(!app.is_busy());
         assert_eq!(app.input(), newer.unwrap_or(draft));
@@ -301,8 +328,9 @@ fn shortcut_uses_the_same_ack_path_preserving_unicode_draft_caret_and_focus() {
             enter_insert(&mut app);
             let draft = "é draft\nnext line";
             app.set_input_for_test(draft, "é".len());
-            let Some(UiAction::SetMode { request_id, mode }) =
-                app.handle_event(key(KeyCode::BackTab))
+            let Some(UiAction::Session(zevria_session_api::SessionCommand::Manage(
+                zevria_session_api::ManagementCommand::SetMode { request_id, mode },
+            ))) = app.handle_event(key(KeyCode::BackTab))
             else {
                 panic!("mode management shortcut");
             };
@@ -316,7 +344,7 @@ fn shortcut_uses_the_same_ack_path_preserving_unicode_draft_caret_and_focus() {
             assert_eq!(app.input(), "éx draft\nnext line");
             app.handle_event(ctrl('z'));
             assert_eq!(app.input(), draft);
-            app.reduce_without_effects(SessionEvent::ModeResult {
+            app.reduce_without_effects(SessionEvent::Manage(ManagementEvent::ModeResult {
                 request_id,
                 result: if success {
                     ModeSelectionResult::Accepted {
@@ -329,7 +357,7 @@ fn shortcut_uses_the_same_ack_path_preserving_unicode_draft_caret_and_focus() {
                         message: "Try again".into(),
                     }
                 },
-            });
+            }));
             assert_eq!(app.next_mode(), if success { to } else { from });
             assert_eq!(app.input(), draft);
             assert_eq!(app.input_cursor(), 2);
@@ -351,10 +379,12 @@ fn mode_completion_enter_selects_but_tab_only_completes() {
         assert_eq!(app.input(), full);
         assert!(!app.is_busy());
         app.set_input_for_test(prefix, prefix.len());
-        let Some(UiAction::SetMode {
-            request_id,
-            mode: selected,
-        }) = app.handle_event(key(KeyCode::Enter))
+        let Some(UiAction::Session(zevria_session_api::SessionCommand::Manage(
+            zevria_session_api::ManagementCommand::SetMode {
+                request_id,
+                mode: selected,
+            },
+        ))) = app.handle_event(key(KeyCode::Enter))
         else {
             panic!("Enter should activate {prefix}");
         };
@@ -430,9 +460,9 @@ fn artifact_snapshots_retain_selection_and_only_ready_is_modal() {
         ] {
             let mut app = App::new();
             app.apply_selected_mode(mode);
-            app.reduce_without_effects(SessionEvent::PlanStateChanged {
-                state: snapshot.clone(),
-            });
+            app.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
+                state: Box::new(snapshot.clone()),
+            }));
             assert_eq!(app.next_mode(), mode);
             assert_eq!(app.plan_state(), snapshot);
             assert!(app.render_parts().plan_dialog.is_none());
@@ -458,9 +488,9 @@ fn ready_snapshot_racing_a_mode_result_stays_modal_and_cannot_be_approved_by_sel
     let snapshot = PlanWorkflowState::Ready {
         artifact: test_plan_artifact(),
     };
-    app.reduce_without_effects(SessionEvent::PlanStateChanged {
-        state: snapshot.clone(),
-    });
+    app.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
+        state: Box::new(snapshot.clone()),
+    }));
     assert_eq!(app.next_mode(), SessionMode::Plan);
     assert!(app.mode_selection_pending());
     let text = rendered_text(&mut app, 160, 20);
@@ -504,16 +534,18 @@ fn explicit_implementation_mode_change_preserves_ready_modal_until_the_replacing
         );
         assert_eq!(
             app.handle_event(key(KeyCode::Enter)),
-            Some(UiAction::ResolvePlan {
-                expected: artifact.version,
-                decision,
-            })
+            Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                zevria_session_api::TurnCommand::ResolvePlan {
+                    expected: artifact.version,
+                    decision,
+                }
+            )))
         );
         // Even workflow traffic cannot override Ready presentation. The engine
         // publishes the replacement Plan snapshot before its selected mode.
-        app.reduce_without_effects(SessionEvent::ModeChanged {
+        app.reduce_without_effects(SessionEvent::Turn(TurnEvent::ModeChanged {
             mode: SessionMode::Build,
-        });
+        }));
         assert_eq!(app.next_mode(), SessionMode::Plan);
         assert_eq!(app.plan_state(), snapshot);
         assert!(app.render_parts().plan_dialog.unwrap().decision_pending);
@@ -525,15 +557,15 @@ fn explicit_implementation_mode_change_preserves_ready_modal_until_the_replacing
             PlanDecision::ImplementFresh => PlanResolution::ImplementedFresh,
             PlanDecision::Revise => unreachable!(),
         };
-        app.reduce_without_effects(SessionEvent::PlanStateChanged {
-            state: PlanWorkflowState::Resolved {
+        app.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
+            state: Box::new(PlanWorkflowState::Resolved {
                 artifact,
                 resolution,
-            },
-        });
-        app.reduce_without_effects(SessionEvent::ModeChanged {
+            }),
+        }));
+        app.reduce_without_effects(SessionEvent::Turn(TurnEvent::ModeChanged {
             mode: SessionMode::Build,
-        });
+        }));
         assert_eq!(app.next_mode(), SessionMode::Build);
         assert!(app.render_parts().plan_dialog.is_none());
     }
@@ -546,11 +578,11 @@ fn explicit_workflow_selection_changes_mode_without_erasing_retained_artifacts()
     let snapshot = PlanWorkflowState::Published { artifact };
     app.restore_plan_state(snapshot.clone());
     for mode in [SessionMode::Plan, SessionMode::Build, SessionMode::Plan] {
-        app.reduce_without_effects(SessionEvent::ModeChanged { mode });
+        app.reduce_without_effects(SessionEvent::Turn(TurnEvent::ModeChanged { mode }));
         assert_eq!(app.next_mode(), mode);
-        app.reduce_without_effects(SessionEvent::PlanStateChanged {
-            state: snapshot.clone(),
-        });
+        app.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
+            state: Box::new(snapshot.clone()),
+        }));
         assert_eq!(app.next_mode(), mode);
         assert_eq!(app.plan_state(), snapshot);
         assert!(!app.is_busy());
@@ -581,9 +613,9 @@ fn inspect_panes_and_live_workers_ignore_root_mode_metadata_actions_and_acknowle
     ] {
         app.restore(vec![TranscriptItem::SessionMode(SessionMode::Plan)]);
         app.apply_selected_mode(SessionMode::Plan);
-        app.reduce_without_effects(SessionEvent::ModeChanged {
+        app.reduce_without_effects(SessionEvent::Turn(TurnEvent::ModeChanged {
             mode: SessionMode::Plan,
-        });
+        }));
         accepted(&mut app, "mode-root".into(), SessionMode::Plan, true);
         assert_eq!(app.next_mode(), SessionMode::Build);
         assert!(app.handle_event(key(KeyCode::BackTab)).is_none());
@@ -632,10 +664,12 @@ fn session_mode_and_other_private_metadata_do_not_change_rendered_rows_or_recall
         assert_eq!(app.input(), "visible prompt");
         assert!(matches!(
             app.handle_event(ctrl_enter()),
-            Some(UiAction::EditTranscript(TranscriptEdit {
-                target: TranscriptEditTarget::PromptOrdinal(0),
-                ..
-            }))
+            Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                zevria_session_api::TurnCommand::EditTranscript(TranscriptEdit {
+                    target: TranscriptEditTarget::PromptOrdinal(0),
+                    ..
+                })
+            )))
         ));
     }
 }
@@ -662,7 +696,10 @@ fn narrow_mode_hints_keep_the_correct_complete_shortcut_and_pending_lock() {
                         "{text}"
                     );
                 }
-                let Some(UiAction::SetMode { .. }) = app.handle_event(key(KeyCode::BackTab)) else {
+                let Some(UiAction::Session(zevria_session_api::SessionCommand::Manage(
+                    zevria_session_api::ManagementCommand::SetMode { .. },
+                ))) = app.handle_event(key(KeyCode::BackTab))
+                else {
                     panic!("idle mode shortcut");
                 };
                 let text = rendered_text(&mut app, width, 20);
@@ -719,11 +756,13 @@ fn orchestrate_uses_build_role_styling_and_hints_even_on_narrow_terminals() {
     assert_eq!(app.input_cursor(), 17);
     assert_eq!(
         app.handle_event(ctrl_enter()),
-        Some(UiAction::Submit {
-            behavior: zevria_foundation::RequestBehavior::Orchestrate,
-            text: "draft".into(),
-            mode: SessionMode::Build
-        })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Submit {
+                behavior: zevria_foundation::RequestBehavior::Orchestrate,
+                text: "draft".into(),
+                mode: SessionMode::Build
+            }
+        )))
     );
     assert_eq!(app.in_flight_role(), Some(ModelRole::Build));
 }

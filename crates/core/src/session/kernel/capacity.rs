@@ -12,6 +12,7 @@ use zevria_model::ContextTokenEstimate;
 use zevria_model::estimates::estimate_model_request_item;
 use zevria_model::request::{InputTokenCount, ModelInputIdentity, ModelRequest, ModelRequestItem};
 use zevria_model::telemetry::{ContextTokenSnapshot, ContextTokenSource};
+use zevria_session_api::TurnEvent;
 use zevria_session_api::event::{ProgressReporter, SessionEvent};
 use zevria_session_api::provider::ModelProvider;
 use zevria_transcript::SessionReplayError;
@@ -218,10 +219,10 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .insert(policy.model_role, snapshot.clone());
             let _ = progress
                 .events()
-                .send(SessionEvent::ContextUsageUpdated {
+                .send(SessionEvent::Turn(TurnEvent::ContextUsageUpdated {
                     turn_id: progress.turn().id,
-                    snapshot,
-                })
+                    snapshot: Box::new(snapshot),
+                }))
                 .await;
         }
         Ok(())
@@ -450,10 +451,10 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .insert(policy.model_role, snapshot.clone());
             let _ = progress
                 .events()
-                .send(SessionEvent::ContextUsageUpdated {
+                .send(SessionEvent::Turn(TurnEvent::ContextUsageUpdated {
                     turn_id: progress.turn().id,
-                    snapshot: snapshot.clone(),
-                })
+                    snapshot: Box::new(snapshot.clone()),
+                }))
                 .await;
         }
         Ok(snapshot)

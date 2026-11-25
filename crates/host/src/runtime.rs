@@ -1,58 +1,54 @@
 //! Frontend-neutral ownership of one Zevria session and its pending or saved transcript.
 
-use std::{
-    future::Future,
-    path::{Path, PathBuf},
-    sync::Arc,
+use std::path::{Path, PathBuf};
+
+use zevria_acp::ExecutionProfile;
+use zevria_foundation::{ModelRole, SessionMode};
+use zevria_instructions::{FixedSkillRoots, skill::discover_skills};
+use zevria_transcript::transcript::TranscriptItem;
+use zevria_workflow::{PlanHandoff, PlanWorkflowState};
+
+use crate::config::Config;
+
+mod running;
+mod storage;
+mod tools;
+
+use running::{MCP_SHUTDOWN_GRACE, SubtaskSupervisor, spawn_observed};
+pub use running::{RunningSession, RuntimeTaskExit};
+pub use storage::sessions_dir;
+pub(crate) use storage::{canonical_workspace, transcript_recovery_notice};
+use storage::{ensure_worker_ignore_guard, prepare_session_lease};
+#[cfg(test)]
+pub(crate) use tools::command_tool;
+use tools::worker_tools;
+pub(crate) use tools::{
+    build_explore_tools, build_isolated_build_tools, build_session_policies, build_tools,
+    command_job_limits, worker_policies,
 };
 
-use anyhow::Context as _;
-use rig_agent::tool::server::{ToolServer, ToolServerHandle};
+#[cfg(test)]
+use crate::config::CommandConfig;
 #[cfg(test)]
 use tokio::sync::mpsc::unbounded_channel;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use zevria_acp::ExecutionProfile;
-use zevria_foundation::LAUNCH_SUBTASKS_TOOL_NAME;
-use zevria_foundation::ModelRole;
-use zevria_foundation::QUESTION_TOOL_NAME;
-use zevria_foundation::SessionMode;
-use zevria_foundation::SessionPolicies;
-use zevria_foundation::TASK_TOOL_NAME;
-use zevria_foundation::{
-    CREATE_PLAN_TOOL_NAME, READ_IMAGE_TOOL_NAME, READ_PLAN_TOOL_NAME, SUBMIT_PLAN_TOOL_NAME,
-    UPDATE_PLAN_TOOL_NAME,
-};
-use zevria_foundation::{FileMutationScope, TurnPolicy, WorkspaceContract};
-use zevria_instructions::FixedSkillRoots;
 #[cfg(test)]
-use zevria_instructions::SkillCatalog;
-use zevria_instructions::prompts::BUILD_MODE_INSTRUCTIONS;
-use zevria_instructions::prompts::PLAN_MODE_INSTRUCTIONS;
-use zevria_instructions::prompts::{
-    ENSEMBLE_WORKER_PLAN_INSTRUCTIONS, ENSEMBLE_WORKER_REVIEW_INSTRUCTIONS,
-};
-use zevria_instructions::skill::discover_skills;
-use zevria_session_api::SessionCommand;
-use zevria_session_api::SessionEventReceiver;
-use zevria_session_api::SessionEventSender;
-use zevria_session_api::SubtaskLauncher;
+use zevria_foundation::{READ_IMAGE_TOOL_NAME, TurnPolicy, WorkspaceContract};
 #[cfg(test)]
-use zevria_session_api::question_channels;
-#[cfg(test)]
-use zevria_session_api::session_event_channel;
-use zevria_session_api::{CommandJobLimits, CommandJobs, QuestionRequester};
-use zevria_tools::{
-    CommandLimits, CommandStatusTool, CommandTerminateTool, CommandTool, CreatePlanTool,
-    DeleteTool, EditTool, LaunchSubtasksTool, QuestionTool, ReadImageTool, ReadPlanTool,
-    ReconcileReportsTool, SkillReadTool, SkillTool, SubmitPlanTool, TaskTool, UpdatePlanTool,
-    WriteTool,
+use zevria_instructions::{
+    SkillCatalog,
+    prompts::{
+        BUILD_MODE_INSTRUCTIONS, ENSEMBLE_WORKER_PLAN_INSTRUCTIONS,
+        ENSEMBLE_WORKER_REVIEW_INSTRUCTIONS, PLAN_MODE_INSTRUCTIONS,
+    },
 };
+#[cfg(test)]
+use zevria_session_api::{
+    CommandJobs, SessionCommand, TurnEvent, question_channels, session_event_channel,
+};
+#[cfg(test)]
+use zevria_tools::CommandTool;
+#[cfg(test)]
 use zevria_transcript::transcript;
-use zevria_transcript::transcript::TranscriptItem;
-use zevria_workflow::PlanHandoff;
-use zevria_workflow::PlanWorkflowState;
-
-use crate::config::{CommandConfig, Config};
 
 fn guidance_roots(workspace: &Path) -> zevria_instructions::GuidanceRoots {
     #[cfg(not(test))]
@@ -101,298 +97,6 @@ pub enum SessionStart {
         handoff: PlanHandoff,
         inherited_models: Option<zevria_model::models::SessionModels>,
     },
-}
-
-const ROOT_BUILD_FILE_MUTATION_SCOPE: FileMutationScope = FileMutationScope::ProcessFilesystem;
-
-/// Build the root production registry in its stable advertised order.
-pub(crate) fn build_tools(
-    workspace: &Path,
-    launcher: SubtaskLauncher,
-    questions: QuestionRequester,
-    command_config: CommandConfig,
-    max_plan_artifact_bytes: usize,
-    jobs: Option<CommandJobs>,
-) -> anyhow::Result<ToolServerHandle> {
-    let workspace = workspace.to_path_buf();
-    let server = if let Some(jobs) = jobs {
-        ToolServer::new()
-            .tool(CommandTool::with_jobs(workspace.clone(), jobs.clone()))
-            .tool(
-                CommandStatusTool::new(jobs.clone()).with_wait_timeout(
-                    command_config
-                        .status_wait_timeout_seconds
-                        .map(std::time::Duration::from_secs),
-                ),
-            )
-            .tool(CommandTerminateTool::new(jobs))
-    } else {
-        ToolServer::new().tool(command_tool(workspace.clone(), command_config)?)
-    };
-    let server = server
-        .tool(TaskTool)
-        .tool(LaunchSubtasksTool::new(launcher, workspace.clone()))
-        .tool(
-            EditTool::new(workspace.clone())
-                .with_file_mutation_scope(ROOT_BUILD_FILE_MUTATION_SCOPE),
-        )
-        .tool(
-            WriteTool::new(workspace.clone())
-                .with_file_mutation_scope(ROOT_BUILD_FILE_MUTATION_SCOPE),
-        )
-        .tool(
-            DeleteTool::new(workspace.clone())
-                .with_file_mutation_scope(ROOT_BUILD_FILE_MUTATION_SCOPE),
-        )
-        .tool(SkillTool)
-        .tool(SkillReadTool);
-    Ok(server
-        .tool(ReconcileReportsTool)
-        .tool(QuestionTool::new(questions))
-        .tool(CreatePlanTool::new(max_plan_artifact_bytes))
-        .tool(UpdatePlanTool::new(max_plan_artifact_bytes))
-        .tool(ReadPlanTool)
-        .tool(SubmitPlanTool::new(max_plan_artifact_bytes))
-        // Append new root declarations so existing cacheable bytes keep their order.
-        .tool(ReadImageTool::new(workspace))
-        .run())
-}
-
-/// Explore children register only the configured command tool. Structured
-/// mutation, skills, planning completion, and nested delegation cannot be
-/// reached even if a policy check is bypassed; source-read-only investigation
-/// with scratch-contained execution is behavioral, not a command sandbox.
-pub(crate) fn build_explore_tools(
-    workspace: &Path,
-    command_config: CommandConfig,
-) -> anyhow::Result<ToolServerHandle> {
-    let workspace = workspace.to_path_buf();
-    Ok(ToolServer::new()
-        .tool(command_tool(workspace, command_config)?)
-        .run())
-}
-
-/// Private Build-child registry. Both provider and engine receive this same
-/// handle; no privileged root tools are physically registered.
-pub(crate) fn build_isolated_build_tools(
-    child_workspace: &Path,
-    command_config: CommandConfig,
-) -> anyhow::Result<ToolServerHandle> {
-    let workspace = child_workspace.to_path_buf();
-    Ok(ToolServer::new()
-        .tool(command_tool(workspace.clone(), command_config)?)
-        .tool(TaskTool)
-        .tool(EditTool::new(workspace.clone()))
-        .tool(WriteTool::new(workspace.clone()))
-        .tool(DeleteTool::new(workspace))
-        .run())
-}
-
-pub(crate) fn command_job_limits(config: CommandConfig) -> CommandJobLimits {
-    CommandJobLimits {
-        max_running_background: config.max_background_jobs,
-        retained_finished: zevria_foundation::RETAINED_FINISHED_COMMAND_JOBS,
-        capture_bytes: config.capture_bytes,
-        foreground_timeout: std::time::Duration::from_secs(config.timeout_seconds),
-        background_timeout: config
-            .background_timeout_seconds
-            .map(std::time::Duration::from_secs),
-    }
-}
-
-pub(crate) fn command_tool(
-    workspace: PathBuf,
-    config: CommandConfig,
-) -> anyhow::Result<CommandTool> {
-    CommandTool::with_limits(
-        workspace,
-        CommandLimits {
-            timeout: std::time::Duration::from_secs(config.timeout_seconds),
-            capture_bytes: config.capture_bytes,
-        },
-    )
-}
-
-pub(crate) fn build_session_policies(
-    plan: zevria_workflow::config::PlanConfig,
-    command_jobs: bool,
-) -> SessionPolicies {
-    let mut build_tools = [
-        zevria_foundation::WEB_SEARCH_TOOL_NAME,
-        "command",
-        TASK_TOOL_NAME,
-        "edit",
-        "write",
-        "delete",
-        READ_IMAGE_TOOL_NAME,
-        LAUNCH_SUBTASKS_TOOL_NAME,
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect::<Vec<_>>();
-    build_tools.extend(zevria_foundation::SKILL_TOOL_NAMES.map(str::to_string));
-    let mut plan_tools = vec![
-        "command".to_string(),
-        zevria_foundation::WEB_SEARCH_TOOL_NAME.into(),
-        READ_IMAGE_TOOL_NAME.into(),
-    ];
-    if command_jobs {
-        build_tools.splice(
-            2..2,
-            zevria_foundation::COMMAND_JOB_TOOL_NAMES.map(str::to_string),
-        );
-        plan_tools.splice(
-            1..1,
-            zevria_foundation::COMMAND_JOB_TOOL_NAMES.map(str::to_string),
-        );
-    }
-    if plan.allow_subtasks {
-        plan_tools.push(LAUNCH_SUBTASKS_TOOL_NAME.to_string());
-    }
-    if plan.allow_skills {
-        plan_tools.extend(zevria_foundation::SKILL_TOOL_NAMES.map(str::to_string));
-    }
-    plan_tools.push(QUESTION_TOOL_NAME.to_string());
-    plan_tools.extend(
-        [
-            CREATE_PLAN_TOOL_NAME,
-            UPDATE_PLAN_TOOL_NAME,
-            READ_PLAN_TOOL_NAME,
-            SUBMIT_PLAN_TOOL_NAME,
-        ]
-        .map(str::to_string),
-    );
-    SessionPolicies::new(
-        TurnPolicy::new(
-            BUILD_MODE_INSTRUCTIONS,
-            Some(build_tools),
-            ModelRole::Build,
-            true,
-        )
-        .with_orchestration()
-        .with_file_mutation_scope(ROOT_BUILD_FILE_MUTATION_SCOPE),
-        TurnPolicy::new(
-            PLAN_MODE_INSTRUCTIONS,
-            Some(plan_tools),
-            ModelRole::Plan,
-            plan.allow_skills,
-        )
-        .with_contract(WorkspaceContract::SourceReadOnlyScratch),
-    )
-}
-
-pub(crate) fn worker_policies() -> SessionPolicies {
-    let review = TurnPolicy::new(
-        ENSEMBLE_WORKER_REVIEW_INSTRUCTIONS,
-        Some(vec![
-            "command".into(),
-            QUESTION_TOOL_NAME.into(),
-            zevria_foundation::WEB_SEARCH_TOOL_NAME.into(),
-        ]),
-        ModelRole::Review,
-        false,
-    )
-    .with_scope("worker:review")
-    .with_contract(WorkspaceContract::SourceReadOnlyScratch);
-    // Review uses nominal Build mode without root orchestration eligibility.
-    SessionPolicies::new(
-        review,
-        TurnPolicy::new(
-            ENSEMBLE_WORKER_PLAN_INSTRUCTIONS,
-            Some(vec![
-                zevria_foundation::WEB_SEARCH_TOOL_NAME.into(),
-                "command".into(),
-                QUESTION_TOOL_NAME.into(),
-                CREATE_PLAN_TOOL_NAME.into(),
-                UPDATE_PLAN_TOOL_NAME.into(),
-                READ_PLAN_TOOL_NAME.into(),
-                SUBMIT_PLAN_TOOL_NAME.into(),
-            ]),
-            ModelRole::Plan,
-            false,
-        )
-        .with_scope("worker:plan")
-        .with_contract(WorkspaceContract::SourceReadOnlyScratch),
-    )
-}
-
-fn worker_tools(
-    workspace: &Path,
-    questions: QuestionRequester,
-    config: &Config,
-) -> anyhow::Result<ToolServerHandle> {
-    Ok(ToolServer::new()
-        .tool(command_tool(workspace.to_path_buf(), config.command)?)
-        .tool(QuestionTool::new(questions))
-        .tool(CreatePlanTool::new(config.session.plan.max_artifact_bytes))
-        .tool(UpdatePlanTool::new(config.session.plan.max_artifact_bytes))
-        .tool(ReadPlanTool)
-        .tool(SubmitPlanTool::new(config.session.plan.max_artifact_bytes))
-        .run())
-}
-
-pub(crate) fn canonical_workspace(workspace: &Path) -> anyhow::Result<PathBuf> {
-    #[cfg(windows)]
-    let canonical = zevria_foundation::windows_io::checked_directory_path(workspace)
-        .context("unsupported protected Windows workspace")?;
-    #[cfg(not(windows))]
-    let canonical = std::fs::canonicalize(workspace)
-        .with_context(|| format!("failed to resolve workspace at {}", workspace.display()))?;
-    anyhow::ensure!(
-        canonical.is_dir(),
-        "workspace {} is not a directory",
-        canonical.display()
-    );
-    Ok(canonical)
-}
-
-/// Child native transcripts and leases never participate in root discovery.
-pub fn sessions_dir(workspace: &Path, profile: ExecutionProfile) -> PathBuf {
-    match profile {
-        ExecutionProfile::Interactive => transcript::sessions_dir(workspace),
-        ExecutionProfile::EnsembleWorker => {
-            zevria_foundation::runtime_paths::workspace_state_root(workspace)
-                .join("ensemble-sessions")
-        }
-    }
-}
-
-fn ensure_worker_ignore_guard(directory: &Path) -> anyhow::Result<()> {
-    use std::io::Write as _;
-    std::fs::create_dir_all(directory)?;
-    let path = directory.join(".gitignore");
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(mut file) => file
-            .write_all(b"*\n")
-            .and_then(|()| file.sync_all())
-            .with_context(|| {
-                format!(
-                    "failed to persist worker ignore guard at {}",
-                    path.display()
-                )
-            }),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(error)
-            .with_context(|| format!("failed to create worker ignore guard at {}", path.display())),
-    }
-}
-
-/// Shared root/worker startup boundary. Scan only the selected namespace and
-/// acquire ownership before transcript loading/repair or any engine work. Both
-/// enumeration and bounded coordinator waits run off the async executor.
-async fn prepare_session_lease(
-    path: &Path,
-) -> anyhow::Result<Arc<crate::session_lease::RootSessionLease>> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        crate::session_lease::RootSessionLease::acquire_sweeping(&path).map(Arc::new)
-    })
-    .await
-    .context("session lease startup task failed")?
 }
 
 pub async fn start_session_with_profile(
@@ -458,41 +162,6 @@ pub(crate) fn load_session_skills(workspace: &Path) -> zevria_instructions::Skil
     discovery
 }
 
-pub(crate) fn transcript_recovery_notice(path: &Path, malformed_lines: usize) -> Option<String> {
-    (malformed_lines > 0).then(|| {
-        format!(
-            "Recovered the session transcript at {} by removing {malformed_lines} malformed record(s).",
-            path.display()
-        )
-    })
-}
-
-const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
-const MCP_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-
-async fn join_with_grace(
-    mut task: tokio::task::JoinHandle<()>,
-    name: &str,
-    grace: std::time::Duration,
-) -> anyhow::Result<()> {
-    match tokio::time::timeout(grace, &mut task).await {
-        Ok(result) => result.with_context(|| format!("{name} task failed")),
-        Err(_) => {
-            tracing::warn!(target: "zevria::runtime",
-                task = name,
-                "task exceeded the shutdown grace period; aborting"
-            );
-            task.abort();
-            match task.await {
-                Err(error) if error.is_cancelled() => Ok(()),
-                Ok(()) => Ok(()),
-                Err(error) => Err(anyhow::Error::from(error)
-                    .context(format!("{name} task failed while being aborted"))),
-            }
-        }
-    }
-}
-
 pub struct StartedSession {
     pub running: RunningSession,
     pub restored: RestoredSession,
@@ -518,9 +187,8 @@ pub struct RestoredSession {
     pub transcript_path: PathBuf,
     /// Authoritative startup items, including pending in-memory metadata.
     pub transcript_items: Vec<TranscriptItem>,
-    pub skill_catalog: Arc<zevria_instructions::skill::SkillCatalog>,
-    /// Validated startup pins; frontends must not replay the transcript again.
-    pub active_skills: zevria_instructions::skill::ActiveSkills,
+    /// Validated startup catalog, pins, and effective eligibility in the selected mode.
+    pub skill_context: zevria_instructions::SkillContext,
     pub startup_notices: Vec<String>,
     pub mcp_prompts: Vec<(
         zevria_foundation::McpServerName,
@@ -545,136 +213,6 @@ pub struct RestoredAgentRun {
     pub records: Vec<zevria_transcript::AgentRunTranscriptRecord>,
 }
 
-/// One observed engine/supervisor task ending while a frontend is active.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeTaskExit {
-    pub component: &'static str,
-    pub error: Option<String>,
-}
-
-pub(super) struct SubtaskSupervisor {
-    pub(super) shutdown: tokio_util::sync::CancellationToken,
-    pub(super) task: tokio::task::JoinHandle<()>,
-}
-
-/// Complete running-session ownership. Frontends receive cloned command
-/// senders and take the sole event receiver, while this handle retains task,
-/// transcript, and shutdown ownership.
-pub struct RunningSession {
-    mcp: Option<Arc<zevria_mcp::McpManager>>,
-    command_jobs: Option<CommandJobs>,
-    // Only existing histories use conservative legacy cleanup. A new pending
-    // path may acquire a competing file after allocation; shutdown must not
-    // delete someone else's file after rejected no-clobber publication.
-    cleanup_abandoned_history: bool,
-    pub(super) identity: SessionIdentity,
-    // Held until background shutdown and abandoned-root cleanup finish. The
-    // engine also owns an Arc: dropping a frontend must not release a live engine.
-    _lease: Option<Arc<crate::session_lease::RootSessionLease>>,
-    command_tx: Option<UnboundedSender<SessionCommand>>,
-    event_tx: Option<SessionEventSender>,
-    event_rx: Option<SessionEventReceiver>,
-    exit_rx: Option<UnboundedReceiver<RuntimeTaskExit>>,
-    engine_task: Option<tokio::task::JoinHandle<()>>,
-    supervisor: Option<SubtaskSupervisor>,
-}
-
-impl RunningSession {
-    pub fn identity(&self) -> &SessionIdentity {
-        &self.identity
-    }
-
-    pub fn command_sender(&self) -> UnboundedSender<SessionCommand> {
-        self.command_tx
-            .as_ref()
-            .expect("running session command endpoint already closed")
-            .clone()
-    }
-
-    pub fn take_event_receiver(&mut self) -> anyhow::Result<SessionEventReceiver> {
-        self.event_rx
-            .take()
-            .context("running session event receiver was already taken")
-    }
-
-    pub fn take_exit_receiver(&mut self) -> anyhow::Result<UnboundedReceiver<RuntimeTaskExit>> {
-        self.exit_rx
-            .take()
-            .context("running session background-exit receiver was already taken")
-    }
-
-    /// Preserve the two-phase ownership sequence: signal Shutdown, drop
-    /// command and event endpoints, await the engine first, then concurrently
-    /// shut down the independent leaf subsystems (subtask supervisor, command
-    /// jobs, and MCP manager), and finally remove an eligible existing
-    /// abandoned transcript best-effort. An absent pending transcript is normal
-    /// and shutdown does not materialize it.
-    pub async fn shutdown(mut self) -> anyhow::Result<()> {
-        if let Some(command_tx) = self.command_tx.take() {
-            let _ = command_tx.send(SessionCommand::Control(
-                zevria_session_api::ControlCommand::Shutdown,
-            ));
-            drop(command_tx);
-        }
-        self.event_rx.take();
-        self.event_tx.take();
-        self.exit_rx.take();
-
-        // Phase 1: Stop the coordinator (engine) first so transcript durability
-        // completes and no new subtasks, command jobs, or MCP calls can start.
-        let engine_shutdown = if let Some(engine_task) = self.engine_task.take() {
-            join_with_grace(engine_task, "session engine", SHUTDOWN_GRACE).await
-        } else {
-            Ok(())
-        };
-
-        // Phase 2: Tear down all remaining independent leaf subsystems concurrently.
-        let supervisor = self.supervisor.take();
-        let command_jobs = self.command_jobs.take();
-        let mcp = self.mcp.take();
-
-        let (supervisor_shutdown, (), ()) = tokio::join!(
-            async {
-                if let Some(supervisor) = supervisor {
-                    supervisor.shutdown.cancel();
-                    join_with_grace(supervisor.task, "subtask supervisor", SHUTDOWN_GRACE).await
-                } else {
-                    Ok(())
-                }
-            },
-            async {
-                if let Some(jobs) = command_jobs {
-                    jobs.shutdown(SHUTDOWN_GRACE).await;
-                }
-            },
-            async {
-                if let Some(mcp) = mcp {
-                    mcp.shutdown(MCP_SHUTDOWN_GRACE).await;
-                }
-            },
-        );
-
-        let path = self.identity.transcript_path;
-        let cleanup = self.cleanup_abandoned_history;
-        let lease = self._lease.take();
-        if let Err(error) = tokio::task::spawn_blocking(move || {
-            if cleanup && transcript::is_abandoned_root(&path)
-                && let Err(error) = std::fs::remove_file(&path)
-            {
-                tracing::warn!(target: "zevria::runtime", path = %path.display(), %error, "failed to remove the empty session file");
-            }
-            drop(lease);
-        }).await {
-            tracing::warn!(target: "zevria::runtime", %error, "session cleanup task failed");
-        }
-
-        match (engine_shutdown, supervisor_shutdown) {
-            (Err(engine), Err(supervisor)) => Err(anyhow::anyhow!("{engine:#}; {supervisor:#}")),
-            (result, Ok(())) | (Ok(()), result) => result,
-        }
-    }
-}
-
 /// Start one provider connection, possibly pending transcript writer, engine, ensemble
 /// supervisor, question broker, and subtask supervisor without constructing a
 /// terminal frontend.
@@ -684,98 +222,6 @@ pub async fn start_session(
     start: SessionStart,
 ) -> anyhow::Result<StartedSession> {
     start_session_with_profile(app_config, workspace, start, ExecutionProfile::Interactive).await
-}
-
-trait RuntimeTaskOutcome {
-    fn error(self) -> Option<String>;
-}
-
-impl RuntimeTaskOutcome for () {
-    fn error(self) -> Option<String> {
-        None
-    }
-}
-
-impl RuntimeTaskOutcome for Result<(), zevria_transcript::SessionReplayError> {
-    fn error(self) -> Option<String> {
-        self.err().map(|error| error.to_string())
-    }
-}
-
-fn spawn_observed<F, T, G>(
-    component: &'static str,
-    future: F,
-    exits: UnboundedSender<RuntimeTaskExit>,
-    guard: G,
-) -> tokio::task::JoinHandle<()>
-where
-    F: Future<Output = T> + Send + 'static,
-    T: RuntimeTaskOutcome,
-    G: Send + 'static,
-{
-    struct ExitGuard<G> {
-        component: &'static str,
-        exits: UnboundedSender<RuntimeTaskExit>,
-        reported: bool,
-        _retained: G,
-    }
-
-    impl<G> Drop for ExitGuard<G> {
-        fn drop(&mut self) {
-            if !self.reported {
-                let _ = self.exits.send(RuntimeTaskExit {
-                    component: self.component,
-                    error: Some(format!("{} task aborted or panicked", self.component)),
-                });
-            }
-        }
-    }
-
-    // Construct the guard outside the task so aborting it before its first
-    // poll still reports an exit and releases retained resources.
-    let mut guard = ExitGuard {
-        component,
-        exits,
-        reported: false,
-        _retained: guard,
-    };
-    tokio::spawn(async move {
-        let error = future.await.error();
-        guard.reported = true;
-        let _ = guard.exits.send(RuntimeTaskExit { component, error });
-    })
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn shutdown_timeout_drops_the_observed_future_and_guard() {
-    let (exits, mut received) = unbounded_channel();
-    let future_resource = Arc::new(());
-    let guard_resource = Arc::new(());
-    let (started, ready) = tokio::sync::oneshot::channel();
-    let task = spawn_observed(
-        "test",
-        {
-            let resource = future_resource.clone();
-            async move {
-                let _resource = resource;
-                let _ = started.send(());
-                std::future::pending::<()>().await;
-            }
-        },
-        exits,
-        guard_resource.clone(),
-    );
-    ready.await.unwrap();
-    join_with_grace(task, "test", std::time::Duration::from_millis(10))
-        .await
-        .unwrap();
-    assert_eq!(Arc::strong_count(&future_resource), 1);
-    assert_eq!(Arc::strong_count(&guard_resource), 1);
-    let exit = received.recv().await.unwrap();
-    assert_eq!(exit.component, "test");
-    assert!(exit.error.unwrap().contains("aborted or panicked"));
-    assert!(received.recv().await.is_none());
 }
 
 #[cfg(all(test, unix))]
@@ -1201,7 +647,7 @@ mod tests {
                 matches!(
                     event,
                     zevria_session_api::SessionUpdate::Lifecycle(
-                        zevria_session_api::SessionEvent::TurnRejected { .. }
+                        zevria_session_api::SessionEvent::Turn(TurnEvent::Rejected { .. })
                     )
                 ),
                 "{event:?}"

@@ -100,12 +100,12 @@ pub(super) async fn run_remote_compaction(
     let body = Bytes::from(serde_json::to_vec(&RequestBody::compact(&prepared)?)?);
 
     let log_url = crate::connection::redacted_url_for_logging(url.as_str());
+    let client = openai.maintenance_client()?;
     let response = authenticated(
         &openai.api_key,
         &openai.profile.provider,
         |lease| {
-            openai
-                .maintenance_http
+            client
                 .post(url.clone())
                 .bearer_auth(lease.expose())
                 .timeout(openai.compaction_timeout)

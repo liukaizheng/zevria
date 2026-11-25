@@ -31,13 +31,15 @@ fn existing_root_history_passes_read_only_replay_and_preflight() -> anyhow::Resu
         // Deliberately do not call new(): even its create-only ignore guard is
         // a write. recover_review uses only agent_runs_root, readers and reducers.
         let supervisor = EnsembleSupervisor {
-            config: EnsembleConfig::default(),
-            workspace: workspace.clone(),
-            #[cfg(windows)]
-            acp_helper: std::env::current_exe()?,
-            agent_runs_root: logs.clone(),
-            questions: test_questions(),
-            question_gate: Arc::new(tokio::sync::Mutex::new(())),
+            inner: Arc::new(SupervisorInner {
+                config: EnsembleConfig::default(),
+                workspace: workspace.clone(),
+                #[cfg(windows)]
+                acp_helper: std::env::current_exe()?,
+                agent_runs_root: logs.clone(),
+                questions: test_questions(),
+                question_gate: Arc::new(tokio::sync::Mutex::new(())),
+            }),
         };
         let mut workers = 0;
         let mut records = 0;

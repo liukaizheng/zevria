@@ -15,6 +15,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget, Wrap},
 };
+#[cfg(test)]
 use zevria_foundation::QuestionAnswer;
 use zevria_foundation::QuestionAnswerValue;
 use zevria_foundation::QuestionPrompt;
@@ -38,6 +39,7 @@ use crate::{
     hints::{Eligibility, hint_line},
     keymap::{ChordState, KeyContext},
 };
+use zevria_presentation::question::{QuestionForm, StepwiseAnswers};
 use zevria_tui_widgets::overlay::{modal, modal_block};
 
 mod detail;
@@ -126,7 +128,6 @@ enum ChoiceEditor {
 #[derive(Default)]
 struct PromptState {
     cursor: usize,
-    answer: Option<QuestionAnswer>,
     editor: EditorState,
     choice_editor: ChoiceEditor,
     choice_notes: BTreeMap<usize, EditorState>,
@@ -277,31 +278,27 @@ impl EditorState {
 
 /// Step-by-step state for a native or ACP question batch.
 pub struct QuestionDialog {
-    turn_id: TurnId,
-    request: QuestionRequest,
+    form: QuestionForm<StepwiseAnswers>,
     question_index: usize,
     states: Vec<PromptState>,
-    validation_error: Option<String>,
 }
 
 impl QuestionDialog {
     pub fn new(turn_id: TurnId, request: QuestionRequest) -> Self {
         let states = request.questions.iter().map(PromptState::new).collect();
         Self {
-            turn_id,
-            request,
+            form: QuestionForm::stepwise(turn_id, request),
             question_index: 0,
             states,
-            validation_error: None,
         }
     }
 
     pub fn turn_id(&self) -> TurnId {
-        self.turn_id
+        self.form.turn_id
     }
 
     pub fn request_id(&self) -> &QuestionRequestId {
-        &self.request.id
+        &self.form.request.id
     }
 
     pub fn invalidate_geometry(&mut self) {
@@ -336,7 +333,7 @@ impl QuestionDialog {
     pub fn hint_eligibility(&self) -> Eligibility {
         let mut hints = Eligibility::default();
         let editing = self.state().choice_editor;
-        if !self.request.dismissible && editing == ChoiceEditor::Browsing {
+        if !self.form.request.dismissible && editing == ChoiceEditor::Browsing {
             hints.disabled.push(Action::Close);
         }
         if !matches!(self.current().kind, QuestionPromptKind::MultiSelect { .. }) {
@@ -397,7 +394,7 @@ impl QuestionDialog {
                 state.choice_notes.entry(index).or_default();
                 state.choice_editor = ChoiceEditor::Note(index);
                 state.reveal_requested = true;
-                self.validation_error = None;
+                self.form.error = None;
             }
             return QuestionDialogAction::Handled;
         }
@@ -451,12 +448,12 @@ impl QuestionDialog {
                 && matches!(code, KeyCode::Left | KeyCode::Right)
                 && self.context() == KeyContext::TextEntry
             {
-                self.validation_error = None;
+                self.form.error = None;
                 self.state_mut().handle_editor_key(code, modifiers);
             }
             return QuestionDialogAction::Handled;
         }
-        self.validation_error = None;
+        self.form.error = None;
         match self.state().choice_editor {
             ChoiceEditor::Other => return self.handle_other_key(code, modifiers),
             ChoiceEditor::Note(index) => return self.handle_note_key(index, code, modifiers),
@@ -481,7 +478,7 @@ impl QuestionDialog {
             return QuestionDialogAction::Handled;
         }
         if code == KeyCode::Esc {
-            return if self.request.dismissible {
+            return if self.form.request.dismissible {
                 self.respond(QuestionResponse::Dismissed)
             } else {
                 QuestionDialogAction::Handled
@@ -712,13 +709,18 @@ impl QuestionDialog {
     fn can_edit_choice_note(&self) -> bool {
         self.state().choice_editor == ChoiceEditor::Browsing
             && self
+                .form
                 .request
                 .allows_choice_note(self.question_index, self.state().cursor)
     }
 
     fn accept_choice(&mut self, index: usize) -> QuestionDialogAction {
         let label = self.current().options[index].label.clone();
-        let note = if self.request.allows_choice_note(self.question_index, index) {
+        let note = if self
+            .form
+            .request
+            .allows_choice_note(self.question_index, index)
+        {
             self.state().choice_note(index).map(str::to_owned)
         } else {
             None
@@ -764,7 +766,7 @@ impl QuestionDialog {
     }
 
     fn invalid(&mut self, message: String) -> QuestionDialogAction {
-        self.validation_error = Some(message);
+        self.form.error = Some(message);
         self.request_reveal();
         QuestionDialogAction::Handled
     }
@@ -778,23 +780,8 @@ impl QuestionDialog {
         answer: Option<QuestionAnswerValue>,
         note: Option<String>,
     ) -> QuestionDialogAction {
-        self.state_mut().answer = Some(QuestionAnswer {
-            id: self.current().id.clone(),
-            answer,
-            note,
-        });
-        if self.question_index + 1 == self.request.questions.len() {
-            let answers = self
-                .states
-                .iter()
-                .map(|state| {
-                    state
-                        .answer
-                        .clone()
-                        .expect("every preceding question was answered before advancing")
-                })
-                .collect();
-            return self.respond(QuestionResponse::Answered { answers });
+        if let Some(response) = self.form.commit_step(self.question_index, answer, note) {
+            return self.respond(response);
         }
 
         self.question_index += 1;
@@ -804,7 +791,7 @@ impl QuestionDialog {
 
     fn respond(&self, response: QuestionResponse) -> QuestionDialogAction {
         QuestionDialogAction::Respond {
-            request_id: self.request.id.clone(),
+            request_id: self.form.request.id.clone(),
             response,
         }
     }
@@ -848,7 +835,7 @@ impl QuestionDialog {
     }
 
     fn current(&self) -> &zevria_foundation::QuestionPrompt {
-        &self.request.questions[self.question_index]
+        &self.form.request.questions[self.question_index]
     }
 
     fn state(&self) -> &PromptState {
@@ -860,12 +847,12 @@ impl QuestionDialog {
     }
 
     pub fn render(&mut self, frame: &mut Frame, modal_body: Rect) {
-        let popup_width = question_width(modal_body, self.request.has_details());
+        let popup_width = question_width(modal_body, self.form.request.has_details());
         let sizing_block = modal_block("", Line::default());
         let max_inner = sizing_block.inner(Rect::new(0, 0, popup_width, modal_body.height));
         let inner_width = max_inner.width;
         let question_index = self.question_index;
-        let prompt = &self.request.questions[question_index];
+        let prompt = &self.form.request.questions[question_index];
         let state = &mut self.states[question_index];
         let selected = state.cursor;
         let has_details = prompt.has_details();
@@ -874,8 +861,8 @@ impl QuestionDialog {
             QuestionContent::new(
                 prompt,
                 state,
-                self.request.allow_choice_notes,
-                self.validation_error.as_deref(),
+                self.form.request.allow_choice_notes,
+                self.form.error.as_deref(),
                 inner_width,
                 answer_width,
             )
@@ -1070,13 +1057,13 @@ impl QuestionDialog {
 
     fn title(&self, popup_width: u16) -> String {
         let current = self.current();
-        let progress = self.request.source_label.as_deref().map_or_else(
+        let progress = self.form.request.source_label.as_deref().map_or_else(
             || {
                 format!(
                     "{} · {}/{}",
                     current.header,
                     self.question_index + 1,
-                    self.request.questions.len()
+                    self.form.request.questions.len()
                 )
             },
             |label| {
@@ -1084,7 +1071,7 @@ impl QuestionDialog {
                     "{label} · {} · {}/{}",
                     current.header,
                     self.question_index + 1,
-                    self.request.questions.len()
+                    self.form.request.questions.len()
                 )
             },
         );
@@ -1721,7 +1708,7 @@ mod tests {
         assert_eq!(
             dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
             QuestionDialogAction::Respond {
-                request_id: dialog.request.id.clone(),
+                request_id: dialog.form.request.id.clone(),
                 response: QuestionResponse::Answered {
                     answers: vec![QuestionAnswer {
                         note: None,
@@ -1810,7 +1797,7 @@ mod tests {
             note_key(&mut dialog, KeyCode::Esc),
             QuestionDialogAction::Handled
         );
-        assert!(dialog.state().answer.is_none());
+        assert!(dialog.form.answer_at(dialog.question_index).is_none());
         assert!(note_hint(&dialog).contains("n edit note"));
         assert!(render_text(&mut dialog, 100, 16).contains("Note: qjkn? first release only"));
 
@@ -1821,7 +1808,7 @@ mod tests {
         note_key(&mut dialog, KeyCode::Enter);
         assert_eq!(dialog.question_index, 1);
         assert_eq!(
-            dialog.states[0].answer.as_ref().unwrap().note.as_deref(),
+            dialog.form.answer_at(0).unwrap().note.as_deref(),
             Some("keep separate")
         );
         assert!(dialog.state().choice_notes.is_empty());
@@ -2128,7 +2115,6 @@ mod tests {
             assert_eq!(state.editor.caret, state.editor.input.len());
             assert_eq!(state.editor.input, " custom 界 ");
             assert!(state.choice_editor != ChoiceEditor::Other);
-            assert!(state.answer.is_none());
         }
     }
 
@@ -2137,10 +2123,14 @@ mod tests {
         for kind in editor_kinds().into_iter().skip(1) {
             let multi = matches!(kind, QuestionPromptKind::MultiSelect { .. });
             let mut dialog = editor_dialog(kind, "abc", true);
-            dialog.request.questions.push(request().questions.remove(1));
+            dialog
+                .form
+                .request
+                .questions
+                .push(request().questions.remove(1));
             dialog
                 .states
-                .push(PromptState::new(&dialog.request.questions[1]));
+                .push(PromptState::new(&dialog.form.request.questions[1]));
             dialog.handle_key(KeyCode::Left, KeyModifiers::NONE);
             dialog.handle_key(KeyCode::Esc, KeyModifiers::NONE);
             assert!(dialog.state().choice_editor != ChoiceEditor::Other);
@@ -2214,12 +2204,13 @@ mod tests {
         for kind in editor_kinds().into_iter().skip(1) {
             let mut dialog = editor_dialog(kind, "", true);
             dialog
+                .form
                 .request
                 .questions
                 .insert(0, request().questions.remove(0));
             dialog
                 .states
-                .insert(0, PromptState::new(&dialog.request.questions[0]));
+                .insert(0, PromptState::new(&dialog.form.request.questions[0]));
             dialog.question_index = 1;
             for code in [
                 KeyCode::Left,
@@ -2287,25 +2278,25 @@ mod tests {
             max_length: Some(3),
         };
         let mut dialog = editor_dialog(kind.clone(), "e\u{301}", true);
-        dialog.request.source_label = Some("ACP worker".into());
+        dialog.form.request.source_label = Some("ACP worker".into());
         assert_submitted(
             &mut dialog,
             Some(QuestionAnswerValue::String("e\u{301}".into())),
         );
 
         let mut dialog = editor_dialog(kind, " ab ", true);
-        dialog.request.dismissible = false;
+        dialog.form.request.dismissible = false;
         assert_eq!(
             dialog.handle_key(KeyCode::Esc, KeyModifiers::NONE),
             QuestionDialogAction::Handled
         );
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(
-            dialog.validation_error.as_deref(),
+            dialog.form.error.as_deref(),
             Some("Enter no more than 3 characters.")
         );
         dialog.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
-        assert!(dialog.validation_error.is_none());
+        assert!(dialog.form.error.is_none());
         assert_submitted(&mut dialog, Some(QuestionAnswerValue::String(" ab".into())));
         dialog.handle_key(KeyCode::Home, KeyModifiers::NONE);
         for _ in 0..3 {
@@ -2313,7 +2304,7 @@ mod tests {
         }
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(
-            dialog.validation_error.as_deref(),
+            dialog.form.error.as_deref(),
             Some("Enter at least 2 characters.")
         );
     }
@@ -2587,7 +2578,7 @@ mod tests {
             for whole_body in [false, true] {
                 let mut dialog = editor_dialog(kind.clone(), &"word ".repeat(80), true);
                 if whole_body {
-                    dialog.request.questions[0].question = "long prompt ".repeat(30);
+                    dialog.form.request.questions[0].question = "long prompt ".repeat(30);
                 }
                 render_buffer(&mut dialog, 36, 8);
                 dialog.handle_key(KeyCode::Home, KeyModifiers::NONE);
@@ -2634,7 +2625,7 @@ mod tests {
                 assert_eq!(dialog.state().editor.measurement.get(), cached);
                 assert_eq!(dialog.state().editor.caret, caret);
                 assert_eq!(dialog.state().editor.input, input);
-                assert!(dialog.state().answer.is_none());
+                assert!(dialog.form.answer_at(dialog.question_index).is_none());
             }
             dialog.handle_key(KeyCode::Left, KeyModifiers::NONE);
             let buffer = render_buffer(&mut dialog, 36, 5);
@@ -2671,7 +2662,7 @@ mod tests {
             max_length: Some(1),
         };
         let mut dialog = editor_dialog(kind, &"word ".repeat(40), true);
-        dialog.request.questions[0].question = "prompt ".repeat(15);
+        dialog.form.request.questions[0].question = "prompt ".repeat(15);
         dialog.handle_key(KeyCode::Home, KeyModifiers::NONE);
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         let error = render_text(&mut dialog, 36, 3);
@@ -2752,12 +2743,13 @@ mod tests {
             }
             if dialog.state().choice_editor != ChoiceEditor::Other {
                 dialog
+                    .form
                     .request
                     .questions
                     .insert(0, request().questions.remove(0));
                 dialog
                     .states
-                    .insert(0, PromptState::new(&dialog.request.questions[0]));
+                    .insert(0, PromptState::new(&dialog.form.request.questions[0]));
                 dialog.question_index = 1;
                 assert!(dialog.title(300).contains("2/2"));
                 dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
@@ -2775,8 +2767,8 @@ mod tests {
         let content = QuestionContent::new(
             dialog.current(),
             state,
-            dialog.request.allow_choice_notes,
-            dialog.validation_error.as_deref(),
+            dialog.form.request.allow_choice_notes,
+            dialog.form.error.as_deref(),
             key.inner_width,
             if key.mode == QuestionLayoutMode::SideBySide {
                 DetailLayout::new(key.inner_width).list_width
@@ -2999,7 +2991,7 @@ mod tests {
         assert_eq!(dialog.state().cursor, 2);
         assert_eq!(dialog.state().editor.input, " custom scope ");
         assert!(dialog.state().choice_editor != ChoiceEditor::Other);
-        assert!(dialog.state().answer.is_none());
+        assert!(dialog.form.answer_at(dialog.question_index).is_none());
         let rendered = render_text(&mut dialog, 120, 24);
         assert_eq!(rendered.matches("Other").count(), 1);
         assert!(!rendered.contains("Skip"));
@@ -3035,7 +3027,7 @@ mod tests {
         dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(dialog.question_index, 1);
         assert_eq!(
-            dialog.states[0].answer,
+            dialog.form.answer_at(0).cloned(),
             Some(QuestionAnswer {
                 id: "scope".into(),
                 answer: Some(QuestionAnswerValue::String("revised".into())),
@@ -3121,7 +3113,7 @@ mod tests {
             QuestionDialogAction::Handled
         );
         assert_eq!(
-            dialog.validation_error.as_deref(),
+            dialog.form.error.as_deref(),
             Some("Select no more than 2 choices.")
         );
         dialog.handle_key(KeyCode::Char(' '), KeyModifiers::NONE);
@@ -3245,7 +3237,7 @@ mod tests {
             QuestionDialogAction::Handled
         );
         assert_eq!(
-            dialog.validation_error.as_deref(),
+            dialog.form.error.as_deref(),
             Some("Select at least 2 choices.")
         );
         dialog.handle_key(KeyCode::Down, KeyModifiers::NONE);
@@ -3359,12 +3351,12 @@ mod tests {
             dialog.handle_key(KeyCode::Enter, KeyModifiers::NONE),
             QuestionDialogAction::Handled
         );
-        assert!(dialog.validation_error.is_some());
+        assert!(dialog.form.error.is_some());
 
         dialog.state_mut().cursor = 2;
         dialog.state_mut().choice_editor = ChoiceEditor::Other;
         dialog.handle_key(KeyCode::Char('c'), KeyModifiers::NONE);
-        assert_eq!(dialog.validation_error, None);
+        assert_eq!(dialog.form.error, None);
         for character in "ustom".chars() {
             dialog.handle_key(KeyCode::Char(character), KeyModifiers::NONE);
         }
@@ -3478,14 +3470,17 @@ mod tests {
         dialog.handle_key(KeyCode::End, KeyModifiers::NONE);
         render_text(&mut dialog, 42, 11);
         let selected = dialog.state().cursor;
-        let answer = dialog.state().answer.clone();
+        let answer = dialog.form.answer_at(dialog.question_index).cloned();
         let input = dialog.state().editor.input.clone();
         let bottom = dialog.state().viewport.top();
         dialog.handle_key(KeyCode::PageUp, KeyModifiers::NONE);
         render_text(&mut dialog, 42, 11);
         assert!(dialog.state().viewport.top() < bottom);
         assert_eq!(dialog.state().cursor, selected);
-        assert_eq!(dialog.state().answer, answer);
+        assert_eq!(
+            dialog.form.answer_at(dialog.question_index),
+            answer.as_ref()
+        );
         assert_eq!(dialog.state().editor.input, input);
 
         dialog.handle_key(KeyCode::Up, KeyModifiers::NONE);
@@ -3711,7 +3706,7 @@ mod tests {
         let fit_content = QuestionContent::new(
             fitting.current(),
             fitting.state(),
-            fitting.request.allow_choice_notes,
+            fitting.form.request.allow_choice_notes,
             None,
             fit_layout.inner_width,
             fit_layout.inner_width,
@@ -3854,7 +3849,7 @@ mod tests {
         );
         assert_eq!(dialog.state().cursor, 0);
         assert_eq!(
-            dialog.validation_error.as_deref(),
+            dialog.form.error.as_deref(),
             Some("No choices are available for this question.")
         );
         assert_eq!(

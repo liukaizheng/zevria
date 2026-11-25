@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{EnsembleEvent, PlanEvent, TurnEvent};
 use zevria_transcript::test_support::TranscriptRewriteBlocker;
 
 struct DirectLauncher {
@@ -196,19 +197,21 @@ async fn direct_plan_preserves_loose_markdown_projection_and_explicit_handoffs_w
                 assert_eq!(std::fs::read(&projection).unwrap(), markdown.as_bytes());
                 std::fs::write(&projection, "Manual edits must never change the handoff.").unwrap();
                 let emitted = collect_events(&mut receiver).await;
-                assert!(!emitted.iter().any(|event| matches!(
-                    event,
-                    SessionEvent::ModelCallStarted { .. }
-                        | SessionEvent::Intermediate { .. }
-                        | SessionEvent::ToolResults { .. }
-                        | SessionEvent::PlanStateChanged {
-                            state: PlanWorkflowState::Ready { .. }
-                        }
-                )));
+                assert!(!emitted.iter().any(|event| match event {
+                    SessionEvent::Turn(
+                        TurnEvent::ModelCallStarted { .. }
+                        | TurnEvent::Intermediate { .. }
+                        | TurnEvent::ToolResults { .. },
+                    ) => true,
+                    SessionEvent::Plan(PlanEvent::StateChanged { state }) =>
+                        matches!(state.as_ref(), PlanWorkflowState::Ready { .. }),
+                    _ => false,
+                }));
                 assert!(
-                    emitted
-                        .iter()
-                        .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+                    emitted.iter().any(|event| matches!(
+                        event,
+                        SessionEvent::Turn(TurnEvent::Completed { .. })
+                    ))
                 );
                 let reports = items
                     .iter()
@@ -266,8 +269,10 @@ async fn direct_plan_preserves_loose_markdown_projection_and_explicit_handoffs_w
                 let handoff = emitted
                     .iter()
                     .find_map(|event| match event {
-                        SessionEvent::FreshPlanHandoffRequested { handoff }
-                        | SessionEvent::PlanHandoffStarted { handoff, .. } => Some(handoff),
+                        SessionEvent::Plan(PlanEvent::FreshHandoffRequested { handoff })
+                        | SessionEvent::Plan(PlanEvent::HandoffStarted { handoff, .. }) => {
+                            Some(handoff)
+                        }
                         _ => None,
                     })
                     .unwrap();
@@ -297,14 +302,14 @@ async fn direct_plan_preserves_loose_markdown_projection_and_explicit_handoffs_w
                     fresh
                         .handle_command(
                             SessionCommand::Turn(TurnCommand::StartFromPlan {
-                                handoff: Box::new(handoff.clone()),
+                                handoff: handoff.clone(),
                             }),
                             &events,
                         )
                         .await
                         .unwrap();
                     assert_eq!(requests.lock().unwrap()[0].prompt, handoff.prompt);
-                    assert!(fresh.conversation.items().iter().any(|item| matches!(item.plan_record(), Some(PlanRecord::Handoff { handoff: saved }) if saved == handoff)));
+                    assert!(fresh.conversation.items().iter().any(|item| matches!(item.plan_record(), Some(PlanRecord::Handoff { handoff: saved }) if *saved == **handoff)));
                 }
             }
         }
@@ -439,9 +444,11 @@ async fn direct_plan_oversize_is_review_error_before_sealing_and_feedback_stays_
             .unwrap();
         engine
     });
-    let (target, state) =
-        next_snapshot(&mut receiver, |state| state.synthesis_error.is_some()).await;
-    let error = state.synthesis_error.as_ref().unwrap();
+    let (target, state) = next_snapshot(&mut receiver, |state| {
+        state.proposals.synthesis_error.is_some()
+    })
+    .await;
+    let error = state.proposals.synthesis_error.as_ref().unwrap();
     assert!(
         error.contains("131072")
             && error.contains("feedback")
@@ -453,7 +460,7 @@ async fn direct_plan_oversize_is_review_error_before_sealing_and_feedback_stays_
         request_id: WorkerControlId::new(),
         target: target.clone(),
         action: WorkerControlAction::Confirm {
-            expected_revision: state.retained.as_ref().unwrap().revision.clone(),
+            expected_revision: state.proposals.retained.as_ref().unwrap().revision.clone(),
         },
     };
     router.route(confirm.clone()).unwrap();
@@ -622,22 +629,27 @@ async fn direct_publication_projection_warning_and_retained_persistence_keep_the
         let emitted = collect_events(&mut receiver).await;
         let completed = emitted
             .iter()
-            .position(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .position(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
             .unwrap();
         let published = emitted
             .iter()
             .position(|event| {
                 matches!(
                     event,
-                    SessionEvent::PlanStateChanged {
-                        state: PlanWorkflowState::Published { .. }
-                    }
-                )
+                    SessionEvent::Plan(PlanEvent::StateChanged {
+                        state
+                    })
+                 if matches!(state.as_ref(), PlanWorkflowState::Published { .. }))
             })
             .unwrap();
         let warning = emitted
             .iter()
-            .position(|event| matches!(event, SessionEvent::PlanProjectionWarning { .. }))
+            .position(|event| {
+                matches!(
+                    event,
+                    SessionEvent::Plan(PlanEvent::ProjectionWarning { .. })
+                )
+            })
             .unwrap();
         assert!(completed < published && published < warning);
         assert_eq!(
@@ -681,7 +693,7 @@ async fn direct_publication_projection_warning_and_retained_persistence_keep_the
             )
             .await
             .unwrap();
-        assert!(collect_events(&mut receiver).await.iter().any(|event| matches!(event, SessionEvent::FreshPlanHandoffRequested { handoff } if handoff.artifact == artifact)));
+        assert!(collect_events(&mut receiver).await.iter().any(|event| matches!(event, SessionEvent::Plan(PlanEvent::FreshHandoffRequested { handoff }) if handoff.artifact == artifact)));
         assert!(requests.lock().unwrap().is_empty());
     }
 }
@@ -726,7 +738,7 @@ async fn direct_plan_requires_current_explicit_confirmation_not_publication_or_p
             engine
         });
         let (target, state) = next_snapshot(&mut receiver, |state| {
-            state.accepted_generation == 1 && state.quiescent()
+            state.inputs.accepted_generation == 1 && state.quiescent()
         })
         .await;
         assert!(
@@ -737,6 +749,7 @@ async fn direct_plan_requires_current_explicit_confirmation_not_publication_or_p
             WorkerControlAction::Abandon
         } else {
             let mut revision = state
+                .proposals
                 .retained
                 .as_ref()
                 .map(|snapshot| snapshot.revision.clone())
@@ -782,10 +795,11 @@ async fn control_result(
     receiver: &mut SessionEventReceiver,
     id: &WorkerControlId,
 ) -> WorkerControlResult {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    *tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if let Some(SessionUpdate::Lifecycle(SessionEvent::WorkerControlResult { result })) =
-                receiver.recv().await
+            if let Some(SessionUpdate::Lifecycle(SessionEvent::Ensemble(
+                EnsembleEvent::WorkerControlResult { result },
+            ))) = receiver.recv().await
                 && &result.control.request_id == id
             {
                 return result;

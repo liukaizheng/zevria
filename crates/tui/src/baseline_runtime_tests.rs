@@ -1,5 +1,6 @@
 use super::*;
 use zevria_foundation::TurnId;
+use zevria_session_api::EnsembleEvent;
 use zevria_workflow::EnsembleRecord;
 use zevria_workflow::EnsembleStart;
 use zevria_workflow::EnsembleWorkflow;
@@ -123,14 +124,14 @@ fn mark(
 }
 
 fn publish(views: &mut SessionViews, start: &EnsembleStart, state: &WorkerReviewState) {
-    views.apply(SessionEvent::WorkerReviewUpdated {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::WorkerReviewUpdated {
         target: WorkerControlTarget {
             turn_id: TurnId::new(1),
             run_id: start.run_id.clone(),
             worker_id: state.descriptor.id.clone(),
         },
         state: Box::new(state.clone()),
-    });
+    }));
 }
 
 #[test]
@@ -140,11 +141,11 @@ fn late_outcomes_and_reports_cannot_revive_a_revoked_review_or_freeze_a_new_roun
     let stale = states[0].outcome();
     let worker_id = states[0].descriptor.id.clone();
     let mut views = SessionViews::new(App::new(), PathBuf::from("."));
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TurnId::new(1),
-        start: start.clone(),
+        start: Box::new(start.clone()),
         resumed: false,
-    });
+    }));
     publish(&mut views, &start, &states[0]);
     let event = WorkerReviewEvent::Withdrawn {
         request_id: WorkerControlId::new(),
@@ -159,26 +160,33 @@ fn late_outcomes_and_reports_cannot_revive_a_revoked_review_or_freeze_a_new_roun
         },
     )));
     publish(&mut views, &start, &states[0]);
-    views.apply(SessionEvent::AgentRunFinished {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished {
         turn_id: TurnId::new(1),
         ensemble_run_id: start.run_id.clone(),
-        outcome: stale.clone(),
-    });
-    views.apply(SessionEvent::EnsembleReportsReady {
+        outcome: Box::new(stale.clone()),
+    }));
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::ReportsReady {
         turn_id: TurnId::new(1),
         run_id: start.run_id.clone(),
         agents: vec![stale.summary()],
-    });
-    assert_eq!(views.root.ensemble_baseline(&start.run_id), None);
+    }));
+    assert_eq!(views.workspace.root.ensemble_baseline(&start.run_id), None);
     assert_eq!(
-        views.root.reviewed_worker_status(&start.run_id, &worker_id),
+        views
+            .workspace
+            .root
+            .reviewed_worker_status(&start.run_id, &worker_id),
         Some(states[0].status())
     );
     assert!(
-        views.agents[0].app.capabilities().edit_draft.is_ok(),
+        views.workspace.agents[0]
+            .app
+            .capabilities()
+            .edit_draft
+            .is_ok(),
         "stale outcome cannot freeze a still-live review"
     );
-    assert!(!views.agents[0].baseline);
+    assert!(!views.workspace.agents[0].baseline);
     items.push(TranscriptItem::Ensemble(Box::new(
         EnsembleRecord::ReportsReady {
             run_id: start.run_id.clone(),
@@ -211,16 +219,16 @@ fn reports_only_baseline_evidence_has_the_same_live_and_restored_fallback() {
         })),
     ];
     let mut live = App::new();
-    live.reduce(SessionEvent::EnsembleStarted {
+    live.reduce(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TurnId::new(1),
-        start: start.clone(),
+        start: Box::new(start.clone()),
         resumed: false,
-    });
-    live.reduce(SessionEvent::EnsembleReportsReady {
+    }));
+    live.reduce(SessionEvent::Ensemble(EnsembleEvent::ReportsReady {
         turn_id: TurnId::new(1),
         run_id: start.run_id.clone(),
         agents: vec![summary],
-    });
+    }));
     let mut restored = App::new();
     restored.restore(records.clone());
     assert_eq!(
@@ -243,16 +251,16 @@ fn reports_only_baseline_evidence_has_the_same_live_and_restored_fallback() {
 fn live_transfer_uses_one_root_id_for_all_rows_and_panes() {
     let (start, mut items, mut states) = fixture();
     let mut views = SessionViews::new(App::new(), PathBuf::from("."));
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TurnId::new(1),
-        start: start.clone(),
+        start: Box::new(start.clone()),
         resumed: false,
-    });
+    }));
     let first = mark(&start, &mut states, &mut items, 0);
     publish(&mut views, &start, &states[0]);
-    assert!(views.agents[0].baseline);
+    assert!(views.workspace.agents[0].baseline);
     assert!(
-        views.agents[0]
+        views.workspace.agents[0]
             .app
             .subsession_title()
             .unwrap()
@@ -261,20 +269,20 @@ fn live_transfer_uses_one_root_id_for_all_rows_and_panes() {
     mark(&start, &mut states, &mut items, 1);
     // New target arrives before the old target's displacement snapshot.
     publish(&mut views, &start, &states[1]);
-    assert!(!views.agents[0].baseline);
-    assert!(views.agents[1].baseline);
+    assert!(!views.workspace.agents[0].baseline);
+    assert!(views.workspace.agents[1].baseline);
     assert!(
-        !views.agents[0]
+        !views.workspace.agents[0]
             .app
             .subsession_title()
             .unwrap()
             .contains("baseline")
     );
     publish(&mut views, &start, &states[0]);
-    assert!(views.agents[1].baseline);
-    assert_eq!(states[0].confirmation.as_ref(), Some(&first));
+    assert!(views.workspace.agents[1].baseline);
+    assert_eq!(states[0].proposals.confirmation.as_ref(), Some(&first));
     assert_eq!(
-        views.root.ensemble_baseline(&start.run_id),
+        views.workspace.root.ensemble_baseline(&start.run_id),
         Some(&states[1].descriptor.id)
     );
     states[1]
@@ -283,8 +291,8 @@ fn live_transfer_uses_one_root_id_for_all_rows_and_panes() {
         })
         .unwrap();
     publish(&mut views, &start, &states[1]);
-    assert!(views.agents.iter().all(|pane| !pane.baseline));
-    assert!(states[1].confirmation.is_some());
+    assert!(views.workspace.agents.iter().all(|pane| !pane.baseline));
+    assert!(states[1].proposals.confirmation.is_some());
     mark(&start, &mut states, &mut items, 0);
     publish(&mut views, &start, &states[0]);
     states[0]
@@ -293,7 +301,7 @@ fn live_transfer_uses_one_root_id_for_all_rows_and_panes() {
         })
         .unwrap();
     publish(&mut views, &start, &states[0]);
-    assert!(views.agents.iter().all(|pane| !pane.baseline));
+    assert!(views.workspace.agents.iter().all(|pane| !pane.baseline));
 }
 
 #[test]
@@ -408,7 +416,7 @@ fn historical_badges_follow_root_transfer_clear_and_absence_not_sidecar_text() {
             }
             views.restore_agent_run(records);
         }
-        for (index, pane) in views.agents.iter().enumerate() {
+        for (index, pane) in views.workspace.agents.iter().enumerate() {
             assert!(pane.historical);
             assert_eq!(pane.baseline, selected_index == Some(index));
             assert_eq!(
@@ -419,11 +427,17 @@ fn historical_badges_follow_root_transfer_clear_and_absence_not_sidecar_text() {
         // Historical inspect-only panes deliberately have no live review binding.
         if let Some(index) = selected_index {
             assert_eq!(
-                views.root.ensemble_baseline(&start.run_id),
+                views.workspace.root.ensemble_baseline(&start.run_id),
                 Some(&start.agents[index].id)
             );
         } else {
-            assert!(views.root.ensemble_baseline(&start.run_id).is_none());
+            assert!(
+                views
+                    .workspace
+                    .root
+                    .ensemble_baseline(&start.run_id)
+                    .is_none()
+            );
         }
     }
 }
@@ -434,7 +448,7 @@ fn exact_marking_and_clearing_audit_mirrors_deduplicate_on_finalization() {
     let receipt = mark(&start, &mut states, &mut items, 0);
     let mut views = SessionViews::new(App::new(), PathBuf::from("."));
     let index = views.ensure_agent(&start.run_id, &start.agents[0]);
-    let pane = &mut views.agents[index];
+    let pane = &mut views.workspace.agents[index];
     for _ in 0..2 {
         pane.apply_transcript_event(AgentRunEvent::Review {
             event: Box::new(WorkerReviewEvent::BaselineMarked {

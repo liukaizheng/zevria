@@ -29,7 +29,6 @@ async fn provider(url: String) -> OpenAiProvider {
         "prewarm-session",
         "prewarm-cache",
     )
-    .await
     .unwrap()
 }
 
@@ -168,13 +167,13 @@ async fn failed_prewarm_leaves_the_first_completion_a_fresh_one_attempt_budget()
     });
     let mut provider = provider(url).await;
     provider.prewarm(ModelRole::Build).await;
-    assert_eq!(provider.ws.socket_generation, 0);
+    assert_eq!(provider.responses_transport.ws.socket_generation, 0);
     assert_eq!(
-        provider.ws.session.terminal_status(),
+        provider.responses_transport.ws.session.terminal_status(),
         Some(OpenAiWebSocketTerminalCategory::NotConnected)
     );
     complete_once(&mut provider).await;
-    assert_eq!(provider.ws.socket_generation, 0);
+    assert_eq!(provider.responses_transport.ws.socket_generation, 0);
     assert_eq!(continuation_response_id(&provider), Some("fresh"));
     server.await.unwrap();
 }
@@ -207,12 +206,12 @@ async fn dropping_a_prewarm_handshake_installs_nothing_and_the_first_request_can
         () = provider.prewarm(ModelRole::Build) => panic!("handshake must remain pending"),
         result = started => result.unwrap(),
     }
-    assert_eq!(provider.ws.socket_generation, 0);
+    assert_eq!(provider.responses_transport.ws.socket_generation, 0);
     assert_eq!(
-        provider.ws.session.terminal_status(),
+        provider.responses_transport.ws.session.terminal_status(),
         Some(OpenAiWebSocketTerminalCategory::NotConnected)
     );
-    assert!(provider.ws.continuation.is_none());
+    assert!(provider.responses_transport.ws.continuation.is_none());
     complete_once(&mut provider).await;
     server.await.unwrap();
 }
@@ -243,9 +242,12 @@ async fn prewarm_upgrade_required_selects_sticky_http_without_spending_a_complet
     });
     let mut provider = provider(url).await;
     provider.prewarm(ModelRole::Build).await;
-    assert_eq!(provider.transport, crate::connection::OpenAiTransport::Http);
     assert_eq!(
-        provider.http_fallback,
+        provider.transport(),
+        crate::connection::OpenAiTransport::Http
+    );
+    assert_eq!(
+        provider.responses_transport.fallback(),
         Some(crate::connection::HttpFallback::Sticky(
             "websocket_upgrade_required"
         ))

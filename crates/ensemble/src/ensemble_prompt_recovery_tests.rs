@@ -559,7 +559,7 @@ async fn transient_context_survives_policy_cancellation_but_successful_oversize_
                 validate_worker_synthesis_payload(
                     EnsembleWorkflow::Plan,
                     &outcome,
-                    fixture.supervisor.config.max_synthesis_bytes_per_agent
+                    fixture.supervisor.inner.config.max_synthesis_bytes_per_agent
                 )
                 .is_err()
             );
@@ -591,14 +591,14 @@ async fn transient_cancellation_during_backoff_or_continuation_never_retries_aga
         );
         let cancel = async {
             loop {
-                if let zevria_session_api::SessionUpdate::Lifecycle(
-                    SessionEvent::AgentRunUpdated { event, .. },
-                ) = receiver
+                if let zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::Ensemble(
+                    EnsembleEvent::AgentRunUpdated { event, .. },
+                )) = receiver
                     .recv()
                     .await
                     .expect("worker event channel closed before cancellation")
                 {
-                    let ready = match event {
+                    let ready = match *event {
                         AgentRunEvent::Status {
                             status: AgentRunStatus::Resuming,
                             ..

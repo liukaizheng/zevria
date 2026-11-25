@@ -1,6 +1,7 @@
 use super::*;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
+use zevria_session_api::TurnEvent;
 
 #[tokio::test]
 async fn fresh_plan_handoff_captures_guidance_before_first_generation() {
@@ -121,7 +122,7 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if let Some(zevria_session_api::SessionUpdate::Lifecycle(
-                zevria_session_api::SessionEvent::TurnCompleted { .. },
+                zevria_session_api::SessionEvent::Turn(TurnEvent::Completed { .. }),
             )) = events.recv().await
             {
                 break;

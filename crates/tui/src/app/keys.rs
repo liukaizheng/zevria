@@ -520,9 +520,7 @@ impl App {
             Action::Confirm
                 if self
                     .selection_fold_key(selection, scope)
-                    .is_some_and(|key| {
-                        self.folds.mode(key) == zevria_presentation::fold::FoldMode::Summary
-                    }) =>
+                    .is_some_and(|key| self.folds.mode(key) == crate::fold::FoldMode::Summary) =>
             {
                 let key = self.selection_fold_key(selection, scope).unwrap();
                 self.apply_fold(|folds, model, diagnostics| {
@@ -623,7 +621,7 @@ impl App {
             self.span_boundary(selection, forward)
         } else if forward
             && let Some(key @ FoldKey::Block { .. }) = current
-            && self.folds.mode(key) == zevria_presentation::fold::FoldMode::Summary
+            && self.folds.mode(key) == crate::fold::FoldMode::Summary
         {
             self.folds
                 .group(conversation.history(), key, diagnostics)
@@ -689,12 +687,8 @@ impl App {
     pub(super) fn handle_fold_action(&mut self, action: Action) -> bool {
         match action {
             Action::UnfoldAll => self.apply_fold(|folds, _, _| folds.unfold_all()),
-            Action::FoldTurns => self.apply_fold(|folds, model, diagnostics| {
-                model.fold_transcript(folds, diagnostics, TurnFold::AllFinals);
-            }),
-            Action::FoldOlder => self.apply_fold(|folds, model, diagnostics| {
-                model.fold_transcript(folds, diagnostics, TurnFold::LastFinal);
-            }),
+            Action::FoldTurns => self.fold_transcript(TurnFold::AllFinals),
+            Action::FoldOlder => self.fold_transcript(TurnFold::LastFinal),
             Action::FoldToggle | Action::FoldClose | Action::FoldOpen
                 if self.interaction.is_selecting() =>
             {
@@ -716,6 +710,13 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    fn fold_transcript(&mut self, action: TurnFold) {
+        self.apply_fold(|folds, model, diagnostics| {
+            folds.fold_turns(&model.conversation, diagnostics, action);
+            folds.fold_stream(model.session.stream_snapshot());
+        });
     }
 
     pub(super) fn apply_fold(&mut self, f: impl FnOnce(&mut FoldState, &SessionModel, bool)) {

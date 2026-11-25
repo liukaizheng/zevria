@@ -491,7 +491,7 @@ impl BlockView {
             .and_then(|tool| tool.job.as_ref().filter(|_| tool.background))
             && workspace.root.workflow.dialog().is_none()
             && workspace
-                .jobs
+                .root
                 .jobs()
                 .iter()
                 .any(|snapshot| snapshot.id == job.id)

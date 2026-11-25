@@ -443,14 +443,14 @@ mod native {
                         zevria_transcript::transcript::TranscriptItem::Message(Message::user("Plan the desktop redesign before changing files.")),
                         zevria_transcript::transcript::TranscriptItem::Message(Message::assistant("The plan is ready. Review the document before implementation.")),
                     ]);
-                    c.fixture_event(E::PlanStateChanged { state: PlanWorkflowState::Ready { artifact: PlanArtifact {
+                    c.fixture_event(E::Plan(PlanEvent::StateChanged { state: PlanWorkflowState::Ready { artifact: PlanArtifact {
                         version: PlanVersion { id: PlanId::new(), revision: 4 }, title: "A single-column session timeline of Zevria Desktop".into(),
                         markdown: PLAN.into(),source_turn_id: TurnId::new(1),
-                    }}},cx);
+                    }}}),cx);
                 });
             }
             if scene == Scene::Question {
-                controller.update(cx, |c,cx| c.fixture_event(E::QuestionAsked { turn_id: TurnId::new(8), request: QuestionRequest {
+                controller.update(cx, |c,cx| c.fixture_event(E::Question(QuestionEvent::Asked { turn_id: TurnId::new(8), request: QuestionRequest {
                     allow_choice_notes: false,
                     id: QuestionRequestId::new("gallery-question"), source_label: Some("Explore: desktop layout".into()), dismissible: true,
                     questions: vec![QuestionPrompt { id: "approach".into(), header: "Review approach".into(),
@@ -459,14 +459,14 @@ mod native {
                             QuestionOption { label: "Show all details".into(),description: "Expand every call's input and output.".into(), detail: None }], required: true, default: None },
                         QuestionPrompt { id: "notes".into(),header: "Additional notes".into(),question: "Anything else to keep in mind?".into(),
                             kind: QuestionPromptKind::Text { min_length: None, max_length: None }, options: vec![],required: false,default: None }],
-                }},cx));
+                }}),cx));
             }
             if scene == Scene::QuestionDetail {
                 controller.update(cx, |c, cx| {
                     let turn_id = TurnId::new(8);
-                    c.fixture_event(E::TurnStarted { turn_id, mode: SessionMode::Plan,
-                        message: Message::user("Plan validation for the new question preview.") }, cx);
-                    c.fixture_event(E::QuestionAsked { turn_id, request: QuestionRequest {
+                    c.fixture_event(E::Turn(TurnEvent::Started { turn_id, mode: SessionMode::Plan,
+                        message: Message::user("Plan validation for the new question preview.") }), cx);
+                    c.fixture_event(E::Question(QuestionEvent::Asked { turn_id, request: QuestionRequest {
                         id: QuestionRequestId::new("gallery-question-detail"), source_label: None,
                         dismissible: true, allow_choice_notes: true,
                         questions: vec![QuestionPrompt {
@@ -482,14 +482,14 @@ mod native {
                                 QuestionOption { label: "Desktop".into(), description: "Verify the dock in both layouts.".into(), detail: None },
                             ],
                         }],
-                    } }, cx);
+                    } }), cx);
                 });
             }
             if scene == Scene::QuestionNote {
                 controller.update(cx, |c, cx| {
                     let turn_id = TurnId::new(8);
-                    c.fixture_event(E::TurnStarted { turn_id, mode: SessionMode::Plan, message: Message::user("Plan the transcript redesign.") }, cx);
-                    c.fixture_event(E::QuestionAsked { turn_id, request: QuestionRequest {
+                    c.fixture_event(E::Turn(TurnEvent::Started { turn_id, mode: SessionMode::Plan, message: Message::user("Plan the transcript redesign.") }), cx);
+                    c.fixture_event(E::Question(QuestionEvent::Asked { turn_id, request: QuestionRequest {
                         id: QuestionRequestId::new("gallery-question-note"), source_label: None,
                         dismissible: true, allow_choice_notes: true,
                         questions: vec![QuestionPrompt {
@@ -499,7 +499,7 @@ mod native {
                             options: vec![QuestionOption { label: "Focused (Recommended)".into(), description: "Change only the requested workflow.".into(), detail: None },
                                 QuestionOption { label: "Broad".into(), description: "Include adjacent cleanup.".into(), detail: None }],
                         }],
-                    } }, cx);
+                    } }), cx);
                 });
             }
             if scene == Scene::Completion { controller.update(cx, |c,cx| c.edit_draft("/".into(),cx)); }
@@ -828,12 +828,12 @@ mod native {
             c.model.root.conversation.restore(vec![zevria_transcript::transcript::TranscriptItem::Message(Message::user("Keep the saved thinking and adjust effort for this session.")), zevria_transcript::transcript::TranscriptItem::Message(thinking_message())]);
             c.draft = "Keep this draft while choosing a model.".into();
             c.open_model_picker(ModelSelectionScope::SessionOnly, cx);
-            let request_id = c.model.models.request_id.clone();
-            c.fixture_event(E::ModelsResult { request_id: request_id.clone(), result: ModelManagementResult::Catalog { mode: SessionMode::Build, scope: ModelSelectionScope::SessionOnly, current: ModelSelection::new(context.profile.clone(), Level::Medium), profiles: vec![ModelCandidate { context: context.clone(), reasoning_levels: vec![Level::Low, Level::Medium, Level::High] }, ModelCandidate { context: other.clone(), reasoning_levels: vec![Level::Medium, Level::High] }], revision: "gallery-revision".into() } }, cx);
+            let request_id = c.model.controls.models.request_id.clone();
+            c.fixture_event(E::Manage(ManagementEvent::ModelsResult { request_id: request_id.clone(), result: ModelManagementResult::Catalog { mode: SessionMode::Build, scope: ModelSelectionScope::SessionOnly, current: ModelSelection::new(context.profile.clone(), Level::Medium), profiles: vec![ModelCandidate { context: context.clone(), reasoning_levels: vec![Level::Low, Level::Medium, Level::High] }, ModelCandidate { context: other.clone(), reasoning_levels: vec![Level::Medium, Level::High] }], revision: "gallery-revision".into() } }), cx);
             c.select_model(usize::from(conversion), cx);
             if conversion {
                 c.apply_model_selection(cx);
-                c.fixture_event(E::ModelsResult { request_id: request_id.clone(), result: ModelManagementResult::ConfirmationRequired(ModelSelectionPreview { request_id, session_generation: "gallery-runtime".into(), generation: 1, mode: SessionMode::Build, scope: ModelSelectionScope::SessionOnly, source: ModelSelection::new(context.profile, Level::Medium), target: ModelSelection::new(other.profile, Level::Medium), revision: "gallery-revision".into(), reason: "The effective checkpoint contains source-model-only opaque context. The destination cannot replay it without a portable source-model summary.".into() }) }, cx);
+                c.fixture_event(E::Manage(ManagementEvent::ModelsResult { request_id: request_id.clone(), result: ModelManagementResult::ConfirmationRequired(ModelSelectionPreview { request_id, session_generation: "gallery-runtime".into(), generation: 1, mode: SessionMode::Build, scope: ModelSelectionScope::SessionOnly, source: ModelSelection::new(context.profile, Level::Medium), target: ModelSelection::new(other.profile, Level::Medium), revision: "gallery-revision".into(), reason: "The effective checkpoint contains source-model-only opaque context. The destination cannot replay it without a portable source-model summary.".into() }) }), cx);
             }
             cx.notify();
         });
@@ -852,8 +852,8 @@ mod native {
     ) {
         controller.update(cx, |c, cx| {
             let turn_id = TurnId::new(31);
-            c.fixture_event(E::TurnStarted { turn_id, mode: SessionMode::Build, message: Message::user("Fix the failing transcript preview test.") }, cx);
-            c.fixture_event(E::ModelCallStarted { turn_id, call: 1 }, cx);
+            c.fixture_event(E::Turn(TurnEvent::Started { turn_id, mode: SessionMode::Build, message: Message::user("Fix the failing transcript preview test.") }), cx);
+            c.fixture_event(E::Turn(TurnEvent::ModelCallStarted { turn_id, call: 1 }), cx);
             if scene == Scene::ThinkingInterrupted {
                 let mut attempt = zevria_content::ResponseAttempt::new(zevria_foundation::ModelProfileRef::new("fixture", "fixture"));
                 attempt.presentation.push(zevria_content::AssistantPresentationPart {
@@ -861,11 +861,11 @@ mod native {
                     content: zevria_content::AssistantPresentationContent::Reasoning { text: "The restored preview only scans sixteen lines. I was tracing the reader when the response stopped.".into() },
                 });
                 attempt.close(zevria_content::ResponseAttemptOutcome::Interrupted);
-                c.fixture_event(E::ResponseAttemptUpdated { turn_id, attempt }, cx);
-                c.fixture_event(E::TurnCancelled { turn_id }, cx);
+                c.fixture_event(E::Turn(TurnEvent::ResponseAttemptUpdated { turn_id, attempt }), cx);
+                c.fixture_event(E::Turn(TurnEvent::Cancelled { turn_id }), cx);
             } else {
-                c.fixture_event(E::AssistantStreamUpdated { turn_id, snapshot: zevria_content::AssistantStreamSnapshot { message: Some(thinking_message()), attempt: None } }, cx);
-                if scene == Scene::ThinkingUnsaved { c.fixture_event(E::TurnCancelled { turn_id }, cx); }
+                c.fixture_event(SessionStreamState::new(turn_id, zevria_content::AssistantStreamSnapshot { message: Some(thinking_message()), attempt: None }), cx);
+                if scene == Scene::ThinkingUnsaved { c.fixture_event(E::Turn(TurnEvent::Cancelled { turn_id }), cx); }
             }
         });
     }
@@ -896,22 +896,25 @@ mod native {
             controller.update(cx, |c, cx| {
                 let turn_id = TurnId::new(32);
                 c.fixture_event(
-                    E::TurnStarted {
+                    E::Turn(TurnEvent::Started {
                         turn_id,
                         mode: SessionMode::Build,
                         message: prompt,
-                    },
+                    }),
                     cx,
                 );
-                c.fixture_event(E::ModelCallStarted { turn_id, call: 1 }, cx);
                 c.fixture_event(
-                    E::AssistantStreamUpdated {
+                    E::Turn(TurnEvent::ModelCallStarted { turn_id, call: 1 }),
+                    cx,
+                );
+                c.fixture_event(
+                    SessionStreamState::new(
                         turn_id,
-                        snapshot: AssistantStreamSnapshot {
+                        AssistantStreamSnapshot {
                             message: None,
                             attempt: Some(attempt),
                         },
-                    },
+                    ),
                     cx,
                 );
             });
@@ -951,11 +954,11 @@ mod native {
     ) -> anyhow::Result<()> {
         controller.update(cx, |c, cx| {
             let turn_id = TurnId::new(8);
-            c.fixture_event(E::TurnStarted { turn_id, mode: SessionMode::Build,
-                message: Message::user("Run the release checks and watch the trace while the tests finish.") }, cx);
-            c.fixture_event(E::ModelCallStarted { turn_id, call: 1 }, cx);
-            c.fixture_event(E::Intermediate { turn_id,
-                message: Message::assistant("The UI bundle built successfully. The release tests and trace are still running."), attempt_id: None }, cx);
+            c.fixture_event(E::Turn(TurnEvent::Started { turn_id, mode: SessionMode::Build,
+                message: Message::user("Run the release checks and watch the trace while the tests finish.") }), cx);
+            c.fixture_event(E::Turn(TurnEvent::ModelCallStarted { turn_id, call: 1 }), cx);
+            c.fixture_event(E::Turn(TurnEvent::Intermediate { turn_id,
+                message: Message::assistant("The UI bundle built successfully. The release tests and trace are still running."), attempt_id: None }), cx);
             let now = SystemTime::now();
             let mut snapshots = Vec::new();
             for (key, command, age, mode, finished) in [
@@ -973,12 +976,12 @@ mod native {
                 };
                 let call = ToolCall::new(CallId::from_wire(&call_id), ToolFunction::new(ToolName::new("command").unwrap(),
                     serde_json::json!({"command": command, "background": mode == CommandJobMode::Background})));
-                c.fixture_event(E::Intermediate { turn_id, message: Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(call)])), attempt_id: None }, cx);
-                c.fixture_event(E::CommandJobUpdated { job: snapshot.clone() }, cx);
+                c.fixture_event(E::Turn(TurnEvent::Intermediate { turn_id, message: Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(call)])), attempt_id: None }), cx);
+                c.fixture_event(E::Job(JobEvent::Updated { job: snapshot.clone() }), cx);
                 snapshots.push(snapshot);
             }
-            c.fixture_event(E::CommandJobsReported { turn_id, notice: CommandJobNotice::new(CommandJobNoticeKind::Update,
-                vec![snapshots[0].clone()], snapshots[1..].to_vec(), "The UI build finished successfully.".into()) }, cx);
+            c.fixture_event(E::Job(JobEvent::Reported { turn_id, notice: CommandJobNotice::new(CommandJobNoticeKind::Update,
+                vec![snapshots[0].clone()], snapshots[1..].to_vec(), "The UI build finished successfully.".into()) }), cx);
             c.toggle_jobs(cx);
             for _ in 0..2 {
                 let SessionCommand::Control(ControlCommand::Command(request)) = receiver.try_recv()? else {
@@ -992,7 +995,7 @@ mod native {
                     stdout_tail: id.as_ref().map_or_else(String::new, |_| include_str!("fixtures/jobs-stdout.txt").into()),
                     stderr_tail: id.as_ref().map_or_else(String::new, |_| include_str!("fixtures/jobs-stderr.txt").into()),
                 }).collect();
-                c.fixture_event(E::CommandControlResult { request_id: request.request_id, result: CommandControlResult::Inspected(views) }, cx);
+                c.fixture_event(E::Job(JobEvent::ControlResult { request_id: request.request_id, result: CommandControlResult::Inspected(views) }), cx);
             }
             Ok(())
         })
@@ -1002,11 +1005,11 @@ mod native {
         controller.update(cx, |c, cx| {
             let turn_id = TurnId::new(9);
             c.fixture_event(
-                E::TurnStarted {
+                E::Turn(TurnEvent::Started {
                     turn_id,
                     mode: SessionMode::Build,
                     message: Message::user("Fix the failing transcript preview test."),
-                },
+                }),
                 cx,
             );
             for (id, title, kind, status, workspace) in [
@@ -1033,7 +1036,7 @@ mod native {
                 ),
             ] {
                 c.fixture_event(
-                    E::SubtaskLaunched {
+                    E::Subtask(SubtaskEvent::Launched {
                         turn_id,
                         call_id: format!("call-{id}"),
                         entry_index: 0,
@@ -1045,15 +1048,15 @@ mod native {
                             workspace: Some(workspace.into()),
                             status: SubtaskStatus::Starting,
                         },
-                    },
+                    }),
                     cx,
                 );
                 c.fixture_event(
-                    E::SubtaskStatus {
+                    E::Subtask(SubtaskEvent::Status {
                         turn_id,
                         id: SubtaskId::new(id),
                         status,
-                    },
+                    }),
                     cx,
                 );
             }
@@ -1064,22 +1067,22 @@ mod native {
     fn working(controller: &Entity<SessionController>, cx: &mut gpui_kit::App) {
         controller.update(cx, |c,cx| {
             let turn_id = TurnId::new(8);
-            c.fixture_event(E::TurnStarted { turn_id,mode: SessionMode::Build,message: Message::user("Fix the failing transcript preview test.") },cx);
-            c.fixture_event(E::ModelCallStarted { turn_id, call: 1 }, cx);
-            c.fixture_event(E::Intermediate { turn_id,message: Message::assistant("I'll reproduce the failure, then trace the restored prompt."),attempt_id: None },cx);
+            c.fixture_event(E::Turn(TurnEvent::Started { turn_id,mode: SessionMode::Build,message: Message::user("Fix the failing transcript preview test.") }),cx);
+            c.fixture_event(E::Turn(TurnEvent::ModelCallStarted { turn_id, call: 1 }), cx);
+            c.fixture_event(E::Turn(TurnEvent::Intermediate { turn_id,message: Message::assistant("I'll reproduce the failure, then trace the restored prompt."),attempt_id: None }),cx);
             let profile = ModelProfileRef::new("fixture", "fixture");
-            c.fixture_event(E::UsageUpdated {
+            c.fixture_event(E::Turn(TurnEvent::UsageUpdated {
                 turn_id,
                 usage: TokenUsage { input_tokens: 12_300, cached_tokens: 10_200, output_tokens: 2_100, total_tokens: 14_400 },
                 profile: profile.clone(), model_role: ModelRole::Build,
                 input_token_limit: 100_000, context_window_tokens: 128_000,
-            }, cx);
-            c.fixture_event(E::ContextUsageUpdated { turn_id, snapshot: ContextTokenSnapshot {
+            }), cx);
+            c.fixture_event(E::Turn(TurnEvent::ContextUsageUpdated { turn_id, snapshot: ContextTokenSnapshot {
                 profile, model_role: ModelRole::Build,
                 projected_input_tokens: Some(14_800), known_input_tokens: 14_800,
                 unresolved_media: Default::default(), source: ContextTokenSource::UsagePlusDelta,
                 automatic_trigger: 80_000, input_token_limit: 100_000, context_window_tokens: 128_000,
-            }}, cx);
+            }}), cx);
             for (id,name,args) in [
                 ("command-ok","command",serde_json::json!({"command":"rtk cargo test -p zevria-transcript"})),
                 ("command-fail","command",serde_json::json!({"command":"rtk proxy cargo test restore_roundtrip -- --nocapture 2>&1 | tail -20"})),
@@ -1087,15 +1090,15 @@ mod native {
                 ("command-live","command",serde_json::json!({"command":"rtk cargo test -p zevria-transcript restore_roundtrip"})),
             ] {
                 let call = ToolCall::new(CallId::from_wire(id),ToolFunction::new(ToolName::new(name).unwrap(),args));
-                c.fixture_event(E::Intermediate { turn_id,message: Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(call)])),attempt_id: None },cx);
+                c.fixture_event(E::Turn(TurnEvent::Intermediate { turn_id,message: Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(call)])),attempt_id: None }),cx);
                 if id != "command-live" {
-                    c.fixture_event(E::ToolResults { turn_id,message: Message::tool_result(CallId::from_wire(id),ToolName::new(name).unwrap(),
+                    c.fixture_event(E::Turn(TurnEvent::ToolResults { turn_id,message: Message::tool_result(CallId::from_wire(id),ToolName::new(name).unwrap(),
                         if id == "command-fail" { "exit_code: 101\nduration: 2.4s\n<stderr>\nassertion failed: restored preview is empty\n</stderr>" } else if id == "edit" { "Updated transcript preview scanning." } else { "exit_code: 0\nduration: 1.8s\n<stdout>\nAll 18 tests passed.\n</stdout>" }),
                         metadata: vec![ToolResultMetadata { id: id.into(),call_id: None,tool_name: name.into(),
                             outcome: if id == "command-fail" { ToolCallOutcome::Error } else { ToolCallOutcome::Success },diagnostic: None,
                             detail: if id == "edit" { Some(ToolResultDetail::FileChanges(vec![FileChangeOutput { path: "crates/transcript/src/transcript.rs".into(),
                                 change: FileChange::Update { unified_diff: "--- a/crates/transcript/src/transcript.rs\n+++ b/crates/transcript/src/transcript.rs\n@@ -1 +1,3 @@\n-let preview = lines.take(16);\n+let preview = lines\n+    .take(PREVIEW_SCAN_LINES)\n+    .find_map(prompt_preview);\n".into(),move_path: None } }])) } else { None },
-                        }] },cx);
+                        }] }),cx);
                 }
             }
             let observed = c.model.root.session.observed_at();
@@ -1104,3 +1107,8 @@ mod native {
         });
     }
 }
+
+use zevria_session_api::SessionStreamState;
+use zevria_session_api::{
+    JobEvent, ManagementEvent, PlanEvent, QuestionEvent, SubtaskEvent, TurnEvent,
+};

@@ -38,11 +38,16 @@ struct ValidatedInput {
     responses_count_probe: Option<ResponsesCountProbe>,
 }
 
+#[derive(Default)]
+pub(crate) struct SlotCache {
+    pub(crate) responses: crate::responses::ResponsesCache,
+    anthropic_history: crate::anthropic::HistoryCache,
+}
+
 struct ProfileSlot {
     profile: ResolvedModelProfile,
     runtime: Option<ProfileRuntime>,
-    responses_cache: Arc<Mutex<crate::responses::ResponsesCache>>,
-    anthropic_history: Mutex<crate::anthropic::HistoryCache>,
+    cache: Arc<Mutex<SlotCache>>,
 }
 
 enum ProfileRuntime {
@@ -150,8 +155,7 @@ impl ProviderRouter {
                 router.slots.push(ProfileSlot {
                     profile: profile.clone(),
                     runtime: None,
-                    responses_cache: Default::default(),
-                    anthropic_history: Mutex::default(),
+                    cache: Default::default(),
                 });
             }
         }
@@ -187,8 +191,7 @@ impl ProviderRouter {
                 slots.push(ProfileSlot {
                     profile,
                     runtime: None,
-                    responses_cache: Default::default(),
-                    anthropic_history: Mutex::default(),
+                    cache: Default::default(),
                 });
                 index
             };
@@ -240,7 +243,9 @@ impl ProviderRouter {
             .find(|slot| &slot.profile.profile == profile)
             .and_then(|slot| slot.runtime.as_ref())
             .and_then(|runtime| match runtime {
-                ProfileRuntime::Responses(runtime) => runtime.ws.continuation.as_ref(),
+                ProfileRuntime::Responses(runtime) => {
+                    runtime.responses_transport.ws.continuation.as_ref()
+                }
                 ProfileRuntime::Anthropic(_) => None,
             })
             .map(|continuation| continuation.response_id.as_str())
@@ -273,15 +278,9 @@ impl ProviderRouter {
             ProfileProtocol::Responses { endpoint, .. } if probe => {
                 let probe = ResponsesCountProbe::new(
                     &request.input,
-                    zevria_responses::replay::PreflightOptions {
-                        target: &profile.profile,
-                        developer_messages: endpoint.compatibility.developer_messages,
-                        tool_options: zevria_responses::tools::ToolRendererOptions {
-                            strict_tools: endpoint.compatibility.strict_tools,
-                        },
-                        additional_tools: endpoint.compatibility.additional_tools,
-                        policy: &profile.image_accounting,
-                    },
+                    endpoint
+                        .compatibility
+                        .preflight_options(&profile.profile, &profile.image_accounting),
                 )?;
                 return Ok(ValidatedInput {
                     responses_count_probe: Some(probe),
@@ -319,12 +318,12 @@ impl ProviderRouter {
                     &mut scratch
                 } else {
                     live = slot
-                        .anthropic_history
+                        .cache
                         .lock()
                         .map_err(|_| anyhow::anyhow!("Anthropic history cache lock poisoned"))?;
-                    &mut *live
+                    &mut live.anthropic_history
                 };
-                let prepared = cache.prepare_with_policy(
+                let prepared = cache.prepare(
                     &request.input,
                     request.input_identity,
                     &profile.profile,
@@ -348,7 +347,7 @@ impl ProviderRouter {
         Ok(ValidatedInput::default())
     }
 
-    async fn initialize_slot(
+    fn initialize_slot(
         &mut self,
         index: usize,
         level: ReasoningLevel,
@@ -367,9 +366,8 @@ impl ProviderRouter {
                         &self.preamble,
                         &self.session_id,
                         &cache_key,
-                    )
-                    .await?;
-                    runtime.responses_cache = slot.responses_cache.clone();
+                    )?;
+                    runtime.slot_cache = slot.cache.clone();
                     let runtime = Diagnostics::configure_runtime(runtime, &self.diagnostics);
                     ProfileRuntime::Responses(Box::new(runtime))
                 }
@@ -384,10 +382,9 @@ impl ProviderRouter {
             };
             slot.runtime = Some(runtime);
         }
-        Ok(slot
-            .runtime
+        slot.runtime
             .as_mut()
-            .expect("a successfully initialized slot contains a runtime"))
+            .ok_or_else(|| anyhow::anyhow!("provider slot was not initialized"))
     }
 }
 
@@ -407,10 +404,7 @@ impl ModelProvider for ProviderRouter {
             {
                 return;
             }
-            match self
-                .initialize_slot(route.slot, route.reasoning_level)
-                .await
-            {
+            match self.initialize_slot(route.slot, route.reasoning_level) {
                 Ok(runtime) => runtime.prewarm(role).await,
                 Err(error) => tracing::warn!(
                     role = role.name(), error = %error,
@@ -491,22 +485,17 @@ impl ModelProvider for ProviderRouter {
     ) -> anyhow::Result<zevria_model::models::ReplayPreflight> {
         let index = self.profile_slot(target)?;
         match &self.slots[index].profile.protocol {
-            ProfileProtocol::Responses { endpoint, .. } => {
-                zevria_responses::replay::preflight_with_policy(
-                    input,
-                    target,
-                    endpoint.compatibility.developer_messages,
-                    zevria_responses::tools::ToolRendererOptions {
-                        strict_tools: endpoint.compatibility.strict_tools,
-                    },
-                    endpoint.compatibility.additional_tools,
-                    &self.slots[index].profile.image_accounting,
-                )
-            }
+            ProfileProtocol::Responses { endpoint, .. } => zevria_responses::replay::preflight(
+                input,
+                endpoint
+                    .compatibility
+                    .preflight_options(target, &self.slots[index].profile.image_accounting),
+            ),
             ProfileProtocol::Anthropic { endpoint, .. } => Ok(self.slots[index]
-                .anthropic_history
+                .cache
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Anthropic history cache lock poisoned"))?
+                .anthropic_history
                 .assess(
                     input,
                     None,
@@ -529,9 +518,10 @@ impl ModelProvider for ProviderRouter {
         let slot = &self.slots[self.profile_slot(target)?];
         match &slot.profile.protocol {
             ProfileProtocol::Anthropic { endpoint, .. } => Ok(slot
-                .anthropic_history
+                .cache
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Anthropic history cache lock poisoned"))?
+                .anthropic_history
                 .assess(
                     input,
                     Some(identity),
@@ -540,22 +530,17 @@ impl ModelProvider for ProviderRouter {
                     &slot.profile.image_accounting,
                 )?),
             ProfileProtocol::Responses { endpoint, .. } => slot
-                .responses_cache
+                .cache
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Responses slot cache lock poisoned"))?
+                .responses
                 .input
-                .assess_with_policy(
+                .assess(
                     input,
                     identity,
-                    zevria_responses::replay::PreflightOptions {
-                        target,
-                        developer_messages: endpoint.compatibility.developer_messages,
-                        tool_options: zevria_responses::tools::ToolRendererOptions {
-                            strict_tools: endpoint.compatibility.strict_tools,
-                        },
-                        additional_tools: endpoint.compatibility.additional_tools,
-                        policy: &slot.profile.image_accounting,
-                    },
+                    endpoint
+                        .compatibility
+                        .preflight_options(target, &slot.profile.image_accounting),
                 ),
         }
     }
@@ -600,9 +585,10 @@ impl ModelProvider for ProviderRouter {
         let (instructions, tool_tokens, folded_tokens) = match &slot.profile.protocol {
             ProfileProtocol::Responses { endpoint, .. } => {
                 let mut cache = slot
-                    .responses_cache
+                    .cache
                     .lock()
                     .map_err(|_| anyhow::anyhow!("Responses slot cache lock poisoned"))?;
+                let cache = &mut cache.responses;
                 let tools =
                     cache.rendered_tools(request, &endpoint.compatibility, &endpoint.web_search)?;
                 let folded = if endpoint.compatibility.additional_tools {
@@ -705,7 +691,7 @@ impl ModelProvider for ProviderRouter {
             let history = self.validate_input(index, &request, InputPurpose::Dispatch)?;
             self.last_dispatched = Some(index);
             let level = selection.reasoning_level;
-            let runtime = self.initialize_slot(index, level).await?;
+            let runtime = self.initialize_slot(index, level)?;
             runtime.set_reasoning_level(level);
             runtime
                 .complete(request, progress, history.anthropic_history)
@@ -731,7 +717,7 @@ impl ModelProvider for ProviderRouter {
             );
             let input = self.validate_input(index, &request, InputPurpose::Count)?;
             let level = selection.reasoning_level;
-            let runtime = self.initialize_slot(index, level).await?;
+            let runtime = self.initialize_slot(index, level)?;
             runtime.set_reasoning_level(level);
             runtime.count_input_tokens(request, input).await
         })
@@ -747,9 +733,7 @@ impl ModelProvider for ProviderRouter {
         Box::pin(async move {
             let route = route?;
             let history = self.validate_input(route.slot, &request, InputPurpose::Dispatch)?;
-            let runtime = self
-                .initialize_slot(route.slot, route.reasoning_level)
-                .await?;
+            let runtime = self.initialize_slot(route.slot, route.reasoning_level)?;
             runtime.set_reasoning_level(route.reasoning_level);
             runtime
                 .complete(request, progress, history.anthropic_history)
@@ -775,9 +759,7 @@ impl ModelProvider for ProviderRouter {
                 return Ok(CompactResult::Unsupported);
             }
             self.validate_input(route.slot, &request, InputPurpose::Dispatch)?;
-            let runtime = self
-                .initialize_slot(route.slot, route.reasoning_level)
-                .await?;
+            let runtime = self.initialize_slot(route.slot, route.reasoning_level)?;
             runtime.set_reasoning_level(route.reasoning_level);
             runtime.compact(request).await
         })
@@ -791,9 +773,7 @@ impl ModelProvider for ProviderRouter {
         Box::pin(async move {
             let route = route?;
             let input = self.validate_input(route.slot, &request, InputPurpose::Count)?;
-            let runtime = self
-                .initialize_slot(route.slot, route.reasoning_level)
-                .await?;
+            let runtime = self.initialize_slot(route.slot, route.reasoning_level)?;
             runtime.set_reasoning_level(route.reasoning_level);
             runtime.count_input_tokens(request, input).await
         })

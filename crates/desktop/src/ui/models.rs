@@ -33,7 +33,7 @@ impl DesktopWindow {
         });
     }
     pub(super) fn sync_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let picker = &self.controller.read(cx).model.models;
+        let picker = &self.controller.read(cx).model.controls.models;
         if !picker.is_open() {
             if let Some(view) = self.model_ui.take()
                 && self.controller.read(cx).phase == Phase::Live
@@ -117,7 +117,7 @@ impl DesktopWindow {
             window.focus_prev(cx);
         }
         if !view.focus.contains_focused(window, cx) {
-            let picker = &self.controller.read(cx).model.models;
+            let picker = &self.controller.read(cx).model.controls.models;
             if next {
                 window.focus(&view.focus, cx);
                 window.focus_next(cx);
@@ -146,27 +146,15 @@ impl DesktopWindow {
         let Some(view) = &self.model_ui else {
             return Vec::new();
         };
-        let query = view.search.read(cx).value().to_lowercase();
         self.controller
             .read(cx)
             .model
+            .controls
             .models
-            .profiles
-            .iter()
-            .enumerate()
-            .filter(|(_, model)| {
-                model
-                    .context
-                    .profile
-                    .to_string()
-                    .to_lowercase()
-                    .contains(&query)
-            })
-            .map(|(index, _)| index)
-            .collect()
+            .filter_indices(view.search.read(cx).value().as_ref())
     }
     fn navigate_models(&mut self, next: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let picker = &self.controller.read(cx).model.models;
+        let picker = &self.controller.read(cx).model.controls.models;
         if picker.pending() || picker.preview().is_some() {
             return;
         }
@@ -197,7 +185,7 @@ impl DesktopWindow {
         }
     }
     fn accept_model_choice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let picker = &self.controller.read(cx).model.models;
+        let picker = &self.controller.read(cx).model.controls.models;
         if picker.pending() {
             return;
         }
@@ -229,7 +217,7 @@ impl DesktopWindow {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let view = self.model_ui.as_ref()?;
-        let picker = &self.controller.read(cx).model.models;
+        let picker = &self.controller.read(cx).model.controls.models;
         if !picker.is_open() {
             return None;
         }
@@ -308,12 +296,12 @@ impl DesktopWindow {
                 }),
             )
             .on_action(cx.listener(|this, _: &actions::ModelBack, window, cx| {
-                let picker = &this.controller.read(cx).model.models;
+                let picker = &this.controller.read(cx).model.controls.models;
                 if picker.pending() || picker.preview().is_some() {
                     return;
                 }
                 this.controller.update(cx, |this, cx| {
-                    this.model.models.back();
+                    this.model.controls.models.back();
                     cx.notify();
                 });
                 if let Some(view) = &this.model_ui {
@@ -512,7 +500,7 @@ impl DesktopWindow {
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.controller.update(cx, |this, cx| {
-                                if this.model.models.preview().is_some() {
+                                if this.model.controls.models.preview().is_some() {
                                     this.confirm_model_conversion(cx);
                                 } else {
                                     this.apply_model_selection(cx);

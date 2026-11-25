@@ -12,6 +12,8 @@ use zevria_foundation::{
     SubtaskDescriptor, SubtaskId, SubtaskKind, SubtaskStatus,
 };
 use zevria_presentation::status_icon::StatusIcon;
+use zevria_session_api::SessionStreamState;
+use zevria_session_api::{JobEvent, SubtaskEvent, TurnEvent};
 use zevria_transcript::transcript::TranscriptItem;
 
 fn restore(
@@ -176,13 +178,13 @@ fn seed_disclosure_rows(controller: &Entity<SessionController>, cx: &mut TestApp
     let turn_id = TurnId::new(1);
     let mut emit = |update| event(controller, update, cx);
     let command_call = |id, input| tool_call(id, "command", json!({"command":input}));
-    emit(E::TurnStarted {
+    emit(E::Turn(TurnEvent::Started {
         turn_id,
         mode: SessionMode::Build,
         message: Message::user("Check the worktree and documentation"),
-    });
-    emit(E::ModelCallStarted { turn_id, call: 1 });
-    emit(E::Intermediate {
+    }));
+    emit(E::Turn(TurnEvent::ModelCallStarted { turn_id, call: 1 }));
+    emit(E::Turn(TurnEvent::Intermediate {
         turn_id,
         message: Message::Assistant(AssistantMessage::new(vec![
             AssistantContent::Reasoning(Reasoning::new(THOUGHT)),
@@ -192,13 +194,13 @@ fn seed_disclosure_rows(controller: &Entity<SessionController>, cx: &mut TestApp
             tool_call("launch", "launch_subtasks", json!({})),
         ])),
         attempt_id: None,
-    });
+    }));
     for (id, name, output) in [
         ("foreground", "command", COMMAND_OUTPUT),
         ("background", "command", "exit_code: 0\nduration: 1s"),
         ("launch", "launch_subtasks", "Started docs review"),
     ] {
-        emit(E::ToolResults {
+        emit(E::Turn(TurnEvent::ToolResults {
             turn_id,
             message: Message::tool_result(
                 CallId::from_wire(id),
@@ -206,11 +208,11 @@ fn seed_disclosure_rows(controller: &Entity<SessionController>, cx: &mut TestApp
                 output,
             ),
             metadata: vec![],
-        });
+        }));
     }
     let finished_at = SystemTime::now();
-    emit(E::CommandJobUpdated {
-        job: CommandJobSnapshot {
+    emit(E::Job(JobEvent::Updated {
+        job: Box::new(CommandJobSnapshot {
             id: CommandJobId::new("job-format"),
             call_id: Some("background".into()),
             command: "cargo fmt --check".into(),
@@ -224,27 +226,27 @@ fn seed_disclosure_rows(controller: &Entity<SessionController>, cx: &mut TestApp
             finished_at: Some(finished_at),
             stdout_bytes: 0,
             stderr_bytes: 0,
-        },
-    });
+        }),
+    }));
     let subtask_id = SubtaskId::new("docs");
-    emit(E::SubtaskLaunched {
+    emit(E::Subtask(SubtaskEvent::Launched {
         turn_id,
         call_id: "launch".into(),
         entry_index: 0,
-        descriptor: SubtaskDescriptor {
+        descriptor: Box::new(SubtaskDescriptor {
             id: subtask_id.clone(),
             parent_session_id: "session".into(),
             title: "Review the docs".into(),
             kind: SubtaskKind::Explore,
             workspace: None,
             status: SubtaskStatus::Starting,
-        },
-    });
-    emit(E::SubtaskStatus {
+        }),
+    }));
+    emit(E::Subtask(SubtaskEvent::Status {
         turn_id,
         id: subtask_id,
         status: SubtaskStatus::Completed,
-    });
+    }));
     let mut attempt = ResponseAttempt::new(ModelProfileRef::new("fixture", "fixture"));
     attempt.hosted_activity.push(HostedActivity {
         kind: HostedActivityKind::WebSearch,
@@ -253,7 +255,10 @@ fn seed_disclosure_rows(controller: &Entity<SessionController>, cx: &mut TestApp
         status: HostedActivityStatus::Completed,
         action: Some(json!({"type":"search", "query":"cargo check"})),
     });
-    emit(E::ResponseAttemptUpdated { turn_id, attempt });
+    emit(E::Turn(TurnEvent::ResponseAttemptUpdated {
+        turn_id,
+        attempt: Box::new(attempt),
+    }));
 }
 
 #[gpui_kit::test]
@@ -414,28 +419,28 @@ fn running_command_collapses_to_status_and_copies_original_input_and_output(
     let id = TurnId::new(20);
     event(
         &controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id: id,
             mode: SessionMode::Build,
             message: Message::user("Check the worktree"),
-        },
+        }),
         cx,
     );
     event(
         &controller,
-        E::ModelCallStarted {
+        E::Turn(TurnEvent::ModelCallStarted {
             turn_id: id,
             call: 1,
-        },
+        }),
         cx,
     );
     event(
         &controller,
-        E::Intermediate {
+        E::Turn(TurnEvent::Intermediate {
             turn_id: id,
             message: command(),
             attempt_id: None,
-        },
+        }),
         cx,
     );
     render(window, cx);
@@ -444,7 +449,7 @@ fn running_command_collapses_to_status_and_copies_original_input_and_output(
     let payload = "exit_code: 101\nduration: 1.8s\n<stdout>\n M Cargo.toml\n</stdout>\n<stderr>\npermission denied\n</stderr>";
     event(
         &controller,
-        E::ToolResults {
+        E::Turn(TurnEvent::ToolResults {
             turn_id: id,
             metadata: vec![],
             message: Message::tool_result(
@@ -452,7 +457,7 @@ fn running_command_collapses_to_status_and_copies_original_input_and_output(
                 ToolName::new("command").unwrap(),
                 payload,
             ),
-        },
+        }),
         cx,
     );
     render(window, cx);
@@ -512,21 +517,21 @@ fn running_command_collapses_to_status_and_copies_original_input_and_output(
     assert!(command_row(&view, cx).expanded);
     event(
         &controller,
-        E::ModelCallStarted {
+        E::Turn(TurnEvent::ModelCallStarted {
             turn_id: id,
             call: 2,
-        },
+        }),
         cx,
     );
     event(
         &controller,
-        E::AssistantStreamUpdated {
-            turn_id: id,
-            snapshot: zevria_content::AssistantStreamSnapshot {
+        SessionStreamState::new(
+            id,
+            zevria_content::AssistantStreamSnapshot {
                 message: Some(Message::assistant("I'll report the result.")),
                 attempt: None,
             },
-        },
+        ),
         cx,
     );
     assert!(command_row(&view, cx).expanded);

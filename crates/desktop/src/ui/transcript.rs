@@ -88,7 +88,7 @@ impl TranscriptView {
         cx: &mut Context<Self>,
     ) -> Self {
         let pane = PaneView::new(cx);
-        let selected = controller.read(cx).model.selected_child.clone();
+        let selected = controller.read(cx).model.controls.selected_child.clone();
         let watch = cx.observe_in(&controller, window, |this, _, window, cx| {
             this.sync(window, cx)
         });
@@ -119,7 +119,13 @@ impl TranscriptView {
     }
 
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self.controller.read(cx).model.selected_child.clone();
+        let selected = self
+            .controller
+            .read(cx)
+            .model
+            .controls
+            .selected_child
+            .clone();
         let epoch = self
             .controller
             .read(cx)
@@ -153,7 +159,7 @@ impl TranscriptView {
         let revision = model.conversation.revision();
         let structure = model.conversation.structure_revision();
         let snapshot = model.session.stream_snapshot();
-        let live_attempt = controller.live_attempt_header(model);
+        let live_attempt = model.live_attempt_header();
         let busy = model.session.has_turn_work();
         let call = model.session.call_header();
         let pending = model.pending_prompt().map(|p| p.id());
@@ -193,7 +199,7 @@ impl TranscriptView {
         let mut projection = self.pane.projector.project_timeline(
             model,
             &format!("{epoch:?}"),
-            &controller.unsaved_blocks,
+            model.unsaved_blocks(),
             activity.as_deref(),
             live_attempt,
             &self.pane.rows,

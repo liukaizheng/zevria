@@ -146,9 +146,12 @@ turn capacity admission still runs.
 `/orchestrate <prompt>` is a one-request Build modifier, not a mode command or
 skill. It strips only its own prefix and never reparses the remainder as a
 command or skill. It accepts ordered text/images, including image-only arguments;
-a bare command retains the draft. Plan/worker/capability/concurrency rejection
-also retains or recovers the complete draft through normal admission handling.
-It neither selects Build nor approves/revises a pending Plan.
+a bare command retains the draft. Fresh direct submissions in Plan are rejected
+locally without clearing the draft. Queued follow-ups keep their captured mode;
+the engine validates that mode at dispatch and a rejection recovers the draft.
+Worker/capability/concurrency rejection also retains or recovers the complete
+draft through normal admission handling. The command neither selects Build nor
+approves/revises a pending Plan.
 
 History and recall derive the `/orchestrate ` prefix from typed request metadata,
 not model-visible prompt text. Replacing that recalled prompt while keeping the

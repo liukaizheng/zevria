@@ -1,6 +1,7 @@
 use super::*;
 use crate::ui::window::Replacement;
 use gpui_kit::{ClipboardItem, Focusable as _, base::test_support};
+use zevria_session_api::PlanEvent;
 
 fn assert_painted(window: &gpui_kit::Window, label: &str) {
     assert!(
@@ -36,7 +37,7 @@ fn ctrl_enter_confirms_only_a_visible_unblocked_decision(cx: &mut TestAppContext
     };
     event(
         &controller,
-        E::PlanStateChanged {
+        E::Plan(PlanEvent::StateChanged {
             state: PlanWorkflowState::Ready {
                 artifact: PlanArtifact {
                     version,
@@ -45,7 +46,7 @@ fn ctrl_enter_confirms_only_a_visible_unblocked_decision(cx: &mut TestAppContext
                     source_turn_id: TurnId::new(1),
                 },
             },
-        },
+        }),
         cx,
     );
     view.update(cx, |view, cx| {

@@ -3,6 +3,7 @@ use zevria_instructions::DirectivePayload;
 use zevria_instructions::skill::SkillCatalog;
 use zevria_instructions::skill::SkillPromptCatalog;
 use zevria_instructions::skill::SkillsConfig;
+use zevria_session_api::{ManagementEvent, TurnEvent};
 
 fn engine(responses: usize) -> (tempfile::TempDir, SessionEngine<ScriptedProvider>) {
     let (dir, writer) = test_transcript();
@@ -149,7 +150,7 @@ async fn complete_catalog_is_disclosed_or_rejected_without_disabling_management(
         assert!(engine.active_skills().unwrap().is_empty());
         assert!(engine.provider.requests.lock().unwrap().is_empty());
         assert!(collect_events(&mut receiver).await.iter().any(|e| matches!(e,
-            SessionEvent::TurnRejected { error, .. } if error.contains("irreducible") && error.contains("disable skills through management"))));
+            SessionEvent::Turn(TurnEvent::Rejected { error, .. }) if error.contains("irreducible") && error.contains("disable skills through management"))));
         engine
             .handle_command(
                 SessionCommand::Manage(ManagementCommand::Skills {
@@ -167,8 +168,8 @@ async fn complete_catalog_is_disclosed_or_rejected_without_disabling_management(
                 .await
                 .iter()
                 .any(|e| matches!(e,
-            SessionEvent::SkillsResult { result: SkillManagementResult::View { view }, .. }
-                if view.entries.len() == 32 && view.completions.len() == 32))
+            SessionEvent::Manage(ManagementEvent::SkillsResult { result, .. })
+                 if matches!(result.as_ref(), SkillManagementResult::View { view } if view.entries.len() == 32 && view.completions.len() == 32)))
         );
         engine
             .handle_command(
@@ -189,8 +190,8 @@ async fn complete_catalog_is_disclosed_or_rejected_without_disabling_management(
                 .await
                 .iter()
                 .any(|e| matches!(e,
-            SessionEvent::SkillsResult { result: SkillManagementResult::Changed { counts, .. }, .. }
-                if counts.candidates == 32 && counts.enabled_names == 31))
+            SessionEvent::Manage(ManagementEvent::SkillsResult { result, .. })
+                 if matches!(result.as_ref(), SkillManagementResult::Changed { counts, .. } if counts.candidates == 32 && counts.enabled_names == 31)))
         );
         assert_eq!(
             engine

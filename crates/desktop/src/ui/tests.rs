@@ -32,6 +32,7 @@ use zevria_foundation::{
     QuestionRequestId, QuestionResponse, SessionMode, TurnId,
 };
 use zevria_session_api::{ControlCommand, SessionCommand, SessionEvent as E, TurnCommand};
+use zevria_session_api::{ManagementEvent, PlanEvent, QuestionEvent, TurnEvent};
 use zevria_workflow::{PlanArtifact, PlanDecision, PlanId, PlanVersion, PlanWorkflowState};
 type Window = WindowHandle<gpui_kit::base::Root>;
 type Receiver = tokio::sync::mpsc::UnboundedReceiver<SessionCommand>;
@@ -81,9 +82,25 @@ fn setup_at_size(
     });
     (window, view, controller, receiver)
 }
-fn event(controller: &Entity<SessionController>, event: E, cx: &mut TestAppContext) {
+fn event(
+    controller: &Entity<SessionController>,
+    event: impl Into<zevria_session_api::SessionUpdate>,
+    cx: &mut TestAppContext,
+) {
     controller.update(cx, |this, cx| this.fixture_event(event, cx));
     cx.run_until_parked();
+}
+
+fn expect_skill_completion_query(receiver: &mut Receiver) {
+    use zevria_instructions::skill::SkillManagementRequest;
+    use zevria_session_api::ManagementCommand;
+
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SessionCommand::Manage(ManagementCommand::Skills {
+            request: SkillManagementRequest::List { query }, ..
+        }) if query.is_empty()
+    ));
 }
 
 mod status {
@@ -99,25 +116,25 @@ mod status {
     fn start(controller: &Entity<SessionController>, cx: &mut TestAppContext) {
         event(
             controller,
-            E::TurnStarted {
+            E::Turn(TurnEvent::Started {
                 turn_id: TURN,
                 mode: SessionMode::Build,
                 message: Message::user("Check cache usage"),
-            },
+            }),
             cx,
         );
         event(
             controller,
-            E::ModelCallStarted {
+            E::Turn(TurnEvent::ModelCallStarted {
                 turn_id: TURN,
                 call: 1,
-            },
+            }),
             cx,
         );
     }
 
     fn usage_event(profile: &str, input_tokens: u64, cached_tokens: u64, output_tokens: u64) -> E {
-        E::UsageUpdated {
+        E::Turn(TurnEvent::UsageUpdated {
             turn_id: TURN,
             usage: TokenUsage {
                 input_tokens,
@@ -129,13 +146,13 @@ mod status {
             model_role: ModelRole::Build,
             input_token_limit: 100_000,
             context_window_tokens: 128_000,
-        }
+        })
     }
 
     fn context_event(profile: &str, tokens: u64) -> E {
-        E::ContextUsageUpdated {
+        E::Turn(TurnEvent::ContextUsageUpdated {
             turn_id: TURN,
-            snapshot: ContextTokenSnapshot {
+            snapshot: Box::new(ContextTokenSnapshot {
                 profile: ModelProfileRef::new("fixture", profile),
                 model_role: ModelRole::Build,
                 projected_input_tokens: Some(tokens),
@@ -145,8 +162,8 @@ mod status {
                 automatic_trigger: 80_000,
                 input_token_limit: 100_000,
                 context_window_tokens: 128_000,
-            },
-        }
+            }),
+        })
     }
 
     fn assert_response(
@@ -183,7 +200,7 @@ mod status {
             event(&controller, usage_event("model", 12_300, 10_200, 2_100), cx);
             event(
                 &controller,
-                E::NetworkStatus {
+                E::Turn(TurnEvent::NetworkStatus {
                     turn_id: TURN,
                     call: 1,
                     attempt: 1,
@@ -193,7 +210,7 @@ mod status {
                         retry_in: Duration::from_secs(15),
                         will_retry: true,
                     },
-                },
+                }),
                 cx,
             );
             controller.read_with(cx, |c, _| {
@@ -272,7 +289,7 @@ mod status {
     fn cache_segment_tracks_responses_without_context_profile_or_role_leaks(
         cx: &mut TestAppContext,
     ) {
-        let (window, _, controller, _) = setup(cx);
+        let (window, _, controller, _receiver) = setup(cx);
         start(&controller, cx);
         event(&controller, context_event("model", 12_300), cx);
         assert_response(window, &controller, None, None, cx);
@@ -287,10 +304,10 @@ mod status {
 
         event(
             &controller,
-            E::ModelCallStarted {
+            E::Turn(TurnEvent::ModelCallStarted {
                 turn_id: TURN,
                 call: 2,
-            },
+            }),
             cx,
         );
         event(&controller, usage_event("model", 20_000, 10_000, 3_000), cx);
@@ -326,11 +343,11 @@ mod status {
         );
         event(
             &controller,
-            E::TurnCompleted {
+            E::Turn(TurnEvent::Completed {
                 turn_id: TURN,
                 message: Message::assistant("Done"),
                 attempt_id: None,
-            },
+            }),
             cx,
         );
         assert_response(
@@ -342,9 +359,9 @@ mod status {
         );
         event(
             &controller,
-            E::ModeChanged {
+            E::Turn(TurnEvent::ModeChanged {
                 mode: SessionMode::Plan,
-            },
+            }),
             cx,
         );
         assert_response(window, &controller, None, None, cx);
@@ -384,11 +401,11 @@ fn busy_stop_and_escape_use_the_promoted_turn_id(cx: &mut TestAppContext) {
     let (window, _, controller, mut receiver) = setup(cx);
     event(
         &controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id: TurnId::new(8),
             mode: SessionMode::Build,
             message: Message::user("busy"),
-        },
+        }),
         cx,
     );
     cx.update_window(window.into(), |_, window, cx| {
@@ -414,16 +431,16 @@ fn plan_panel_emits_versioned_resolution(cx: &mut TestAppContext) {
     };
     event(
         &controller,
-        E::PlanStateChanged {
-            state: PlanWorkflowState::Ready {
+        E::Plan(PlanEvent::StateChanged {
+            state: Box::new(PlanWorkflowState::Ready {
                 artifact: PlanArtifact {
                     version,
                     title: "Plan".into(),
                     markdown: "# Plan".into(),
                     source_turn_id: TurnId::new(1),
                 },
-            },
-        },
+            }),
+        }),
         cx,
     );
     cx.update_window(window.into(), |_, window, cx| {
@@ -462,9 +479,9 @@ fn dismissed_ready_plan_send_revises_and_rejection_restores_the_draft(cx: &mut T
     };
     event(
         &controller,
-        E::PlanStateChanged {
-            state: ready.clone(),
-        },
+        E::Plan(PlanEvent::StateChanged {
+            state: Box::new(ready.clone()),
+        }),
         cx,
     );
     controller.update(cx, |this, cx| this.submit(cx));
@@ -509,10 +526,10 @@ fn dismissed_ready_plan_send_revises_and_rejection_restores_the_draft(cx: &mut T
     assert!(controller.read_with(cx, |this, _| this.model.root.is_busy()));
     event(
         &controller,
-        E::TurnRejected {
+        E::Turn(TurnEvent::Rejected {
             turn_id: TurnId::new(10),
             error: "revision changed".into(),
-        },
+        }),
         cx,
     );
     assert_eq!(
@@ -538,8 +555,8 @@ fn blank_plan_panel_click_clears_button_focus(cx: &mut TestAppContext) {
         let (window, view, controller, _) = setup_at_size(cx, width, 840.);
         event(
             &controller,
-            E::PlanStateChanged {
-                state: PlanWorkflowState::Ready {
+            E::Plan(PlanEvent::StateChanged {
+                state: Box::new(PlanWorkflowState::Ready {
                     artifact: PlanArtifact {
                         version: PlanVersion {
                             id: PlanId::new(),
@@ -549,8 +566,8 @@ fn blank_plan_panel_click_clears_button_focus(cx: &mut TestAppContext) {
                         markdown: "Review the source".into(),
                         source_turn_id: TurnId::new(1),
                     },
-                },
-            },
+                }),
+            }),
             cx,
         );
         cx.update_window(window.into(), |_, window, cx| {
@@ -600,8 +617,8 @@ fn restored_math_and_plan_document_and_panel_render_at_both_widths(cx: &mut Test
             .unwrap();
         event(
             &controller,
-            E::PlanStateChanged {
-                state: PlanWorkflowState::Ready {
+            E::Plan(PlanEvent::StateChanged {
+                state: Box::new(PlanWorkflowState::Ready {
                     artifact: PlanArtifact {
                         version: PlanVersion {
                             id: PlanId::new(),
@@ -611,8 +628,8 @@ fn restored_math_and_plan_document_and_panel_render_at_both_widths(cx: &mut Test
                         markdown: PROOF.into(),
                         source_turn_id: TurnId::new(1),
                     },
-                },
-            },
+                }),
+            }),
             cx,
         );
         let key = controller.read_with(cx, |c, _| {
@@ -654,17 +671,17 @@ fn question_dialog_emits_answer_question(cx: &mut TestAppContext) {
     let turn_id = TurnId::new(9);
     event(
         &controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id,
             mode: SessionMode::Build,
             message: Message::user("ask"),
-        },
+        }),
         cx,
     );
     let request_id = QuestionRequestId::new("question");
     event(
         &controller,
-        E::QuestionAsked {
+        E::Question(QuestionEvent::Asked {
             turn_id,
             request: QuestionRequest {
                 allow_choice_notes: false,
@@ -684,11 +701,11 @@ fn question_dialog_emits_answer_question(cx: &mut TestAppContext) {
                     default: None,
                 }],
             },
-        },
+        }),
         cx,
     );
     controller.update(cx, |this, cx| {
-        this.model.question.as_mut().unwrap().answers[0].text = "Answer".into();
+        this.model.controls.question.as_mut().unwrap().answers[0].text = "Answer".into();
         cx.notify();
     });
     cx.run_until_parked();
@@ -711,11 +728,11 @@ fn native_choice_note_editor_keeps_drafts_and_sends_the_chosen_note(cx: &mut Tes
     let turn_id = TurnId::new(9);
     event(
         &controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id,
             mode: SessionMode::Plan,
             message: Message::user("ask"),
-        },
+        }),
         cx,
     );
     let request_id = QuestionRequestId::new("native-note");
@@ -747,10 +764,10 @@ fn native_choice_note_editor_keeps_drafts_and_sends_the_chosen_note(cx: &mut Tes
     };
     event(
         &controller,
-        E::QuestionAsked {
+        E::Question(QuestionEvent::Asked {
             turn_id,
             request: request.clone(),
-        },
+        }),
         cx,
     );
     let note = ("question-note", 0usize);
@@ -798,6 +815,7 @@ fn native_choice_note_editor_keeps_drafts_and_sends_the_chosen_note(cx: &mut Tes
             .read_with(cx, |controller, _| {
                 controller
                     .model
+                    .controls
                     .question
                     .as_ref()
                     .unwrap()
@@ -868,25 +886,25 @@ fn native_choice_note_editor_keeps_drafts_and_sends_the_chosen_note(cx: &mut Tes
     })
     .unwrap();
     controller.read_with(cx, |controller, _| {
-        let form = controller.model.question.as_ref().unwrap();
+        let form = controller.model.controls.question.as_ref().unwrap();
         assert!(form.pending);
         assert_eq!(form.choice_note_draft(0, 0), Some(NOTE));
     });
     event(
         &controller,
-        E::QuestionClosed {
+        E::Question(QuestionEvent::Closed {
             turn_id,
             request_id: QuestionRequestId::new("stale"),
-        },
+        }),
         cx,
     );
     assert!(view.read_with(cx, |v, _| v.question_note_editor.is_some()));
     event(
         &controller,
-        E::QuestionClosed {
+        E::Question(QuestionEvent::Closed {
             turn_id,
             request_id,
-        },
+        }),
         cx,
     );
     assert!(view.read_with(cx, |v, _| v.question_note_editor.is_none()));
@@ -896,12 +914,17 @@ fn native_choice_note_editor_keeps_drafts_and_sends_the_chosen_note(cx: &mut Tes
     .unwrap();
     request.id = QuestionRequestId::new("new-question");
     request.questions[0].default = Some("Focused (Recommended)".to_string().into());
-    event(&controller, E::QuestionAsked { turn_id, request }, cx);
+    event(
+        &controller,
+        E::Question(QuestionEvent::Asked { turn_id, request }),
+        cx,
+    );
     reopened.update(cx, |_, cx| cx.emit(InputEvent::Change));
     assert_eq!(
         controller.read_with(cx, |controller, _| {
             controller
                 .model
+                .controls
                 .question
                 .as_ref()
                 .unwrap()
@@ -925,10 +948,10 @@ fn rejected_submit_preserves_the_draft_and_unlocks(cx: &mut TestAppContext) {
     receiver.try_recv().unwrap();
     event(
         &controller,
-        E::TurnRejected {
+        E::Turn(TurnEvent::Rejected {
             turn_id: TurnId::new(10),
             error: "not accepted".into(),
-        },
+        }),
         cx,
     );
     assert_eq!(
@@ -962,11 +985,11 @@ fn shift_enter_never_submits_and_acceptance_does_not_overwrite_a_new_draft(
     receiver.try_recv().unwrap();
     event(
         &controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id: TurnId::new(11),
             mode: SessionMode::Build,
             message: Message::user("submitted"),
-        },
+        }),
         cx,
     );
     assert_eq!(
@@ -1026,11 +1049,11 @@ fn shared_palette_drives_syntax_and_native_diff_card_expansion(cx: &mut TestAppC
     let turn_id = TurnId::new(12);
     event(
         &controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id,
             mode: SessionMode::Build,
             message: Message::user("edit file"),
-        },
+        }),
         cx,
     );
     let call = ToolCall::new(
@@ -1042,20 +1065,20 @@ fn shared_palette_drives_syntax_and_native_diff_card_expansion(cx: &mut TestAppC
     );
     event(
         &controller,
-        E::Intermediate {
+        E::Turn(TurnEvent::Intermediate {
             turn_id,
             message: Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
                 call,
             )])),
             attempt_id: None,
-        },
+        }),
         cx,
     );
     cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
         .unwrap();
     event(
         &controller,
-        E::ToolResults {
+        E::Turn(TurnEvent::ToolResults {
             turn_id,
             message: Message::tool_result(
                 CallId::from_wire("edit"),
@@ -1077,7 +1100,7 @@ fn shared_palette_drives_syntax_and_native_diff_card_expansion(cx: &mut TestAppC
                     },
                 }])),
             }],
-        },
+        }),
         cx,
     );
     let key = cx
@@ -1249,15 +1272,16 @@ fn completion_arrows_and_tab_use_the_shared_registry_without_extra_turns(cx: &mu
     assert_eq!(mode, SessionMode::Build);
     event(
         &controller,
-        E::ModeResult {
+        E::Manage(ManagementEvent::ModeResult {
             request_id,
             result: zevria_session_api::ModeSelectionResult::Accepted {
                 mode,
                 changed: false,
             },
-        },
+        }),
         cx,
     );
+    expect_skill_completion_query(&mut receiver);
     // Tab only inserts a completion; it does not submit a second operation.
     cx.update_window(window.into(), |_, window, cx| window.input("/p", cx))
         .unwrap();
@@ -1290,11 +1314,11 @@ fn editing_and_undoing_does_not_revive_a_submitted_draft_token(cx: &mut TestAppC
     let turn_id = TurnId::new(13);
     event(
         &controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id,
             mode: SessionMode::Build,
             message: Message::user("original"),
-        },
+        }),
         cx,
     );
     cx.update_window(window.into(), |_, window, cx| window.input("later", cx))
@@ -1308,15 +1332,15 @@ fn editing_and_undoing_does_not_revive_a_submitted_draft_token(cx: &mut TestAppC
     assert!(controller.read_with(cx, |this, _| this.draft.is_empty()));
     event(
         &controller,
-        E::TurnFailed {
+        E::Turn(TurnEvent::Failed {
             turn_id,
             error: "fixture failure".into(),
-        },
+        }),
         cx,
     );
     assert!(controller.read_with(cx, |this, _| this.draft.is_empty()));
     assert_eq!(
-        controller.read_with(cx, |this, _| this.recovery.clone()),
+        controller.read_with(cx, |this, _| this.draft_slot.recovery().to_vec()),
         vec!["original".to_string()]
     );
 }
@@ -1354,19 +1378,20 @@ fn compact_segmented_modes_emit_the_same_authoritative_mode_commands(cx: &mut Te
     assert_eq!(mode, SessionMode::Plan);
     event(
         &controller,
-        E::ModeResult {
+        E::Manage(ManagementEvent::ModeResult {
             request_id,
             result: zevria_session_api::ModeSelectionResult::Accepted {
                 mode,
                 changed: true,
             },
-        },
+        }),
         cx,
     );
     assert_eq!(
         controller.read_with(cx, |c, _| c.model.root.next_mode()),
         SessionMode::Plan
     );
+    expect_skill_completion_query(&mut receiver);
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
         window.click("mode-build", cx);
@@ -1578,16 +1603,16 @@ fn ask_multi_select_with_previews(controller: &Entity<SessionController>, cx: &m
     let turn_id = TurnId::new(21);
     event(
         controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id,
             mode: SessionMode::Plan,
             message: Message::user("Plan validation"),
-        },
+        }),
         cx,
     );
     event(
         controller,
-        E::QuestionAsked {
+        E::Question(QuestionEvent::Asked {
             turn_id,
             request: QuestionRequest {
                 id: QuestionRequestId::new("targets"),
@@ -1619,7 +1644,7 @@ fn ask_multi_select_with_previews(controller: &Entity<SessionController>, cx: &m
                     default: None,
                 }],
             },
-        },
+        }),
         cx,
     );
 }
@@ -1644,7 +1669,7 @@ fn preview_button_changes_markdown_without_toggling_multi_select_then_send_retur
     cx.run_until_parked();
     assert_eq!(
         controller.read_with(cx, |c, _| {
-            let form = c.model.question.as_ref().unwrap();
+            let form = c.model.controls.question.as_ref().unwrap();
             (form.preview(0), form.answers[0].selected.clone())
         }),
         (Some(1), vec![])
@@ -1717,16 +1742,16 @@ fn radio_question_options_other_and_optional_skip_keep_the_authoritative_form(
     let turn_id = TurnId::new(20);
     event(
         &controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id,
             mode: SessionMode::Build,
             message: Message::user("choose"),
-        },
+        }),
         cx,
     );
     event(
         &controller,
-        E::QuestionAsked {
+        E::Question(QuestionEvent::Asked {
             turn_id,
             request: QuestionRequest {
                 allow_choice_notes: false,
@@ -1747,7 +1772,7 @@ fn radio_question_options_other_and_optional_skip_keep_the_authoritative_form(
                     default: None,
                 }],
             },
-        },
+        }),
         cx,
     );
     cx.update_window(window.into(), |_, window, cx| {
@@ -1760,7 +1785,13 @@ fn radio_question_options_other_and_optional_skip_keep_the_authoritative_form(
     })
     .unwrap();
     assert_eq!(
-        controller.read_with(cx, |c, _| c.model.question.as_ref().unwrap().answers[0]
+        controller.read_with(cx, |c, _| c
+            .model
+            .controls
+            .question
+            .as_ref()
+            .unwrap()
+            .answers[0]
             .selected
             .clone()),
         vec![0]
@@ -1775,13 +1806,13 @@ fn radio_question_options_other_and_optional_skip_keep_the_authoritative_form(
     })
     .unwrap();
     assert!(controller.read_with(cx, |c, _| {
-        c.model.question.as_ref().unwrap().answers[0].other
+        c.model.controls.question.as_ref().unwrap().answers[0].other
     }));
     cx.update_window(window.into(), |_, window, cx| {
         window.click(("question-skip", 0usize), cx)
     })
     .unwrap();
     assert!(controller.read_with(cx, |c, _| {
-        c.model.question.as_ref().unwrap().answers[0].skip
+        c.model.controls.question.as_ref().unwrap().answers[0].skip
     }));
 }

@@ -10,6 +10,7 @@ use zevria_foundation::{
 use zevria_session_api::{
     CommandControl, CommandControlAction as Request, CommandControlResult as Reply,
 };
+use zevria_session_api::{JobEvent, PlanEvent, TurnEvent};
 
 const TURN: TurnId = TurnId::new(8);
 
@@ -40,7 +41,7 @@ fn request(receiver: &mut Receiver) -> CommandControl {
     else {
         panic!("expected a command job control, not a turn command");
     };
-    assert!(request.request_id.starts_with("desktop.jobs."));
+    assert!(request.request_id.starts_with("jobs-"));
     request
 }
 
@@ -52,10 +53,10 @@ fn reply(
 ) {
     event(
         controller,
-        E::CommandControlResult {
+        E::Job(JobEvent::ControlResult {
             request_id: request.request_id,
-            result,
-        },
+            result: Box::new(result),
+        }),
         cx,
     );
 }
@@ -82,7 +83,13 @@ fn compact_jobs_chip_toggles_a_panel_that_starts_closed_and_hides_under_plan(
     };
     let running = job("running", CommandJobMode::Background);
     for job in [&finished, &running] {
-        event(&controller, E::CommandJobUpdated { job: job.clone() }, cx);
+        event(
+            &controller,
+            E::Job(JobEvent::Updated {
+                job: Box::new(job.clone()),
+            }),
+            cx,
+        );
     }
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
@@ -141,7 +148,7 @@ fn compact_jobs_chip_toggles_a_panel_that_starts_closed_and_hides_under_plan(
     })
     .unwrap();
     cx.run_until_parked();
-    assert!(!controller.read_with(cx, |c, _| c.model.jobs.is_open()));
+    assert!(!controller.read_with(cx, |c, _| c.model.root.jobs_inspector().is_open()));
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
         assert!(window.try_find("jobs-panel").is_none());
@@ -149,11 +156,11 @@ fn compact_jobs_chip_toggles_a_panel_that_starts_closed_and_hides_under_plan(
     })
     .unwrap();
     cx.run_until_parked();
-    assert!(controller.read_with(cx, |c, _| c.model.jobs.is_open()));
+    assert!(controller.read_with(cx, |c, _| c.model.root.jobs_inspector().is_open()));
     event(
         &controller,
-        E::PlanStateChanged {
-            state: PlanWorkflowState::Ready {
+        E::Plan(PlanEvent::StateChanged {
+            state: Box::new(PlanWorkflowState::Ready {
                 artifact: PlanArtifact {
                     version: PlanVersion {
                         id: PlanId::new(),
@@ -163,8 +170,8 @@ fn compact_jobs_chip_toggles_a_panel_that_starts_closed_and_hides_under_plan(
                     markdown: "# Review the checks".into(),
                     source_turn_id: TURN,
                 },
-            },
-        },
+            }),
+        }),
         cx,
     );
     cx.update_window(window.into(), |_, window, cx| {
@@ -180,11 +187,11 @@ fn jobs_shortcut_keeps_draft_and_slash_opens_during_a_turn(cx: &mut TestAppConte
     let (window, view, controller, mut receiver) = setup(cx);
     event(
         &controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("Run checks"),
-        },
+        }),
         cx,
     );
     cx.update_window(window.into(), |_, window, cx| {
@@ -196,7 +203,7 @@ fn jobs_shortcut_keeps_draft_and_slash_opens_during_a_turn(cx: &mut TestAppConte
     cx.run_until_parked();
     let list = request(&mut receiver);
     controller.read_with(cx, |c, _| {
-        assert!(c.model.jobs.is_open());
+        assert!(c.model.root.jobs_inspector().is_open());
         assert_eq!(c.draft, "a draft to keep");
     });
     reply(&controller, list, Reply::Inspected(Vec::new()), cx);
@@ -206,7 +213,7 @@ fn jobs_shortcut_keeps_draft_and_slash_opens_during_a_turn(cx: &mut TestAppConte
     })
     .unwrap();
     cx.run_until_parked();
-    assert!(!controller.read_with(cx, |c, _| c.model.jobs.is_open()));
+    assert!(!controller.read_with(cx, |c, _| c.model.root.jobs_inspector().is_open()));
     cx.update_window(window.into(), |_, window, cx| {
         view.read(cx).composer.clone().update(cx, |input, cx| {
             input.set_value("", window, cx);
@@ -224,7 +231,7 @@ fn jobs_shortcut_keeps_draft_and_slash_opens_during_a_turn(cx: &mut TestAppConte
     ));
     assert!(receiver.try_recv().is_err());
     controller.read_with(cx, |c, _| {
-        assert!(c.model.jobs.is_open());
+        assert!(c.model.root.jobs_inspector().is_open());
         assert!(c.model.root.is_busy());
         assert!(c.draft.is_empty());
     });
@@ -235,19 +242,19 @@ fn command_row_controls_background_then_stop_without_cancelling_the_turn(cx: &mu
     let (window, _, controller, mut receiver) = setup(cx);
     event(
         &controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("Start a command"),
-        },
+        }),
         cx,
     );
     event(
         &controller,
-        E::ModelCallStarted {
+        E::Turn(TurnEvent::ModelCallStarted {
             turn_id: TURN,
             call: 1,
-        },
+        }),
         cx,
     );
     let mut job = job("inline", CommandJobMode::Foreground);
@@ -260,16 +267,22 @@ fn command_row_controls_background_then_stop_without_cancelling_the_turn(cx: &mu
     );
     event(
         &controller,
-        E::Intermediate {
+        E::Turn(TurnEvent::Intermediate {
             turn_id: TURN,
             message: Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
                 call,
             )])),
             attempt_id: None,
-        },
+        }),
         cx,
     );
-    event(&controller, E::CommandJobUpdated { job: job.clone() }, cx);
+    event(
+        &controller,
+        E::Job(JobEvent::Updated {
+            job: Box::new(job.clone()),
+        }),
+        cx,
+    );
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
         assert!(window.try_find("jobs-panel").is_none());
@@ -284,7 +297,13 @@ fn command_row_controls_background_then_stop_without_cancelling_the_turn(cx: &mu
     );
     job.mode = CommandJobMode::Background;
     reply(&controller, background, Reply::Accepted(job.clone()), cx);
-    event(&controller, E::CommandJobUpdated { job: job.clone() }, cx);
+    event(
+        &controller,
+        E::Job(JobEvent::Updated {
+            job: Box::new(job.clone()),
+        }),
+        cx,
+    );
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
         assert!(window.try_find("job-background").is_none());
@@ -306,7 +325,7 @@ fn command_row_controls_background_then_stop_without_cancelling_the_turn(cx: &mu
     controller.read_with(cx, |c, _| {
         use zevria_presentation::conversation::HistoryEntry;
         assert!(c.model.root.is_busy());
-        assert!(!c.model.jobs.is_open());
+        assert!(!c.model.root.jobs_inspector().is_open());
         assert!(c.model.root.conversation.history().iter().any(
             |entry| matches!(entry, HistoryEntry::Error(text) if text == "That job just finished.")
         ));
@@ -318,11 +337,11 @@ fn job_notice_copies_original_model_visible_text(cx: &mut TestAppContext) {
     let (window, _, controller, _) = setup(cx);
     event(
         &controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("Read jobs notice"),
-        },
+        }),
         cx,
     );
     let mut snapshot = job("done", CommandJobMode::Background);
@@ -335,15 +354,15 @@ fn job_notice_copies_original_model_visible_text(cx: &mut TestAppContext) {
     let text = "Command job update: exact output\n\nrtk proxy cargo test\n";
     event(
         &controller,
-        E::CommandJobsReported {
+        E::Job(JobEvent::Reported {
             turn_id: TURN,
-            notice: CommandJobNotice::new(
+            notice: Box::new(CommandJobNotice::new(
                 CommandJobNoticeKind::Update,
                 vec![snapshot],
                 Vec::new(),
                 text.into(),
-            ),
-        },
+            )),
+        }),
         cx,
     );
     let key = controller.read_with(cx, |c, _| {

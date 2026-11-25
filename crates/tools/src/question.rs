@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 #[cfg(test)]
 use zevria_foundation::ToolContextRuntimeExt;
+#[cfg(test)]
+use zevria_session_api::QuestionEvent;
 
 use rig_agent::tool::{Tool, ToolContext};
 use rig_core::tool::ToolExecutionError;
@@ -616,8 +618,10 @@ mod tests {
                 let result = tool.call(&mut context, args).await;
                 (result, context)
             });
-            let Some(SessionUpdate::Lifecycle(SessionEvent::QuestionAsked { request, .. })) =
-                updates.recv().await
+            let Some(SessionUpdate::Lifecycle(SessionEvent::Question(QuestionEvent::Asked {
+                request,
+                ..
+            }))) = updates.recv().await
             else {
                 panic!("expected question request");
             };
@@ -674,7 +678,10 @@ mod tests {
                     async move { tool.execute(args, turn(CancellationToken::new())).await },
                 );
             let request = match events_rx.recv().await.expect("question event") {
-                SessionUpdate::Lifecycle(SessionEvent::QuestionAsked { request, .. }) => request,
+                SessionUpdate::Lifecycle(SessionEvent::Question(QuestionEvent::Asked {
+                    request,
+                    ..
+                })) => request,
                 update => panic!("unexpected update: {update:?}"),
             };
             assert!(request.allow_choice_notes);
@@ -802,7 +809,10 @@ mod tests {
                 (result, context)
             });
             let request = match events_rx.recv().await.expect("question event") {
-                SessionUpdate::Lifecycle(SessionEvent::QuestionAsked { request, .. }) => request,
+                SessionUpdate::Lifecycle(SessionEvent::Question(QuestionEvent::Asked {
+                    request,
+                    ..
+                })) => request,
                 update => panic!("unexpected update: {update:?}"),
             };
             assert!(channels.responder.respond(&request.id, response));

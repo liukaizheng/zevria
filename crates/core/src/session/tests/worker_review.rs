@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::EnsembleEvent;
 
 #[path = "worker_abandon.rs"]
 mod abandonment;
@@ -64,7 +65,7 @@ impl EnsembleLauncher for InteractiveLauncher {
         let (tx, rx) = mpsc::channel(32);
         let mut commands = HashMap::new();
         for state in states {
-            if state.abandoned {
+            if state.is_abandoned() {
                 continue;
             }
             let abandoned = self.abandoned.clone();
@@ -89,7 +90,7 @@ impl EnsembleLauncher for InteractiveLauncher {
                 if image_capable {
                     send(WorkerReviewEvent::ImageCapability { supported: true }).await;
                 }
-                if let Some(initial) = state.pending.front().cloned() {
+                if let Some(initial) = state.inputs.pending.front().cloned() {
                     send(WorkerReviewEvent::Dispatched {
                         generation: initial.generation,
                         attempt: 1,
@@ -164,8 +165,9 @@ async fn next_snapshot(
                 .recv()
                 .await
                 .expect("worker review event channel closed before the expected snapshot");
-            if let SessionUpdate::Lifecycle(SessionEvent::WorkerReviewUpdated { target, state }) =
-                update
+            if let SessionUpdate::Lifecycle(SessionEvent::Ensemble(
+                EnsembleEvent::WorkerReviewUpdated { target, state },
+            )) = update
                 && predicate(&state)
             {
                 return (target, state);
@@ -240,8 +242,9 @@ async fn image_synthesis_capacity_rejects_confirmation_before_a_durable_seal() {
     router.route(control.clone()).unwrap();
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if let Some(SessionUpdate::Lifecycle(SessionEvent::WorkerControlResult { result })) =
-                receiver.recv().await
+            if let Some(SessionUpdate::Lifecycle(SessionEvent::Ensemble(
+                EnsembleEvent::WorkerControlResult { result },
+            ))) = receiver.recv().await
                 && result.control.request_id == control.request_id
             {
                 break result;
@@ -269,7 +272,7 @@ async fn image_synthesis_capacity_rejects_confirmation_before_a_durable_seal() {
             .unwrap()
             .values()
             .flatten()
-            .all(|state| state.confirmation.is_none())
+            .all(|state| state.proposals.confirmation.is_none())
     );
 }
 
@@ -362,14 +365,14 @@ async fn ensemble_interactive_barrier_requires_every_exact_explicit_receipt() {
     router.route(feedback.clone()).unwrap();
     let revised = next_snapshot(&mut receiver, |state| {
         state.descriptor.id == first.0.worker_id
-            && state.accepted_generation == 2
+            && state.inputs.accepted_generation == 2
             && state.eligible_snapshot().is_some()
     })
     .await;
-    assert!(revised.1.confirmation.is_none());
-    assert_eq!(revised.1.incorporated_images.len(), 1);
+    assert!(revised.1.proposals.confirmation.is_none());
+    assert_eq!(revised.1.images.incorporated_images.len(), 1);
     assert_eq!(
-        revised.1.incorporated_images[0].text.images().next(),
+        revised.1.images.incorporated_images[0].text.images().next(),
         Some(&prepared_image)
     );
     // Deduplicated accepted feedback must not allocate generation 3.
@@ -530,11 +533,21 @@ async fn ensemble_payload_ineligibility_is_durable_before_confirmation() {
             .review_plan_workers(launcher, &start, false, &events, &turn)
             .await
     });
-    let (_, state) = next_snapshot(&mut receiver, |state| state.synthesis_error.is_some()).await;
-    assert!(state.retained.is_some());
+    let (_, state) = next_snapshot(&mut receiver, |state| {
+        state.proposals.synthesis_error.is_some()
+    })
+    .await;
+    assert!(state.proposals.retained.is_some());
     assert!(state.eligible_snapshot().is_none());
     assert_eq!(state.status(), AgentRunStatus::Blocked);
-    assert!(state.synthesis_error.as_deref().unwrap().contains("128"));
+    assert!(
+        state
+            .proposals
+            .synthesis_error
+            .as_deref()
+            .unwrap()
+            .contains("128")
+    );
     cancellation.cancel();
     assert!(matches!(runner.await.unwrap(), Err(Failure::Cancelled)));
     let items = zevria_transcript::transcript::load(&path).unwrap();
@@ -606,8 +619,9 @@ async fn ensemble_root_cancellation_returns_results_for_every_routed_control() {
     cancellation.cancel();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while !pending.is_empty() {
-            if let Some(SessionUpdate::Lifecycle(SessionEvent::WorkerControlResult { result })) =
-                receiver.recv().await
+            if let Some(SessionUpdate::Lifecycle(SessionEvent::Ensemble(
+                EnsembleEvent::WorkerControlResult { result },
+            ))) = receiver.recv().await
             {
                 assert!(!result.accepted);
                 pending.remove(&result.control.request_id);

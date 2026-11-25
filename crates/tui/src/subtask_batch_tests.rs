@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{SubtaskEvent, TurnEvent};
 
 fn assistant() -> Message {
     assistant_message(vec![tool_call(
@@ -93,38 +94,38 @@ fn rows(
 fn one_batch_rows_keep_stable_selection_and_independent_panes_with_duplicate_titles_and_reordered_events()
  {
     let mut views = test_session_views(App::new());
-    views.apply(SessionEvent::TurnStarted {
+    views.apply(SessionEvent::Turn(TurnEvent::Started {
         turn_id: TEST_TURN_ID,
         message: Message::user("launch both"),
         mode: SessionMode::Build,
-    });
-    views.apply(SessionEvent::Intermediate {
+    }));
+    views.apply(SessionEvent::Turn(TurnEvent::Intermediate {
         turn_id: TEST_TURN_ID,
         message: assistant(),
         attempt_id: None,
-    });
-    views.apply(SessionEvent::SubtaskStatus {
+    }));
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Status {
         turn_id: TEST_TURN_ID,
         id: descriptor(1).id,
         status: SubtaskStatus::Running,
-    });
-    views.apply(SessionEvent::SubtaskLaunched {
+    }));
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
         turn_id: TEST_TURN_ID,
         call_id: "batch".into(),
         entry_index: 1,
-        descriptor: descriptor(1),
-    });
+        descriptor: Box::new(descriptor(1)),
+    }));
     let stable_second = rows(views.root())[0].0;
     rendered_views_text(&mut views, 120, 24);
     views.handle_event(key(KeyCode::Esc));
     views.handle_event(key(KeyCode::Esc));
     assert_eq!(views.root().selection(), cursor(1, 1));
-    views.apply(SessionEvent::SubtaskLaunched {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
         turn_id: TEST_TURN_ID,
         call_id: "batch".into(),
         entry_index: 0,
-        descriptor: descriptor(0),
-    });
+        descriptor: Box::new(descriptor(0)),
+    }));
     let current = rows(views.root());
     assert_eq!(
         current.iter().map(|row| row.1).collect::<Vec<_>>(),
@@ -146,24 +147,24 @@ fn one_batch_rows_keep_stable_selection_and_independent_panes_with_duplicate_tit
     views.handle_event(key(KeyCode::Enter));
     assert_eq!(views.visible_child_id(), Some(&descriptor(0).id));
     views.handle_event(ctrl('o'));
-    views.apply(SessionEvent::ToolResults {
+    views.apply(SessionEvent::Turn(TurnEvent::ToolResults {
         turn_id: TEST_TURN_ID,
         message: result(),
         metadata: vec![metadata()],
-    });
+    }));
     // Delayed duplicates cannot add rows or regress individual terminal states.
     for index in [1, 0] {
-        views.apply(SessionEvent::SubtaskLaunched {
+        views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
             turn_id: TEST_TURN_ID,
             call_id: "batch".into(),
             entry_index: index,
-            descriptor: descriptor(index),
-        });
-        views.apply(SessionEvent::SubtaskStatus {
+            descriptor: Box::new(descriptor(index)),
+        }));
+        views.apply(SessionEvent::Subtask(SubtaskEvent::Status {
             turn_id: TEST_TURN_ID,
             id: descriptor(index).id,
             status: SubtaskStatus::Running,
-        });
+        }));
     }
     let current = rows(views.root());
     assert_eq!(current.len(), 2);
@@ -199,21 +200,21 @@ fn plural_terminal_fallback_and_restore_create_both_rows_and_panes_without_launc
         if restored {
             views.seed_child_creation_order(&items);
         } else {
-            views.apply(SessionEvent::TurnStarted {
+            views.apply(SessionEvent::Turn(TurnEvent::Started {
                 turn_id: TEST_TURN_ID,
                 message: Message::user("launch both"),
                 mode: SessionMode::Build,
-            });
-            views.apply(SessionEvent::Intermediate {
+            }));
+            views.apply(SessionEvent::Turn(TurnEvent::Intermediate {
                 turn_id: TEST_TURN_ID,
                 message: assistant(),
                 attempt_id: None,
-            });
-            views.apply(SessionEvent::ToolResults {
+            }));
+            views.apply(SessionEvent::Turn(TurnEvent::ToolResults {
                 turn_id: TEST_TURN_ID,
                 message: result(),
                 metadata: vec![metadata()],
-            });
+            }));
         }
         let current = rows(views.root());
         assert_eq!(current.len(), 2);

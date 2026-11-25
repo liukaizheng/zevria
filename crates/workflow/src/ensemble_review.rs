@@ -310,41 +310,100 @@ impl_wire_types! {
     Self::Sealed => "sealed",
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerReviewLifecycle {
+    Active,
+    Sealed,
+    Abandoned,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkerReviewState {
-    pub descriptor: AgentRunDescriptor,
-    pub image_capability: Option<bool>,
-    /// Exact successfully incorporated image feedback, in generation order.
-    pub incorporated_images: Vec<WorkerInput>,
-    /// Most recent failed image input. Explicit retry must retain these exact
-    /// bytes even when a session ID was allocated before image dispatch failed.
-    pub failed_image_input: Option<WorkerInput>,
+pub struct InputQueue {
     pub accepted_generation: u64,
     pub settled_generation: u64,
     pub pending: VecDeque<WorkerInput>,
     pub active: Option<WorkerInput>,
-    pub attempt: u64,
+    pub cancel_requested: Option<u64>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposalState {
     pub next_revision: u64,
     pub candidate: Option<WorkerPlanSnapshot>,
     pub retained: Option<WorkerPlanSnapshot>,
-    /// Last successful interaction that requires republication. Failed rounds
-    /// never move this backwards, even if a later failed round published a draft.
     pub publication_floor: u64,
     pub retained_removed: bool,
-    pub connected: bool,
     pub confirmation: Option<WorkerConfirmationReceipt>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<WorkerConfirmationReceipt>,
-    pub sealed: bool,
-    #[serde(default)]
-    pub abandoned: bool,
-    pub diagnostic: Option<String>,
-    pub cancel_requested: Option<u64>,
     pub synthesis_error: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionState {
+    pub connected: bool,
+    pub attempt: u64,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageEvidence {
+    pub image_capability: Option<bool>,
+    pub incorporated_images: Vec<WorkerInput>,
+    pub failed_image_input: Option<WorkerInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerReviewState {
+    pub descriptor: AgentRunDescriptor,
+    pub lifecycle: WorkerReviewLifecycle,
+    pub inputs: InputQueue,
+    pub proposals: ProposalState,
+    pub connection: ConnectionState,
+    pub images: ImageEvidence,
+    /// The outcome of the last settled generation, independent of transport diagnostics.
+    pub settlement_failure: Option<String>,
+    pub connection_diagnostic: Option<String>,
     pub evidence: AgentRunOutcome,
 }
 impl WorkerReviewState {
+    pub const fn is_abandoned(&self) -> bool {
+        matches!(self.lifecycle, WorkerReviewLifecycle::Abandoned)
+    }
+
+    pub const fn is_sealed(&self) -> bool {
+        matches!(self.lifecycle, WorkerReviewLifecycle::Sealed)
+    }
+
+    pub fn diagnostic(&self) -> Option<String> {
+        if self.is_abandoned() {
+            return Some(crate::ensemble::WORKER_ABANDONMENT_REASON.into());
+        }
+        if let Some(message) = &self.connection_diagnostic {
+            return Some(message.clone());
+        }
+        if self.inputs.active.is_some() || self.inputs.settled_generation == 0 {
+            return None;
+        }
+        if let Some(error) = &self.settlement_failure {
+            return Some(format!(
+                "Feedback was not incorporated: {error}. The preceding successful plan is retained; confirm it explicitly or retry."
+            ));
+        }
+        self.proposals
+            .retained
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.revision.generation < self.inputs.settled_generation)
+            .then(|| {
+                "Discussion completed. Publish a fresh, complete Markdown plan before confirmation."
+                    .into()
+            })
+    }
+
     pub fn new(descriptor: AgentRunDescriptor) -> Self {
         Self {
             evidence: AgentRunOutcome {
@@ -362,98 +421,92 @@ impl WorkerReviewState {
                 unavailable_decisions: Vec::new(),
             },
             descriptor,
-            image_capability: None,
-            incorporated_images: Vec::new(),
-            failed_image_input: None,
-            accepted_generation: 0,
-            settled_generation: 0,
-            pending: VecDeque::new(),
-            active: None,
-            attempt: 0,
-            next_revision: 1,
-            candidate: None,
-            retained: None,
-            publication_floor: 0,
-            retained_removed: false,
-            connected: false,
-            confirmation: None,
-            baseline: None,
-            sealed: false,
-            abandoned: false,
-            diagnostic: None,
-            cancel_requested: None,
-            synthesis_error: None,
+            lifecycle: WorkerReviewLifecycle::Active,
+            inputs: InputQueue::default(),
+            proposals: ProposalState {
+                next_revision: 1,
+                ..ProposalState::default()
+            },
+            connection: ConnectionState::default(),
+            images: ImageEvidence::default(),
+            settlement_failure: None,
+            connection_diagnostic: None,
         }
     }
     pub fn cancellable_generation(&self) -> Option<u64> {
-        if self.abandoned || self.sealed {
+        if self.is_abandoned() || self.is_sealed() {
             return None;
         }
-        self.active
+        self.inputs
+            .active
             .as_ref()
-            .or(self.pending.front())
+            .or(self.inputs.pending.front())
             .map(|input| input.generation)
     }
     pub fn quiescent(&self) -> bool {
-        self.active.is_none()
-            && self.pending.is_empty()
-            && self.accepted_generation == self.settled_generation
+        self.inputs.active.is_none()
+            && self.inputs.pending.is_empty()
+            && self.inputs.accepted_generation == self.inputs.settled_generation
     }
     pub fn eligible_snapshot(&self) -> Option<&WorkerPlanSnapshot> {
-        self.retained.as_ref().filter(|snapshot| {
-            !self.abandoned
-                && !self.sealed
+        self.proposals.retained.as_ref().filter(|snapshot| {
+            !self.is_abandoned()
+                && !self.is_sealed()
                 && self.quiescent()
-                && !self.retained_removed
-                && self.synthesis_error.is_none()
-                && snapshot.revision.generation >= self.publication_floor
+                && !self.proposals.retained_removed
+                && self.proposals.synthesis_error.is_none()
+                && snapshot.revision.generation >= self.proposals.publication_floor
         })
     }
     pub fn status(&self) -> AgentRunStatus {
-        if self.abandoned {
+        if self.is_abandoned() {
             AgentRunStatus::Abandoned
-        } else if self.sealed {
+        } else if self.is_sealed() {
             AgentRunStatus::Completed
-        } else if self.active.is_some() {
+        } else if self.inputs.active.is_some() {
             AgentRunStatus::Running
-        } else if !self.pending.is_empty() {
+        } else if !self.inputs.pending.is_empty() {
             AgentRunStatus::Queued
-        } else if self.confirmation.is_some() {
+        } else if self.proposals.confirmation.is_some() {
             AgentRunStatus::Confirmed
         } else if self.eligible_snapshot().is_some() {
             AgentRunStatus::AwaitingConfirmation
-        } else if self.evidence.failure.is_some() || self.synthesis_error.is_some() {
+        } else if self.evidence.failure.is_some() || self.proposals.synthesis_error.is_some() {
             AgentRunStatus::Blocked
-        } else if self.connected {
+        } else if self.connection.connected {
             AgentRunStatus::AwaitingFeedback
         } else {
             AgentRunStatus::Blocked
         }
     }
     pub fn confirmed_plan(&self) -> Option<ConfirmedWorkerPlan> {
-        if self.abandoned {
+        if self.is_abandoned() {
             return None;
         }
-        let snapshot = if self.sealed {
-            self.retained.as_ref()?
+        let snapshot = if self.is_sealed() {
+            self.proposals.retained.as_ref()?
         } else {
             self.eligible_snapshot()?
         };
         let confirmed = ConfirmedWorkerPlan {
             snapshot: snapshot.clone(),
-            receipt: self.confirmation.clone()?,
-            baseline: self.baseline.clone(),
+            receipt: self.proposals.confirmation.clone()?,
+            baseline: self.proposals.baseline.clone(),
         };
         confirmed.validate(&self.descriptor.id).then_some(confirmed)
     }
     pub fn outcome(&self) -> AgentRunOutcome {
         let mut outcome = self.evidence.clone();
-        if self.abandoned {
+        if self.is_abandoned() {
             outcome.sanitize_abandonment();
             return outcome;
         }
         outcome.report.clear();
-        outcome.plan = self.retained.as_ref().map(|snapshot| snapshot.plan.clone());
+        outcome.plan = self
+            .proposals
+            .retained
+            .as_ref()
+            .map(|snapshot| snapshot.plan.clone());
         outcome.confirmation = self.confirmed_plan().map(Box::new);
         outcome.status = AgentRunStatus::Completed;
         outcome.partial = false;
@@ -467,8 +520,8 @@ impl WorkerReviewState {
     }
 
     fn invalidate_confirmation(&mut self) {
-        self.confirmation = None;
-        self.baseline = None;
+        self.proposals.confirmation = None;
+        self.proposals.baseline = None;
     }
 
     fn validate_receipt(&self, receipt: &WorkerConfirmationReceipt) -> Result<(), String> {
@@ -476,10 +529,14 @@ impl WorkerReviewState {
             .eligible_snapshot()
             .ok_or("worker has no quiescent, eligible plan revision")?;
         if !receipt.validates_snapshot(snapshot, &self.descriptor.id)
-            || self.confirmation.as_ref().is_some_and(|original| {
-                !original.validates_snapshot(snapshot, &self.descriptor.id)
-                    || original.target.run_id != receipt.target.run_id
-            })
+            || self
+                .proposals
+                .confirmation
+                .as_ref()
+                .is_some_and(|original| {
+                    !original.validates_snapshot(snapshot, &self.descriptor.id)
+                        || original.target.run_id != receipt.target.run_id
+                })
         {
             return Err("stale or foreign plan revision".into());
         }
@@ -488,16 +545,16 @@ impl WorkerReviewState {
 
     /// Validate a transition against the current state without copying it.
     pub fn validate_transition(&self, event: &WorkerReviewEvent) -> Result<(), String> {
-        if self.abandoned {
+        if self.is_abandoned() {
             return Err("worker is permanently abandoned for this run".into());
         }
-        if self.sealed {
+        if self.is_sealed() {
             return Err("worker review is sealed".into());
         }
         match event {
             WorkerReviewEvent::Fatal { error } => return Err(error.clone()),
             WorkerReviewEvent::Interrupted { generation } => {
-                if self.active.as_ref().map(|input| input.generation) != Some(*generation) {
+                if self.inputs.active.as_ref().map(|input| input.generation) != Some(*generation) {
                     return Err("settlement belongs to an inactive input generation".into());
                 }
                 if self.evidence.descriptor != self.descriptor {
@@ -510,7 +567,7 @@ impl WorkerReviewState {
                 }
             }
             WorkerReviewEvent::InputAccepted { input } => {
-                if input.generation != self.accepted_generation.saturating_add(1)
+                if input.generation != self.inputs.accepted_generation.saturating_add(1)
                     || input.text.is_blank()
                     || input.text.validate().is_err()
                     || input.request_id.0.trim().is_empty()
@@ -519,6 +576,7 @@ impl WorkerReviewState {
                         && input.text.text_len() > MAX_WORKER_FEEDBACK_BYTES)
                     || (input.kind == WorkerPromptKind::RecoveryContinuation
                         && self
+                            .images
                             .failed_image_input
                             .as_ref()
                             .is_some_and(|failed| failed.text != input.text))
@@ -528,8 +586,9 @@ impl WorkerReviewState {
                 }
             }
             WorkerReviewEvent::Dispatched { generation, .. } => {
-                if self.active.is_some()
-                    || self.pending.front().map(|input| input.generation) != Some(*generation)
+                if self.inputs.active.is_some()
+                    || self.inputs.pending.front().map(|input| input.generation)
+                        != Some(*generation)
                 {
                     return Err("worker prompt is overlapping or out of order".into());
                 }
@@ -538,8 +597,8 @@ impl WorkerReviewState {
                 generation,
                 attempt,
             } => {
-                if self.active.as_ref().map(|input| input.generation) != Some(*generation)
-                    || *attempt <= self.attempt
+                if self.inputs.active.as_ref().map(|input| input.generation) != Some(*generation)
+                    || *attempt <= self.connection.attempt
                 {
                     return Err(
                         "recovery belongs to an inactive generation or stale attempt".into(),
@@ -551,7 +610,7 @@ impl WorkerReviewState {
                 replay: false,
                 ..
             } => {
-                if self.active.as_ref().map(|input| input.generation) != Some(*generation) {
+                if self.inputs.active.as_ref().map(|input| input.generation) != Some(*generation) {
                     return Err("publication belongs to an inactive input generation".into());
                 }
             }
@@ -560,7 +619,7 @@ impl WorkerReviewState {
                 evidence,
                 ..
             } => {
-                if self.active.as_ref().map(|input| input.generation) != Some(*generation) {
+                if self.inputs.active.as_ref().map(|input| input.generation) != Some(*generation) {
                     return Err("settlement belongs to an inactive input generation".into());
                 }
                 if evidence.descriptor != self.descriptor {
@@ -571,29 +630,29 @@ impl WorkerReviewState {
                 decision,
                 unavailable,
             } => {
-                if self.active.is_none() || decision.is_some() == unavailable.is_some() {
+                if self.inputs.active.is_none() || decision.is_some() == unavailable.is_some() {
                     return Err("accepted worker decision requires an active interaction and exactly one representation".into());
                 }
             }
             WorkerReviewEvent::Confirmed { receipt } => {
                 self.validate_receipt(receipt)?;
-                if self.confirmation.is_some() {
+                if self.proposals.confirmation.is_some() {
                     return Err("worker is already confirmed".into());
                 }
             }
             WorkerReviewEvent::BaselineMarked { receipt } => {
                 self.validate_receipt(receipt)?;
-                if self.baseline.is_some() {
+                if self.proposals.baseline.is_some() {
                     return Err("worker is already the baseline".into());
                 }
             }
             WorkerReviewEvent::BaselineCleared { request_id } => {
-                if !request_id.validate() || self.baseline.is_none() {
+                if !request_id.validate() || self.proposals.baseline.is_none() {
                     return Err("worker is not the baseline or request identity is invalid".into());
                 }
             }
             WorkerReviewEvent::Withdrawn { .. } => {
-                if self.confirmation.is_none() {
+                if self.proposals.confirmation.is_none() {
                     return Err("worker is not confirmed".into());
                 }
             }
@@ -617,29 +676,29 @@ impl WorkerReviewState {
     pub fn apply_validated_transition(&mut self, event: &WorkerReviewEvent) {
         match event {
             WorkerReviewEvent::ImageCapability { supported } => {
-                self.image_capability = Some(*supported)
+                self.images.image_capability = Some(*supported)
             }
             WorkerReviewEvent::Fatal { .. } => {
                 unreachable!("fatal transitions cannot be validated")
             }
             WorkerReviewEvent::CancelRequested { generation } => {
-                self.cancel_requested = Some(*generation);
+                self.inputs.cancel_requested = Some(*generation);
             }
             WorkerReviewEvent::InputAccepted { input } => {
-                self.accepted_generation = input.generation;
-                self.pending.push_back(input.clone());
+                self.inputs.accepted_generation = input.generation;
+                self.inputs.pending.push_back(input.clone());
                 self.invalidate_confirmation();
             }
             WorkerReviewEvent::Dispatched { attempt, .. } => {
-                self.active = self.pending.pop_front();
-                self.attempt = *attempt;
-                self.candidate = None;
-                self.diagnostic = None;
+                self.inputs.active = self.inputs.pending.pop_front();
+                self.connection.attempt = *attempt;
+                self.proposals.candidate = None;
+                self.connection_diagnostic = None;
             }
             WorkerReviewEvent::Recovering { attempt, .. } => {
-                self.attempt = *attempt;
-                self.connected = false;
-                self.image_capability = None;
+                self.connection.attempt = *attempt;
+                self.connection.connected = false;
+                self.images.image_capability = None;
             }
             WorkerReviewEvent::Interrupted { generation } => {
                 self.apply_validated_transition(&WorkerReviewEvent::Settled {
@@ -660,35 +719,37 @@ impl WorkerReviewState {
                     .as_ref()
                     .filter(|text| !text.trim().is_empty())
                 {
-                    self.candidate =
+                    self.proposals.candidate =
                         Some(WorkerPlanSnapshot(std::sync::Arc::new(WorkerPlanData {
                             revision: WorkerPlanRevision {
                                 worker_id: self.descriptor.id.clone(),
                                 generation: *generation,
-                                revision: self.next_revision,
+                                revision: self.proposals.next_revision,
                                 digest: crate::ensemble::sha256_hex(markdown.as_bytes()),
                             },
                             plan: plan.clone(),
                         })));
-                    self.next_revision += 1;
+                    self.proposals.next_revision += 1;
                 }
             }
             WorkerReviewEvent::Removed { plan_id } => {
                 if self
+                    .proposals
                     .candidate
                     .as_ref()
                     .and_then(|snapshot| snapshot.plan.plan_id.as_ref())
                     == Some(plan_id)
                 {
-                    self.candidate = None;
+                    self.proposals.candidate = None;
                 }
                 if self
+                    .proposals
                     .retained
                     .as_ref()
                     .and_then(|snapshot| snapshot.plan.plan_id.as_ref())
                     == Some(plan_id)
                 {
-                    self.retained_removed = true;
+                    self.proposals.retained_removed = true;
                     self.invalidate_confirmation();
                 }
             }
@@ -724,17 +785,19 @@ impl WorkerReviewState {
                     decision_ids,
                     unavailable_decisions,
                 };
-                self.connected = *connected;
+                self.connection.connected = *connected;
                 if !connected {
-                    self.image_capability = None;
+                    self.images.image_capability = None;
                 }
-                self.settled_generation = *generation;
+                self.inputs.settled_generation = *generation;
                 let input = self
+                    .inputs
                     .active
                     .as_ref()
                     .expect("settlement has an active generation");
                 let retry = input.kind == WorkerPromptKind::RecoveryContinuation
                     && self
+                        .images
                         .failed_image_input
                         .as_ref()
                         .is_some_and(|failed| failed.text == input.text);
@@ -742,39 +805,33 @@ impl WorkerReviewState {
                     if input.text.has_images()
                         && (input.kind == WorkerPromptKind::UserFeedback
                             || (retry
-                                && self.failed_image_input.as_ref().is_some_and(|failed| {
-                                    failed.kind == WorkerPromptKind::UserFeedback
-                                })))
+                                && self
+                                    .images
+                                    .failed_image_input
+                                    .as_ref()
+                                    .is_some_and(|failed| {
+                                        failed.kind == WorkerPromptKind::UserFeedback
+                                    })))
                     {
-                        self.incorporated_images.push(input.clone());
+                        self.images.incorporated_images.push(input.clone());
                     }
-                    self.failed_image_input = None;
+                    self.images.failed_image_input = None;
                 } else if !retry {
-                    self.failed_image_input = input.text.has_images().then(|| input.clone());
+                    self.images.failed_image_input = input.text.has_images().then(|| input.clone());
                 }
-                self.active = None;
+                self.inputs.active = None;
                 self.invalidate_confirmation();
-                self.cancel_requested = None;
-                if let Some(error) = failure {
-                    self.diagnostic = Some(format!(
-                        "Feedback was not incorporated: {error}. The preceding successful plan is retained; confirm it explicitly or retry."
-                    ));
-                    self.candidate = None;
+                self.inputs.cancel_requested = None;
+                self.settlement_failure.clone_from(failure);
+                self.connection_diagnostic = None;
+                if failure.is_some() {
+                    self.proposals.candidate = None;
                 } else {
-                    self.publication_floor = *generation;
-                    if let Some(snapshot) = self.candidate.take() {
-                        self.retained = Some(snapshot);
-                        self.retained_removed = false;
+                    self.proposals.publication_floor = *generation;
+                    if let Some(snapshot) = self.proposals.candidate.take() {
+                        self.proposals.retained = Some(snapshot);
+                        self.proposals.retained_removed = false;
                     }
-                    self.diagnostic = if self
-                        .retained
-                        .as_ref()
-                        .is_none_or(|snapshot| snapshot.revision.generation < *generation)
-                    {
-                        Some("Discussion completed. Publish a fresh, complete Markdown plan before confirmation.".into())
-                    } else {
-                        None
-                    };
                 }
             }
             WorkerReviewEvent::Decisions {
@@ -791,7 +848,7 @@ impl WorkerReviewState {
                 );
             }
             WorkerReviewEvent::PayloadChecked { error } => {
-                self.synthesis_error.clone_from(error);
+                self.proposals.synthesis_error.clone_from(error);
                 if error.is_some() {
                     self.invalidate_confirmation();
                 }
@@ -800,46 +857,47 @@ impl WorkerReviewState {
                 connected,
                 diagnostic,
             } => {
-                self.connected = *connected;
+                self.connection.connected = *connected;
                 if !connected {
-                    self.image_capability = None;
+                    self.images.image_capability = None;
                 }
                 if diagnostic.is_some() {
-                    self.diagnostic.clone_from(diagnostic);
+                    self.connection_diagnostic.clone_from(diagnostic);
                 }
             }
             WorkerReviewEvent::Confirmed { receipt } => {
-                self.confirmation = Some(receipt.clone());
+                self.proposals.confirmation = Some(receipt.clone());
             }
             WorkerReviewEvent::BaselineMarked { receipt } => {
-                if self.confirmation.is_none() {
-                    self.confirmation = Some(receipt.clone());
+                if self.proposals.confirmation.is_none() {
+                    self.proposals.confirmation = Some(receipt.clone());
                 }
-                self.baseline = Some(receipt.clone());
+                self.proposals.baseline = Some(receipt.clone());
             }
             WorkerReviewEvent::BaselineCleared { .. } => {
-                self.baseline = None;
+                self.proposals.baseline = None;
             }
             WorkerReviewEvent::Withdrawn { .. } => {
                 self.invalidate_confirmation();
             }
             WorkerReviewEvent::Abandoned { .. } => {
-                self.abandoned = true;
+                self.lifecycle = WorkerReviewLifecycle::Abandoned;
                 self.invalidate_confirmation();
-                self.active = None;
-                self.pending.clear();
-                self.failed_image_input = None;
-                self.image_capability = None;
+                self.inputs.active = None;
+                self.inputs.pending.clear();
+                self.images.failed_image_input = None;
+                self.images.image_capability = None;
                 // Queue disposal, not successful incorporation of feedback.
-                self.settled_generation = self.accepted_generation;
-                self.connected = false;
-                self.cancel_requested = None;
-                self.synthesis_error = None;
-                self.diagnostic = Some(crate::ensemble::WORKER_ABANDONMENT_REASON.into());
+                self.inputs.settled_generation = self.inputs.accepted_generation;
+                self.connection.connected = false;
+                self.inputs.cancel_requested = None;
+                self.proposals.synthesis_error = None;
+                self.connection_diagnostic = None;
+                self.settlement_failure = None;
             }
             WorkerReviewEvent::Sealed => {
-                self.sealed = true;
-                self.connected = false;
+                self.lifecycle = WorkerReviewLifecycle::Sealed;
+                self.connection.connected = false;
             }
         }
     }
@@ -891,7 +949,7 @@ pub fn validate_worker_review_event(
         for (index, state) in states
             .iter()
             .enumerate()
-            .filter(|(index, state)| *index != target && state.baseline.is_some())
+            .filter(|(index, state)| *index != target && state.proposals.baseline.is_some())
         {
             state.validate_transition(&clear)?;
             displaced.push(index);

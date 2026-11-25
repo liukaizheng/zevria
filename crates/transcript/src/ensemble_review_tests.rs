@@ -23,9 +23,9 @@ fn state() -> WorkerReviewState {
 }
 fn accept(state: &mut WorkerReviewState, text: &str) -> WorkerInput {
     let input = WorkerInput {
-        generation: state.accepted_generation + 1,
+        generation: state.inputs.accepted_generation + 1,
         request_id: WorkerControlId::new(),
-        kind: if state.accepted_generation == 0 {
+        kind: if state.inputs.accepted_generation == 0 {
             WorkerPromptKind::Initial
         } else {
             WorkerPromptKind::UserFeedback
@@ -42,15 +42,15 @@ fn accept(state: &mut WorkerReviewState, text: &str) -> WorkerInput {
 fn dispatch(state: &mut WorkerReviewState) {
     state
         .apply(&WorkerReviewEvent::Dispatched {
-            generation: state.pending.front().unwrap().generation,
-            attempt: state.attempt + 1,
+            generation: state.inputs.pending.front().unwrap().generation,
+            attempt: state.connection.attempt + 1,
         })
         .unwrap();
 }
 fn publish(state: &mut WorkerReviewState, markdown: &str, replay: bool) {
     state
         .apply(&WorkerReviewEvent::Published {
-            generation: state.active.as_ref().unwrap().generation,
+            generation: state.inputs.active.as_ref().unwrap().generation,
             plan: AgentStructuredPlan {
                 plan_id: Some("provider-plan".into()),
                 markdown: Some(markdown.into()),
@@ -63,7 +63,7 @@ fn publish(state: &mut WorkerReviewState, markdown: &str, replay: bool) {
 fn settle(state: &mut WorkerReviewState, error: Option<&str>) {
     state
         .apply(&WorkerReviewEvent::Settled {
-            generation: state.active.as_ref().unwrap().generation,
+            generation: state.inputs.active.as_ref().unwrap().generation,
             failure: error.map(str::to_string),
             connected: error.is_none(),
             evidence: Box::new(state.evidence.clone()),
@@ -109,9 +109,9 @@ fn failed_image_retry_preserves_bytes_and_only_success_becomes_evidence() {
         .unwrap();
     dispatch(&mut state);
     settle(&mut state, Some("agent changed image capability"));
-    assert_eq!(state.failed_image_input.as_ref(), Some(&feedback));
-    assert_eq!(state.image_capability, None);
-    assert!(state.incorporated_images.is_empty());
+    assert_eq!(state.images.failed_image_input.as_ref(), Some(&feedback));
+    assert_eq!(state.images.image_capability, None);
+    assert!(state.images.incorporated_images.is_empty());
     let recovered: WorkerReviewState =
         serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
     assert_eq!(recovered, state);
@@ -145,8 +145,8 @@ fn failed_image_retry_preserves_bytes_and_only_success_becomes_evidence() {
     dispatch(&mut state);
     publish(&mut state, "# Image incorporated by retry", false);
     settle(&mut state, None);
-    assert!(state.failed_image_input.is_none());
-    assert_eq!(state.incorporated_images, vec![retry]);
+    assert!(state.images.failed_image_input.is_none());
+    assert_eq!(state.images.incorporated_images, vec![retry]);
     assert_eq!(
         crate::ensemble::potential_synthesis_images(&"initial".into(), &[state], None)
             .unwrap()
@@ -163,7 +163,7 @@ fn synthesis_images_follow_confirmed_incorporation_not_raw_or_abandoned_inputs()
     }
     fn feedback(state: &mut WorkerReviewState, value: u8, failure: bool) {
         let input = WorkerInput {
-            generation: state.accepted_generation + 1,
+            generation: state.inputs.accepted_generation + 1,
             request_id: WorkerControlId::new(),
             kind: WorkerPromptKind::UserFeedback,
             text: crate::UserPrompt::new(vec![crate::PromptBlock::Image(image(value))]).unwrap(),
@@ -246,7 +246,7 @@ fn ensemble_confirmation_is_revocable_and_revision_bound() {
             .is_err()
     );
     accept(&mut state, "change it");
-    assert!(state.confirmation.is_none());
+    assert!(state.proposals.confirmation.is_none());
     assert!(
         state
             .apply(&WorkerReviewEvent::Confirmed { receipt })
@@ -301,7 +301,7 @@ fn ensemble_successful_prose_requires_fresh_publication_and_replay_does_not_qual
 #[test]
 fn ensemble_failed_followup_restores_only_preceding_eligible_snapshot_without_confirmation() {
     let mut state = proposal();
-    let old = state.retained.clone();
+    let old = state.proposals.retained.clone();
     let receipt = receipt(&state);
     state
         .apply(&WorkerReviewEvent::Confirmed { receipt })
@@ -310,13 +310,13 @@ fn ensemble_failed_followup_restores_only_preceding_eligible_snapshot_without_co
     dispatch(&mut state);
     publish(&mut state, "# Failed round draft", false);
     settle(&mut state, Some("provider timeout"));
-    assert_eq!(state.retained, old);
+    assert_eq!(state.proposals.retained, old);
     assert_eq!(state.eligible_snapshot(), old.as_ref());
-    assert!(state.confirmation.is_none());
-    assert!(!state.connected);
+    assert!(state.proposals.confirmation.is_none());
+    assert!(!state.connection.connected);
     assert!(
         state
-            .diagnostic
+            .diagnostic()
             .as_deref()
             .unwrap()
             .contains("not incorporated")
@@ -332,7 +332,7 @@ fn ensemble_failure_never_erases_prior_successful_prose_freshness_requirement() 
     dispatch(&mut state);
     publish(&mut state, "# Partial failed revision", false);
     settle(&mut state, Some("cancelled"));
-    assert_eq!(state.publication_floor, 2);
+    assert_eq!(state.proposals.publication_floor, 2);
     assert!(state.eligible_snapshot().is_none());
 }
 #[test]
@@ -437,7 +437,7 @@ fn ensemble_review_event_serialization_and_replay_agree() {
 fn ensemble_cancellation_intent_survives_replay_and_cannot_cancel_the_next_input() {
     for interrupted in [false, true] {
         let mut state = proposal();
-        let retained = state.retained.clone();
+        let retained = state.proposals.retained.clone();
         let receipt = receipt(&state);
         state
             .apply(&WorkerReviewEvent::Confirmed { receipt })
@@ -447,14 +447,14 @@ fn ensemble_cancellation_intent_survives_replay_and_cannot_cancel_the_next_input
         state
             .apply(&serde_json::from_str(&serde_json::to_string(&cancel).unwrap()).unwrap())
             .unwrap();
-        assert_eq!(state.cancel_requested, Some(2));
-        assert!(state.confirmation.is_none());
+        assert_eq!(state.inputs.cancel_requested, Some(2));
+        assert!(state.proposals.confirmation.is_none());
         let mut restored: WorkerReviewState =
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
         accept(&mut restored, "keep this successor");
-        assert_eq!(restored.cancel_requested, Some(2));
+        assert_eq!(restored.inputs.cancel_requested, Some(2));
         dispatch(&mut restored);
-        assert_eq!(restored.cancel_requested, Some(2));
+        assert_eq!(restored.inputs.cancel_requested, Some(2));
         if interrupted {
             restored
                 .apply(&WorkerReviewEvent::Interrupted { generation: 2 })
@@ -462,9 +462,9 @@ fn ensemble_cancellation_intent_survives_replay_and_cannot_cancel_the_next_input
         } else {
             settle(&mut restored, Some("cancelled before dispatch"));
         }
-        assert_eq!(restored.cancel_requested, None);
-        assert_eq!(restored.retained, retained);
-        assert!(restored.confirmation.is_none());
+        assert_eq!(restored.inputs.cancel_requested, None);
+        assert_eq!(restored.proposals.retained, retained);
+        assert!(restored.proposals.confirmation.is_none());
         assert!(
             restored.eligible_snapshot().is_none(),
             "cancellation cannot bypass queued feedback"

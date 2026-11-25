@@ -10,6 +10,7 @@ use zevria_model::ContextTokenSource;
 use zevria_model::models::ModelManagementRequest as Request;
 use zevria_model::models::ModelManagementResult as Result;
 use zevria_model::models::{ModelCandidate, ModelSelection};
+use zevria_session_api::ManagementEvent;
 
 #[test]
 fn alt_m_opens_session_only_from_noncapturing_surfaces_without_consuming_drafts() {
@@ -44,9 +45,9 @@ fn alt_m_opens_session_only_from_noncapturing_surfaces_without_consuming_drafts(
                 KeyModifiers::NONE,
             )));
         }
-        let draft = views.root.draft_for_test();
-        let history = format!("{:?}", views.root.history());
-        let surface = views.root.surface();
+        let draft = views.workspace.root.draft_for_test();
+        let history = format!("{:?}", views.workspace.root.history());
+        let surface = views.workspace.root.surface();
         let shortcut = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT);
         assert!(views.handle_event(Event::Key(shortcut)).is_none());
         let Some(SessionCommand::Manage(zevria_session_api::ManagementCommand::Models {
@@ -56,7 +57,7 @@ fn alt_m_opens_session_only_from_noncapturing_surfaces_without_consuming_drafts(
                     mode: SessionMode::Build,
                     scope: ModelSelectionScope::SessionOnly,
                 },
-        })) = views.overlays.models.commands.pop_front()
+        })) = views.workspace.controls.models.commands.pop_front()
         else {
             panic!("shortcut must list the captured role, session only");
         };
@@ -67,33 +68,34 @@ fn alt_m_opens_session_only_from_noncapturing_surfaces_without_consuming_drafts(
         ] {
             views.handle_event(Event::Key(KeyEvent { kind, ..shortcut }));
         }
-        assert!(views.overlays.models.commands.is_empty());
-        assert_eq!(views.root.draft_for_test(), draft);
-        assert_eq!(format!("{:?}", views.root.history()), history);
-        views.overlays.models.cancel();
-        views.apply(SessionEvent::ModelsResult {
+        assert!(views.workspace.controls.models.commands.is_empty());
+        assert_eq!(views.workspace.root.draft_for_test(), draft);
+        assert_eq!(format!("{:?}", views.workspace.root.history()), history);
+        views.workspace.controls.models.cancel();
+        views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
             request_id,
-            result: Result::Cancelled,
-        });
-        assert_eq!(views.root.draft_for_test(), draft);
-        assert_eq!(views.root.surface().id, surface.id);
-        assert!(!views.root.is_busy());
+            result: Box::new(Result::Cancelled),
+        }));
+        assert_eq!(views.workspace.root.draft_for_test(), draft);
+        assert_eq!(views.workspace.root.surface().id, surface.id);
+        assert!(!views.workspace.root.is_busy());
     }
 }
 
 #[test]
 fn help_retains_shortcut_ownership_and_does_not_open_a_model_lifecycle() {
     let mut views = SessionViews::new(App::new(), PathBuf::from("."));
-    let owner = views.root.surface();
+    let owner = views.workspace.root.surface();
     views
-        .overlays
-        .show_help(owner.context(), &views.root.hint_eligibility());
+        .workspace
+        .controls
+        .show_help(owner.context(), &views.workspace.root.hint_eligibility());
     views.handle_event(Event::Key(ratatui::crossterm::event::KeyEvent::new(
         KeyCode::Char('m'),
         KeyModifiers::ALT,
     )));
-    assert!(!views.overlays.models.is_open());
-    assert!(!views.root.is_busy());
+    assert!(!views.workspace.controls.models.is_open());
+    assert!(!views.workspace.root.is_busy());
 }
 
 #[test]
@@ -122,21 +124,21 @@ fn completion_enter_opens_model_selection_with_the_existing_management_scope() {
             views.handle_event(enter.clone()),
             Some(UiAction::RunCommand(command))
         );
-        assert!(views.root.input().is_empty());
-        assert!(views.root.history().is_empty());
+        assert!(views.workspace.root.input().is_empty());
+        assert!(views.workspace.root.history().is_empty());
         // The runtime's RunCommand arm opens this same management path.
         views.open_model_picker(scope);
-        assert!(views.overlays.models.is_open());
-        assert!(views.root.is_busy());
+        assert!(views.workspace.controls.models.is_open());
+        assert!(views.workspace.root.is_busy());
         assert!(matches!(
-            views.overlays.models.commands.pop_front(),
+            views.workspace.controls.models.commands.pop_front(),
             Some(SessionCommand::Manage(zevria_session_api::ManagementCommand::Models {
                 request: Request::List { mode: SessionMode::Build, scope: actual_scope }, ..
             })) if actual_scope == scope
         ));
         assert_eq!(views.handle_event(enter), None);
         assert!(
-            views.overlays.models.commands.is_empty(),
+            views.workspace.controls.models.commands.is_empty(),
             "catalog request is still pending"
         );
     }
@@ -171,16 +173,16 @@ fn model_telemetry_changes_only_after_matching_scope_mode_and_request_success() 
                     mode: SessionMode::Plan,
                     scope: actual_scope,
                 },
-        })) = views.overlays.models.commands.pop_front()
+        })) = views.workspace.controls.models.commands.pop_front()
         else {
             panic!("captured list")
         };
         assert_eq!(actual_scope, scope);
-        assert!(views.root.is_busy());
+        assert!(views.workspace.root.is_busy());
         assert_eq!(views.model_profiles, original_profiles);
-        views.apply(SessionEvent::ModelsResult {
+        views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
             request_id: request_id.clone(),
-            result: Result::Catalog {
+            result: Box::new(Result::Catalog {
                 mode: SessionMode::Plan,
                 scope,
                 current: ModelSelection::new(old.clone(), Level::Medium),
@@ -189,15 +191,15 @@ fn model_telemetry_changes_only_after_matching_scope_mode_and_request_success() 
                     reasoning_levels: vec![Level::Medium],
                 }],
                 revision: "revision".into(),
-            },
-        });
+            }),
+        }));
         // A later composer mode cannot redirect this picker selection.
-        views.root.set_mode_for_test(SessionMode::Build);
-        views.overlays.models.handle_key(KeyCode::Enter);
-        assert!(views.overlays.models.commands.is_empty());
-        views.overlays.models.handle_key(KeyCode::Enter);
+        views.workspace.root.set_mode_for_test(SessionMode::Build);
+        views.workspace.controls.models.handle_key(KeyCode::Enter);
+        assert!(views.workspace.controls.models.commands.is_empty());
+        views.workspace.controls.models.handle_key(KeyCode::Enter);
         assert!(
-            matches!(views.overlays.models.commands.pop_front(), Some(SessionCommand::Manage(zevria_session_api::ManagementCommand::Models { request: Request::Select { mode: SessionMode::Plan, scope: actual_scope, .. }, .. })) if actual_scope == scope)
+            matches!(views.workspace.controls.models.commands.pop_front(), Some(SessionCommand::Manage(zevria_session_api::ManagementCommand::Models { request: Request::Select { mode: SessionMode::Plan, scope: actual_scope, .. }, .. })) if actual_scope == scope)
         );
         assert_eq!(views.model_profiles, original_profiles);
         let snapshot = ContextTokenSnapshot {
@@ -243,25 +245,25 @@ fn model_telemetry_changes_only_after_matching_scope_mode_and_request_success() 
             (request_id.clone(), wrong_scope),
             (request_id.clone(), wrong_mode),
         ] {
-            views.apply(SessionEvent::ModelsResult {
+            views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
                 request_id: id,
-                result,
-            });
+                result: Box::new(result),
+            }));
             assert_eq!(views.model_profiles, original_profiles);
-            assert!(views.overlays.models.is_open() && views.root.is_busy());
+            assert!(views.workspace.controls.models.is_open() && views.workspace.root.is_busy());
         }
-        views.apply(SessionEvent::ModelsResult {
+        views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
             request_id,
-            result: changed,
-        });
+            result: Box::new(changed),
+        }));
         assert_eq!(
             views.model_profiles.get(ModelRole::Plan),
             Some(&context.profile)
         );
         assert_eq!(views.model_profiles.get(ModelRole::Build), Some(&old));
-        assert!(!views.overlays.models.is_open() && !views.root.is_busy());
+        assert!(!views.workspace.controls.models.is_open() && !views.workspace.root.is_busy());
         assert!(
-            views.root.history().is_empty(),
+            views.workspace.root.history().is_empty(),
             "management never creates a turn"
         );
     }
@@ -276,27 +278,30 @@ fn inspect_panes_cannot_open_either_scope_and_cancel_preserves_profiles() {
         let mut views = SessionViews::new(App::new(), PathBuf::from("."));
         views.ensure_child(&SubtaskId::new("inspect-test"));
         views.visible = Some(VisiblePane::Subtask(
-            views.children[0].app.surface().id.pane,
+            views.workspace.children[0].app.surface().id.pane,
         ));
         views.open_model_picker(scope);
-        assert!(!views.overlays.models.is_open() && views.overlays.models.commands.is_empty());
-        assert!(!views.root.is_busy());
+        assert!(
+            !views.workspace.controls.models.is_open()
+                && views.workspace.controls.models.commands.is_empty()
+        );
+        assert!(!views.workspace.root.is_busy());
         views.visible = None;
         let profiles = views.model_profiles.clone();
         views.open_model_picker(scope);
         let Some(SessionCommand::Manage(zevria_session_api::ManagementCommand::Models {
             request_id,
             ..
-        })) = views.overlays.models.commands.pop_front()
+        })) = views.workspace.controls.models.commands.pop_front()
         else {
             panic!("list")
         };
-        views.overlays.models.cancel();
-        views.apply(SessionEvent::ModelsResult {
+        views.workspace.controls.models.cancel();
+        views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
             request_id,
-            result: Result::Cancelled,
-        });
+            result: Box::new(Result::Cancelled),
+        }));
         assert_eq!(views.model_profiles, profiles);
-        assert!(!views.overlays.models.is_open() && !views.root.is_busy());
+        assert!(!views.workspace.controls.models.is_open() && !views.workspace.root.is_busy());
     }
 }

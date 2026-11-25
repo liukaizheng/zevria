@@ -4,6 +4,7 @@ use crate::{
     workspace_files::{SearchRequest, SearchResult},
 };
 use zevria_content::UserPrompt;
+use zevria_session_api::EnsembleEvent;
 
 fn captured_startup_workspace() -> PathBuf {
     let current = std::env::current_dir().expect("current test directory");
@@ -19,11 +20,11 @@ fn captured_startup_workspace() -> PathBuf {
 fn live_views() -> (SessionViews, EnsembleStart) {
     let (start, _) = fixture(true);
     let mut views = SessionViews::new(App::new(), captured_startup_workspace());
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TurnId::new(1),
-        start: start.clone(),
+        start: Box::new(start.clone()),
         resumed: false,
-    });
+    }));
     for descriptor in &start.agents {
         let mut state = WorkerReviewState::new(descriptor.clone());
         queue_input(&mut state, WorkerControlId::new(), "initial");
@@ -44,7 +45,7 @@ fn response(request: &SearchRequest, paths: &[&str]) -> SearchResult {
 #[test]
 fn root_and_live_worker_searches_are_pane_local_while_work_runs() {
     let (mut views, start) = live_views();
-    assert!(views.root.is_busy());
+    assert!(views.workspace.root.is_busy());
     views.handle_event(key(KeyCode::Char('i'), KeyModifiers::NONE));
     views.handle_event(Event::Paste("root @app".into()));
     let root = views.file_search_request().unwrap();
@@ -64,9 +65,10 @@ fn root_and_live_worker_searches_are_pane_local_while_work_runs() {
         None
     );
     assert_eq!(views.visible_app().input(), "worker @\"docs/my file.md\" ");
-    assert_eq!(views.root.input(), "root @app");
-    let Some(UiAction::WorkerControl(control)) =
-        views.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
+    assert_eq!(views.workspace.root.input(), "root @app");
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(control),
+    ))) = views.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
     else {
         panic!("worker feedback");
     };
@@ -76,13 +78,13 @@ fn root_and_live_worker_searches_are_pane_local_while_work_runs() {
     assert!(!views.file_search_completed(response(&worker, &["after submission"])));
     // Preserve existing acknowledgement identity: suggestions did not count as
     // draft edits, so the accepted worker feedback can still clear its draft.
-    views.apply(SessionEvent::WorkerControlResult {
-        result: WorkerControlResult {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult {
+        result: Box::new(WorkerControlResult {
             control,
             accepted: true,
             detail: "accepted".into(),
-        },
-    });
+        }),
+    }));
     assert!(views.visible_app().input().is_empty());
     views.handle_event(key(KeyCode::Char('o'), KeyModifiers::CONTROL));
     let returned = views.file_search_request().unwrap();
@@ -90,12 +92,12 @@ fn root_and_live_worker_searches_are_pane_local_while_work_runs() {
     assert!(!views.file_search_completed(response(&root, &["old root"])));
     assert!(views.file_search_completed(response(&returned, &["b/app.rs", "a/app.rs"])));
     assert_eq!(
-        views.root.command_menu_selection(),
+        views.workspace.root.command_menu_selection(),
         0,
         "still highlight b/app.rs"
     );
     views.handle_event(key(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(views.root.input(), "root @b/app.rs ");
+    assert_eq!(views.workspace.root.input(), "root @b/app.rs ");
 }
 
 #[test]
@@ -106,8 +108,9 @@ fn worker_ctrl_enter_ignores_highlighted_file_and_retirement_rejects_late_respon
     views.handle_event(Event::Paste("@unresolved".into()));
     let worker = views.file_search_request().unwrap();
     views.file_search_completed(response(&worker, &["different.rs"]));
-    let Some(UiAction::WorkerControl(control)) =
-        views.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(control),
+    ))) = views.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
     else {
         panic!("worker feedback");
     };
@@ -117,7 +120,7 @@ fn worker_ctrl_enter_ignores_highlighted_file_and_retirement_rejects_late_respon
     assert!(!views.file_search_completed(response(&worker, &["late"])));
     views.handle_event(key(KeyCode::Char('i'), KeyModifiers::NONE));
     let reopened = views.file_search_request().unwrap();
-    views.agents[0].app.freeze_worker();
+    views.workspace.agents[0].app.freeze_worker();
     assert!(views.file_search_request().is_none());
     assert!(!views.file_search_completed(response(&reopened, &["frozen"])));
     views.prune_discarded_agent_panes(vec![start.run_id]);
@@ -138,8 +141,8 @@ fn historical_workers_never_request_files_and_overlay_return_reconciles_live_wor
     let resumed = views.file_search_request().unwrap();
     assert!(views.file_search_completed(response(&resumed, &["active.rs"])));
     assert_eq!(views.visible_agent_id(), Some(&start.agents[0].id));
-    views.agents[0].historical = true;
-    views.agents[0].app.freeze_worker();
+    views.workspace.agents[0].historical = true;
+    views.workspace.agents[0].app.freeze_worker();
     assert!(views.file_search_request().is_none());
     views.handle_event(Event::Paste("must not type".into()));
     assert_eq!(views.visible_app().input(), "@a");

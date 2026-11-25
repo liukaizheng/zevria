@@ -169,9 +169,7 @@ impl App {
         let selection_range = parts.selected.and_then(|active| {
             let entry = cache.entries().get(active.selection.history_index)?;
             let representative = match entry.span {
-                Some(zevria_presentation::fold::SpanRole::Hidden { start }) => {
-                    &cache.entries()[start]
-                }
+                Some(crate::fold::SpanRole::Hidden { start }) => &cache.entries()[start],
                 _ => entry,
             };
             representative

@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{ManagementEvent, PlanEvent, TurnEvent};
 
 #[tokio::test]
 async fn idle_barrier_follows_completion_and_ready_plan_publication() {
@@ -41,14 +42,14 @@ async fn idle_barrier_follows_completion_and_ready_plan_publication() {
     let events = run.shutdown().await;
     let completed = events
         .iter()
-        .position(|e| matches!(e, SessionEvent::TurnCompleted { .. }))
+        .position(|e| matches!(e, SessionEvent::Turn(TurnEvent::Completed { .. })))
         .unwrap();
     let ready = events
         .iter()
         .position(|e| {
-            matches!(e, SessionEvent::PlanStateChanged {
-        state: PlanWorkflowState::Ready { artifact },
-    } if artifact.markdown.trim() == markdown.trim() && artifact.source_turn_id == TurnId::new(1))
+            matches!(e, SessionEvent::Plan(PlanEvent::StateChanged {
+        state,
+    })  if matches!(state.as_ref(), PlanWorkflowState::Ready { artifact } if artifact.markdown.trim() == markdown.trim() && artifact.source_turn_id == TurnId::new(1)))
         })
         .unwrap_or_else(|| panic!("missing Ready: {events:#?}"));
     let idle = events
@@ -101,7 +102,7 @@ async fn queued_turns_publish_only_one_idle_barrier_after_the_final_turn() {
     );
     let completed = events
         .iter()
-        .rposition(|e| matches!(e, SessionEvent::TurnCompleted { .. }))
+        .rposition(|e| matches!(e, SessionEvent::Turn(TurnEvent::Completed { .. })))
         .unwrap();
     let idle = events
         .iter()
@@ -129,8 +130,13 @@ async fn idle_control_management_queries_and_shutdown_publish_no_barrier() {
         request_id: "mode".into(),
         mode: SessionMode::Plan,
     }));
-    run.until(|event| matches!(event, SessionEvent::ModeResult { .. }))
-        .await;
+    run.until(|event| {
+        matches!(
+            event,
+            SessionEvent::Manage(ManagementEvent::ModeResult { .. })
+        )
+    })
+    .await;
     run.send(SessionCommand::Manage(ManagementCommand::Models {
         request_id: "models".into(),
         request: ModelManagementRequest::List {
@@ -138,13 +144,18 @@ async fn idle_control_management_queries_and_shutdown_publish_no_barrier() {
             mode: SessionMode::Plan,
         },
     }));
-    run.until(|event| matches!(event, SessionEvent::ModelsResult { .. }))
-        .await;
+    run.until(|event| {
+        matches!(
+            event,
+            SessionEvent::Manage(ManagementEvent::ModelsResult { .. })
+        )
+    })
+    .await;
     run.idle_fence("query").await;
     let events = run.shutdown().await;
     assert!(!events.iter().any(|e| matches!(
         e,
-        SessionEvent::EngineIdle | SessionEvent::TurnStarted { .. }
+        SessionEvent::EngineIdle | SessionEvent::Turn(TurnEvent::Started { .. })
     )));
 }
 

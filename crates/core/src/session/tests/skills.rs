@@ -1,5 +1,6 @@
 use super::*;
 use zevria_foundation::SKILL_READ_TOOL_NAME;
+use zevria_session_api::{ManagementEvent, TurnEvent};
 
 #[tokio::test]
 async fn skill_management_preserves_pins_disables_all_paths_and_rejects_stale_mutations() {
@@ -85,11 +86,10 @@ async fn skill_management_preserves_pins_disables_all_paths_and_rejects_stale_mu
     while let Ok(update) = receiver.try_recv() {
         if let SessionUpdate::Lifecycle(event) = update {
             match event {
-                SessionEvent::SkillsChanged { .. } => seen_change = true,
-                SessionEvent::SkillsResult {
-                    request_id,
-                    result: SkillManagementResult::Changed { .. },
-                } => {
+                SessionEvent::Manage(ManagementEvent::SkillsChanged { .. }) => seen_change = true,
+                SessionEvent::Manage(ManagementEvent::SkillsResult { request_id, result })
+                    if matches!(result.as_ref(), SkillManagementResult::Changed { .. }) =>
+                {
                     assert_eq!(request_id, "disable");
                     assert!(seen_change, "install/invalidation precedes success");
                 }
@@ -564,10 +564,12 @@ async fn management_completions_obey_selected_mode_and_registered_activation_cap
         let view = events
             .iter()
             .find_map(|event| match event {
-                SessionEvent::SkillsResult {
-                    result: SkillManagementResult::View { view },
-                    ..
-                } => Some(view),
+                SessionEvent::Manage(ManagementEvent::SkillsResult { result, .. }) => {
+                    match result.as_ref() {
+                        SkillManagementResult::View { view } => Some(view),
+                        _ => None,
+                    }
+                }
                 _ => None,
             })
             .unwrap();
@@ -621,7 +623,9 @@ async fn skill_management_queries_while_busy_but_mutations_are_not_queued() {
     loop {
         if matches!(
             receiver.recv().await,
-            Some(SessionUpdate::Lifecycle(SessionEvent::TurnStarted { .. }))
+            Some(SessionUpdate::Lifecycle(SessionEvent::Turn(
+                TurnEvent::Started { .. }
+            )))
         ) {
             break;
         }
@@ -648,12 +652,13 @@ async fn skill_management_queries_while_busy_but_mutations_are_not_queued() {
         .unwrap();
     let mut results = 0;
     while results < 2 {
-        if let Some(SessionUpdate::Lifecycle(SessionEvent::SkillsResult { request_id, result })) =
-            tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
-                .await
-                .unwrap()
+        if let Some(SessionUpdate::Lifecycle(SessionEvent::Manage(
+            ManagementEvent::SkillsResult { request_id, result },
+        ))) = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+            .await
+            .unwrap()
         {
-            match (request_id.as_str(), result) {
+            match (request_id.as_str(), *result) {
                 ("read", SkillManagementResult::View { view: page }) => {
                     assert_eq!(page.revision, revision);
                     assert_eq!(
@@ -687,7 +692,7 @@ async fn skill_management_queries_while_busy_but_mutations_are_not_queued() {
     while let Ok(update) = receiver.try_recv() {
         assert!(!matches!(
             update,
-            SessionUpdate::Lifecycle(SessionEvent::SkillsChanged { .. })
+            SessionUpdate::Lifecycle(SessionEvent::Manage(ManagementEvent::SkillsChanged { .. }))
         ));
     }
 }
@@ -744,7 +749,7 @@ async fn skill_replacements_enforce_the_selected_modes_tool_policy_before_commit
     assert!(requests.lock().expect("requests").is_empty());
     assert!(matches!(
         collect_events(&mut receiver).await.last(),
-        Some(SessionEvent::TurnRejected { error, .. })
+        Some(SessionEvent::Turn(TurnEvent::Rejected { error, .. }))
             if error.contains("skill capability is unavailable in Plan mode")
     ));
 }
@@ -876,7 +881,7 @@ async fn unknown_skill_invocations_fail_locally_without_a_model_call() {
     let events = collect_events(&mut receiver).await;
     assert!(matches!(
         events.as_slice(),
-        [SessionEvent::TurnRejected { error, .. }]
+        [SessionEvent::Turn(TurnEvent::Rejected { error, .. })]
             if error.contains("unknown or unavailable skill missing") && error.contains("management") && !error.contains("commit, review")
     ));
 }
@@ -927,7 +932,7 @@ async fn direct_skill_invocation_obeys_the_mode_policy() {
     assert!(requests.lock().expect("requests").is_empty());
     assert!(matches!(
         collect_events(&mut receiver).await.as_slice(),
-        [SessionEvent::TurnRejected { error, .. }]
+        [SessionEvent::Turn(TurnEvent::Rejected { error, .. })]
             if error.contains("skill capability is unavailable in Plan mode")
     ));
 }
@@ -998,9 +1003,9 @@ async fn repeat_skill_applications_use_the_same_path_without_replacing_pins() {
     let results: Vec<String> = events
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 message, metadata, ..
-            } => {
+            }) => {
                 assert!(metadata.iter().all(|entry| entry.outcome.is_success()));
                 Some(serde_json::to_string(message).expect("result json"))
             }
@@ -1157,9 +1162,9 @@ async fn engine_admits_valid_names_without_dispatch_and_rejects_malformed_argume
         .await
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 message, metadata, ..
-            } => {
+            }) => {
                 assert_eq!(metadata[0].outcome, ToolCallOutcome::Success);
                 assert_eq!(metadata[1].outcome, ToolCallOutcome::Error);
                 Some(serde_json::to_string(message).expect("message"))
@@ -1225,7 +1230,7 @@ async fn resumed_skill_pin_is_reapplied_by_stateless_dispatch() {
         .await
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::ToolResults { message, .. } => {
+            SessionEvent::Turn(TurnEvent::ToolResults { message, .. }) => {
                 Some(serde_json::to_string(message).expect("result json"))
             }
             _ => None,
@@ -1274,7 +1279,7 @@ async fn oversized_prospective_activation_fails_before_state_mutation() {
     assert!(requests.lock().expect("requests").is_empty());
     assert!(matches!(
         collect_events(&mut receiver).await.as_slice(),
-        [SessionEvent::TurnRejected { error, .. }]
+        [SessionEvent::Turn(TurnEvent::Rejected { error, .. })]
             if error.contains("irreducible instruction-state tokens")
     ));
 }
@@ -1348,7 +1353,7 @@ async fn oversized_tool_activation_fails_without_mutating_typed_state() {
     let events = collect_events(&mut receiver).await;
     assert!(events.iter().any(|event| matches!(
         event,
-        SessionEvent::ToolResults { metadata, .. }
+        SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. })
             if metadata[0].outcome == ToolCallOutcome::Error
     )));
 }

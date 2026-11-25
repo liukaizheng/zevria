@@ -1,6 +1,7 @@
 //! Explicit confirmation fixtures for synthesis tests. Lifecycle tests do not
 //! use this harness: a proposal-only launcher never confirms on the user's behalf.
 use super::*;
+use zevria_session_api::EnsembleEvent;
 
 pub(super) fn start_stub_review(
     states: Vec<WorkerReviewState>,
@@ -25,7 +26,7 @@ pub(super) fn start_stub_review(
             .cloned()
             .collect();
         tokio::spawn(async move {
-            let input = state.pending.front().unwrap().clone();
+            let input = state.inputs.pending.front().unwrap().clone();
             let send = |event| {
                 let tx = tx.clone();
                 let worker_id = state.descriptor.id.clone();
@@ -102,9 +103,9 @@ pub(super) async fn explicitly_review_proposals<P: ModelProvider>(
             biased;
             update = rx.recv() => {
                 if let Some(SessionUpdate::Lifecycle(event)) = update {
-                    if let SessionEvent::WorkerReviewUpdated { target, state } = &event
+                    if let SessionEvent::Ensemble(EnsembleEvent::WorkerReviewUpdated { target, state }) = &event
                         && let Some(snapshot) = state.eligible_snapshot()
-                        && state.confirmation.is_none()
+                        && state.proposals.confirmation.is_none()
                         && confirmed.insert(snapshot.revision.digest.clone() + state.descriptor.id.as_str()) {
                         router.route(WorkerControl { request_id: WorkerControlId::new(), target: target.clone(), action: if baseline { WorkerControlAction::Baseline { expected_revision: snapshot.revision.clone() } } else { WorkerControlAction::Confirm { expected_revision: snapshot.revision.clone() } } }).unwrap();
                     }

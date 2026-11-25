@@ -14,6 +14,7 @@ use zevria_session_api::provider::ModelProvider;
 use zevria_session_api::question::QuestionResponder;
 use zevria_session_api::turn::TurnContext;
 use zevria_session_api::worker::WorkerControlRouter;
+use zevria_session_api::{EnsembleEvent, JobEvent, ManagementEvent};
 use zevria_transcript::SessionReplayError;
 use zevria_workflow::ensemble::latest_ensemble_recovery;
 use zevria_workflow::ensemble_review::WorkerControlResult;
@@ -360,7 +361,10 @@ pub(in crate::session) fn command_control_reply(
         },
         |jobs| jobs.handle_control(control),
     );
-    SessionEvent::CommandControlResult { request_id, result }
+    SessionEvent::Job(JobEvent::ControlResult {
+        request_id,
+        result: Box::new(result),
+    })
 }
 
 impl ActiveWorkControl {
@@ -454,7 +458,9 @@ impl CommandRouter<'_> {
                     ))
                 };
                 if let Err(result) = result {
-                    reply = Some(SessionEvent::WorkerControlResult { result });
+                    reply = Some(SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult {
+                        result: Box::new(result),
+                    }));
                 }
             }
             Some(SessionCommand::Control(ControlCommand::CancelTurn { turn_id })) => {
@@ -471,13 +477,13 @@ impl CommandRouter<'_> {
                 }
             }
             Some(SessionCommand::Manage(ManagementCommand::SetMode { request_id, .. })) => {
-                reply = Some(SessionEvent::ModeResult {
+                reply = Some(SessionEvent::Manage(ManagementEvent::ModeResult {
                     request_id,
                     result: ModeSelectionResult::rejected(
                         "busy",
                         "mode changes require an idle session; request was not queued",
                     ),
-                });
+                }));
             }
             Some(SessionCommand::Manage(ManagementCommand::Skills {
                 request_id,
@@ -497,7 +503,10 @@ impl CommandRouter<'_> {
                         .expect("skill query projection poisoned");
                     SessionEngine::<P>::query_skills(&projection, &request)
                 };
-                reply = Some(SessionEvent::SkillsResult { request_id, result });
+                reply = Some(SessionEvent::Manage(ManagementEvent::SkillsResult {
+                    request_id,
+                    result: Box::new(result),
+                }));
             }
             Some(SessionCommand::Manage(ManagementCommand::Models {
                 request_id,
@@ -515,13 +524,13 @@ impl CommandRouter<'_> {
                 {
                     cancellation.cancel();
                 } else {
-                    reply = Some(SessionEvent::ModelsResult {
+                    reply = Some(SessionEvent::Manage(ManagementEvent::ModelsResult {
                         request_id,
-                        result: zevria_model::models::ModelManagementResult::rejected(
+                        result: Box::new(zevria_model::models::ModelManagementResult::rejected(
                             "busy",
                             "model changes require an idle root session; request was not queued",
-                        ),
-                    });
+                        )),
+                    }));
                 }
             }
             Some(SessionCommand::Manage(ManagementCommand::Mcp {
@@ -539,7 +548,10 @@ impl CommandRouter<'_> {
                         "MCP changes require an idle session; request was not queued.",
                     )
                 };
-                reply = Some(SessionEvent::McpResult { request_id, result });
+                reply = Some(SessionEvent::Manage(ManagementEvent::McpResult {
+                    request_id,
+                    result: Box::new(result),
+                }));
             }
             Some(SessionCommand::Control(ControlCommand::Shutdown)) | None => {
                 if let Some(active) = self.active {

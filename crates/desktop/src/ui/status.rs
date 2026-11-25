@@ -15,6 +15,8 @@ use zevria_foundation::ModelRole;
 use zevria_presentation::{
     ConversationTail, SessionModel, jobs::JobsInspector, status_icon::StatusIcon, subtasks,
 };
+#[cfg(test)]
+use zevria_session_api::TurnEvent;
 
 pub(super) const HEIGHT: f32 = 28.;
 
@@ -26,11 +28,7 @@ pub struct ContextGauge {
 }
 impl ContextGauge {
     fn new(input: u64, window: u64) -> Self {
-        let fraction = if window == 0 {
-            0.
-        } else {
-            (input as f64 / window as f64).clamp(0., 1.) as f32
-        };
+        let fraction = zevria_presentation::status::StatusSnapshot::context_fraction(input, window);
         Self {
             label: format!("{} of {}", compact_number(input), compact_number(window)),
             fraction: Some(fraction),
@@ -93,8 +91,12 @@ impl StatusLine {
             .into()
         };
         let role = model.display_role();
-        let telemetry = model.session.telemetry(role);
-        let response_usage = telemetry.response().map(|response| response.usage());
+        let snapshot = zevria_presentation::status::StatusSnapshot::observe(
+            &model.session,
+            &model.model_profiles,
+            role,
+        );
+        let response_usage = snapshot.response;
         Self {
             glyph: if persistence_failed {
                 StatusIcon::Failed
@@ -112,15 +114,11 @@ impl StatusLine {
             .into(),
             activity,
             persistence_failed,
-            profile: telemetry
-                .authoritative_profile()
-                .or_else(|| model.model_profiles.get(role))
+            profile: snapshot
+                .profile
                 .map_or_else(|| "No model".into(), ToString::to_string),
-            reasoning: model
-                .session
-                .reasoning(role)
-                .map(|r| format!("{r:?}").to_lowercase()),
-            context: telemetry.context().map(ContextGauge::from_snapshot),
+            reasoning: snapshot.reasoning.map(|r| format!("{r:?}").to_lowercase()),
+            context: snapshot.context.map(ContextGauge::from_snapshot),
             cache: response_usage.map(|usage| {
                 format!(
                     "cached {} ({:.0}%)",
@@ -319,9 +317,9 @@ impl DesktopWindow {
         let controller = self.controller.read(cx);
         let model = controller.model.visible();
         let mut status = StatusLine::new(model, controller.cancelling);
-        if controller.model.models.is_open() && !status.persistence_failed {
+        if controller.model.controls.models.is_open() && !status.persistence_failed {
             use zevria_presentation::models::ModelPhase;
-            status.activity = match controller.model.models.phase {
+            status.activity = match controller.model.controls.models.phase {
                 ModelPhase::Cancelling { .. } => "Cancelling model selection…",
                 ModelPhase::PendingChange { .. } => "Applying model selection…",
                 _ => "Choosing a model…",
@@ -380,7 +378,7 @@ impl DesktopWindow {
                 .map_or_else(String::new, |r| format!(" · {r}"))
         );
         let plan_open = controller.model.root.workflow.dialog().is_some();
-        if controller.model.selected_child.is_none() {
+        if controller.model.controls.selected_child.is_none() {
             let unavailable = controller.model_selection_available().err();
             let tooltip = format!(
                 "{label}\nChange model and thinking effort for this session only ({}).{}",
@@ -406,7 +404,7 @@ impl DesktopWindow {
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.open_models(cx))),
             );
-            let jobs = controller.model.jobs.jobs();
+            let jobs = controller.model.root.jobs_inspector().jobs();
             if !jobs.is_empty() {
                 let running = jobs
                     .iter()
@@ -559,16 +557,16 @@ mod tests {
 
     fn running_model() -> SessionModel {
         let mut model = SessionModel::default();
-        model.reduce(E::TurnStarted {
+        model.reduce(E::Turn(TurnEvent::Started {
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("Check cache usage"),
-        });
+        }));
         model
     }
 
     fn response_event(input_tokens: u64, cached_tokens: u64, output_tokens: u64) -> E {
-        E::UsageUpdated {
+        E::Turn(TurnEvent::UsageUpdated {
             turn_id: TURN,
             usage: TokenUsage {
                 input_tokens,
@@ -580,13 +578,13 @@ mod tests {
             model_role: ModelRole::Build,
             input_token_limit: 100_000,
             context_window_tokens: 128_000,
-        }
+        })
     }
 
     fn context_event(profile: ModelProfileRef, model_role: ModelRole, tokens: u64) -> E {
-        E::ContextUsageUpdated {
+        E::Turn(TurnEvent::ContextUsageUpdated {
             turn_id: TURN,
-            snapshot: ContextTokenSnapshot {
+            snapshot: Box::new(ContextTokenSnapshot {
                 profile,
                 model_role,
                 projected_input_tokens: Some(tokens),
@@ -596,8 +594,8 @@ mod tests {
                 automatic_trigger: 80_000,
                 input_token_limit: 100_000,
                 context_window_tokens: 128_000,
-            },
-        }
+            }),
+        })
     }
 
     #[::core::prelude::v1::test]
@@ -639,20 +637,20 @@ mod tests {
     #[::core::prelude::v1::test]
     fn tool_loop_usage_replaces_cache_rate_but_next_context_does_not() {
         let mut model = running_model();
-        model.reduce(E::ModelCallStarted {
+        model.reduce(E::Turn(TurnEvent::ModelCallStarted {
             turn_id: TURN,
             call: 1,
-        });
+        }));
         model.reduce(response_event(12_300, 10_200, 2_100));
-        model.reduce(E::Intermediate {
+        model.reduce(E::Turn(TurnEvent::Intermediate {
             turn_id: TURN,
             message: Message::assistant("Checking the next tool result"),
             attempt_id: None,
-        });
-        model.reduce(E::ModelCallStarted {
+        }));
+        model.reduce(E::Turn(TurnEvent::ModelCallStarted {
             turn_id: TURN,
             call: 2,
-        });
+        }));
         model.reduce(context_event(
             ModelProfileRef::new("test", "model"),
             ModelRole::Build,
@@ -667,11 +665,11 @@ mod tests {
         let status = StatusLine::new(&model, false);
         assert_eq!(status.cache.as_deref(), Some("cached 10k (50%)"));
         assert_eq!(status.total.as_deref(), Some("total 23k"));
-        model.reduce(E::TurnCompleted {
+        model.reduce(E::Turn(TurnEvent::Completed {
             turn_id: TURN,
             message: Message::assistant("Done"),
             attempt_id: None,
-        });
+        }));
         // Late usage cannot replace the most recently accepted response.
         model.reduce(response_event(1_000, 0, 1));
         assert_eq!(
@@ -706,14 +704,14 @@ mod tests {
         assert_eq!(status.cache, None);
         assert_eq!(status.total, None);
         model.reduce(response_event(12_300, 10_200, 2_100));
-        model.reduce(E::TurnCompleted {
+        model.reduce(E::Turn(TurnEvent::Completed {
             turn_id: TURN,
             message: Message::assistant("Done"),
             attempt_id: None,
-        });
-        model.reduce(E::ModeChanged {
+        }));
+        model.reduce(E::Turn(TurnEvent::ModeChanged {
             mode: SessionMode::Plan,
-        });
+        }));
         let status = StatusLine::new(&model, false);
         assert_eq!(status.mode, "Plan");
         assert_eq!(status.profile, "test/plan");

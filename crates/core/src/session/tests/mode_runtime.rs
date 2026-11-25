@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{ManagementEvent, TurnEvent};
 
 #[tokio::test]
 async fn busy_mode_requests_are_rejected_not_queued_and_idle_selection_allocates_no_turn() {
@@ -20,9 +21,9 @@ async fn busy_mode_requests_are_rejected_not_queued_and_idle_selection_allocates
             request_id: request_id.clone(),
             mode,
         }));
-        let result = run.until(|event| matches!(event, SessionEvent::ModeResult { request_id: id, .. } if id == &request_id)).await;
+        let result = run.until(|event| matches!(event, SessionEvent::Manage(ManagementEvent::ModeResult { request_id: id, .. }) if id == &request_id)).await;
         assert!(
-            matches!(result, SessionEvent::ModeResult { result: ModeSelectionResult::Rejected { code, .. }, .. } if code == "busy")
+            matches!(result, SessionEvent::Manage(ManagementEvent::ModeResult { result: ModeSelectionResult::Rejected { code, .. }, .. }) if code == "busy")
         );
         assert_eq!(
             zevria_transcript::transcript::session_mode(
@@ -40,16 +41,16 @@ async fn busy_mode_requests_are_rejected_not_queued_and_idle_selection_allocates
         request_id: "accepted".into(),
         mode: SessionMode::Plan,
     }));
-    let result = run.until(|event| matches!(event, SessionEvent::ModeResult { request_id, .. } if request_id == "accepted")).await;
+    let result = run.until(|event| matches!(event, SessionEvent::Manage(ManagementEvent::ModeResult { request_id, .. }) if request_id == "accepted")).await;
     assert!(matches!(
         result,
-        SessionEvent::ModeResult {
+        SessionEvent::Manage(ManagementEvent::ModeResult {
             result: ModeSelectionResult::Accepted {
                 mode: SessionMode::Plan,
                 changed: true
             },
             ..
-        }
+        })
     ));
     assert_eq!(
         zevria_transcript::transcript::session_mode(
@@ -62,7 +63,7 @@ async fn busy_mode_requests_are_rejected_not_queued_and_idle_selection_allocates
     assert_eq!(
         lifecycle
             .iter()
-            .filter(|event| matches!(event, SessionEvent::TurnStarted { .. }))
+            .filter(|event| matches!(event, SessionEvent::Turn(TurnEvent::Started { .. })))
             .count(),
         1
     );

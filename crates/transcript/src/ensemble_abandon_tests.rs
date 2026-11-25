@@ -27,18 +27,18 @@ fn ensemble_abandonment_is_terminal_in_every_unsealed_phase() {
             request_id: WorkerControlId::new(),
         };
         state.apply(&event).unwrap();
-        assert!(state.abandoned);
+        assert!(state.is_abandoned());
         assert!(state.status().is_terminal());
         assert_eq!(state.status(), AgentRunStatus::Abandoned);
         assert!(state.quiescent());
         assert!(state.cancellable_generation().is_none());
         assert!(state.eligible_snapshot().is_none());
         assert!(state.confirmed_plan().is_none());
-        assert!(state.confirmation.is_none());
-        assert!(!state.connected);
+        assert!(state.proposals.confirmation.is_none());
+        assert!(!state.connection.connected);
         assert_eq!(state.evidence, before.evidence);
-        assert_eq!(state.retained, before.retained);
-        assert_eq!(state.candidate, before.candidate);
+        assert_eq!(state.proposals.retained, before.proposals.retained);
+        assert_eq!(state.proposals.candidate, before.proposals.candidate);
         assert!(state.outcome().is_sanitized_abandonment());
         let frozen = state.clone();
         let transitions = vec![
@@ -62,7 +62,7 @@ fn ensemble_abandonment_is_terminal_in_every_unsealed_phase() {
             WorkerReviewEvent::Interrupted { generation: 1 },
             WorkerReviewEvent::InputAccepted {
                 input: WorkerInput {
-                    generation: state.accepted_generation + 1,
+                    generation: state.inputs.accepted_generation + 1,
                     request_id: WorkerControlId::new(),
                     kind: WorkerPromptKind::UserFeedback,
                     text: "late feedback".into(),
@@ -89,7 +89,7 @@ fn ensemble_abandonment_is_terminal_in_every_unsealed_phase() {
     assert!(
         !serde_json::from_value::<WorkerReviewState>(old)
             .unwrap()
-            .abandoned
+            .is_abandoned()
     );
     for request_id in ["".to_string(), " ".into(), "a".repeat(129)] {
         assert!(
@@ -179,12 +179,12 @@ fn ensemble_abandoned_evidence_never_reenters_synthesis_or_recovery() {
     excluded.evidence.descriptor = excluded.descriptor.clone();
     excluded.evidence.report = "EXCLUDED_PROSE".into();
     excluded.evidence.failure = Some("EXCLUDED_PROVIDER_FAILURE".into());
-    let previous = excluded.retained.as_ref().unwrap();
+    let previous = excluded.proposals.retained.as_ref().unwrap();
     let mut plan = previous.plan.clone();
     plan.markdown = Some("EXCLUDED_MARKDOWN".into());
     let mut revision = previous.revision.clone();
     revision.digest = zevria_workflow::NativePlanCapture::content_digest(b"EXCLUDED_MARKDOWN");
-    excluded.retained = Some(
+    excluded.proposals.retained = Some(
         zevria_workflow::WorkerPlanData { revision, plan }
             .try_into()
             .unwrap(),

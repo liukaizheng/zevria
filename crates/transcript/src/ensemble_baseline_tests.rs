@@ -3,7 +3,7 @@ use crate::EnsembleWorkflow;
 
 fn mark(state: &mut WorkerReviewState) -> WorkerConfirmationReceipt {
     let mut marking = receipt(state);
-    if let Some(original) = &state.confirmation {
+    if let Some(original) = &state.proposals.confirmation {
         marking.target.run_id = original.target.run_id.clone();
         marking.target.turn_id = TurnId::new(original.target.turn_id.get() + 1);
     }
@@ -19,8 +19,8 @@ fn mark(state: &mut WorkerReviewState) -> WorkerConfirmationReceipt {
 fn marking_confirms_and_preserves_independent_receipt_identities() {
     let mut state = proposal();
     let marking = mark(&mut state);
-    assert_eq!(state.confirmation.as_ref(), Some(&marking));
-    assert_eq!(state.baseline.as_ref(), Some(&marking));
+    assert_eq!(state.proposals.confirmation.as_ref(), Some(&marking));
+    assert_eq!(state.proposals.baseline.as_ref(), Some(&marking));
     assert_eq!(
         state.outcome().confirmation.unwrap().baseline,
         Some(marking.clone())
@@ -30,10 +30,10 @@ fn marking_confirms_and_preserves_independent_receipt_identities() {
             request_id: WorkerControlId::new(),
         })
         .unwrap();
-    assert_eq!(state.confirmation.as_ref(), Some(&marking));
+    assert_eq!(state.proposals.confirmation.as_ref(), Some(&marking));
     let later = mark(&mut state);
     assert_ne!(later.target.turn_id, marking.target.turn_id);
-    assert_eq!(state.confirmation.as_ref(), Some(&marking));
+    assert_eq!(state.proposals.confirmation.as_ref(), Some(&marking));
     assert_eq!(
         state.confirmed_plan().unwrap().baseline,
         Some(later.clone())
@@ -85,11 +85,11 @@ fn run_transfer_is_atomic_and_never_withdraws_old_confirmation() {
     )
     .unwrap();
     assert_eq!(affected, vec![id.clone(), states[0].descriptor.id.clone()]);
-    assert_eq!(states[0].confirmation, Some(first));
-    assert!(states[0].baseline.is_none());
-    assert_eq!(states[1].confirmation, Some(second.clone()));
-    assert_eq!(states[1].baseline, Some(second));
-    assert!(states[2].confirmation.is_none());
+    assert_eq!(states[0].proposals.confirmation, Some(first));
+    assert!(states[0].proposals.baseline.is_none());
+    assert_eq!(states[1].proposals.confirmation, Some(second.clone()));
+    assert_eq!(states[1].proposals.baseline, Some(second));
+    assert!(states[2].proposals.confirmation.is_none());
     let before = states.clone();
     let repeated = receipt(&states[1]);
     assert!(
@@ -149,8 +149,8 @@ fn every_confirmation_invalidation_also_clears_baseline_without_automatic_restor
                 .unwrap(),
             _ => unreachable!(),
         }
-        assert!(state.confirmation.is_none(), "{kind}");
-        assert!(state.baseline.is_none(), "{kind}");
+        assert!(state.proposals.confirmation.is_none(), "{kind}");
+        assert!(state.proposals.baseline.is_none(), "{kind}");
         assert!(state.outcome().confirmation.is_none(), "{kind}");
     }
 }
@@ -217,7 +217,7 @@ fn baseline_validation_and_optional_v2_serialization_are_exact() {
         serde_json::from_str::<WorkerReviewState>(&json).unwrap(),
         state
     );
-    state.confirmation = None;
+    state.proposals.confirmation = None;
     assert!(state.confirmed_plan().is_none());
     assert_eq!(ENSEMBLE_REVIEW_VERSION, 1);
     assert_eq!(crate::AGENT_RUN_TRANSCRIPT_VERSION, 1);
@@ -335,8 +335,8 @@ fn journal_baseline_mirrors_are_audit_only_and_require_exact_retained_publicatio
     let mut journal = crate::WorkerReviewJournal::new(&header);
     // Execution projection has the publication but not root confirmation authority.
     journal.state = state.clone();
-    journal.state.confirmation = None;
-    journal.state.baseline = None;
+    journal.state.proposals.confirmation = None;
+    journal.state.proposals.baseline = None;
     for _ in 0..2 {
         for event in [
             WorkerReviewEvent::Confirmed {
@@ -360,8 +360,8 @@ fn journal_baseline_mirrors_are_audit_only_and_require_exact_retained_publicatio
         }
     }
     assert!(journal.events.is_empty());
-    assert!(journal.state.confirmation.is_none());
-    assert!(journal.state.baseline.is_none());
+    assert!(journal.state.proposals.confirmation.is_none());
+    assert!(journal.state.proposals.baseline.is_none());
     let mut forged = receipt;
     forged.revision.digest.push('x');
     assert!(

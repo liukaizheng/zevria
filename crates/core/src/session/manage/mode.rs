@@ -4,6 +4,7 @@ use crate::session::kernel::state::EnginePhase;
 use zevria_foundation::policy::SessionMode;
 use zevria_session_api::event::{ModeSelectionResult, SessionEvent, SessionEventSender};
 use zevria_session_api::provider::ModelProvider;
+use zevria_session_api::{ManagementEvent, TurnEvent};
 use zevria_transcript::SessionReplayError;
 use zevria_workflow::plan::PlanWorkflowState;
 
@@ -95,7 +96,10 @@ impl<P: ModelProvider> SessionEngine<P> {
             }
         };
         let _ = events
-            .send(SessionEvent::ModeResult { request_id, result })
+            .send(SessionEvent::Manage(ManagementEvent::ModeResult {
+                request_id,
+                result,
+            }))
             .await;
         Ok(())
     }
@@ -103,9 +107,9 @@ impl<P: ModelProvider> SessionEngine<P> {
     pub(in crate::session) async fn emit_selected_mode(&mut self, events: &SessionEventSender) {
         if self.capabilities.mode_management {
             let _ = events
-                .send(SessionEvent::ModeChanged {
+                .send(SessionEvent::Turn(TurnEvent::ModeChanged {
                     mode: self.selected_mode(),
-                })
+                }))
                 .await;
         }
     }

@@ -1,5 +1,6 @@
 use super::*;
 use zevria_foundation::RequestBehavior;
+use zevria_session_api::{JobEvent, PlanEvent, QuestionEvent, SubtaskEvent, TurnEvent};
 
 fn busy() -> App {
     let mut app = app_with_skills();
@@ -14,11 +15,11 @@ fn enqueue(app: &mut App, text: &str) {
     assert!(app.interaction().is_normal());
 }
 fn complete(app: &mut App, turn_id: TurnId) {
-    app.reduce_without_effects(SessionEvent::TurnCompleted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Completed {
         turn_id,
         message: Message::assistant("done"),
         attempt_id: None,
-    });
+    }));
 }
 fn idle(app: &mut App) {
     app.reduce_without_effects(SessionEvent::EngineIdle);
@@ -29,8 +30,10 @@ fn pause_label(app: &App) -> Option<&'static str> {
 
 #[test]
 fn job_continuation_waits_for_queue_composer_and_barrier_and_ctrl_c_cancels_it() {
-    let offer = || SessionEvent::JobContinuationChanged {
-        mode: Some(SessionMode::Build),
+    let offer = || {
+        SessionEvent::Job(JobEvent::ContinuationChanged {
+            mode: Some(SessionMode::Build),
+        })
     };
     let mut app = busy();
     enqueue(&mut app, "user follow up");
@@ -41,7 +44,9 @@ fn job_continuation_waits_for_queue_composer_and_barrier_and_ctrl_c_cancels_it()
     assert_eq!(app.dispatch_job_continuation(), None);
     assert!(matches!(
         app.dispatch_next_queued(),
-        Some(UiAction::Submit { .. })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Submit { .. }
+        )))
     ));
 
     let mut app = busy();
@@ -56,18 +61,24 @@ fn job_continuation_waits_for_queue_composer_and_barrier_and_ctrl_c_cancels_it()
     app.set_input_for_test("", 0);
     assert_eq!(
         app.dispatch_job_continuation(),
-        Some(UiAction::ContinueAfterJobs {
-            mode: SessionMode::Build
-        })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::ContinueAfterJobs {
+                mode: SessionMode::Build
+            }
+        )))
     );
     assert!(matches!(
         app.handle_event(ctrl('c')),
-        Some(UiAction::CancelTurn { turn_id: None })
+        Some(UiAction::Session(
+            zevria_session_api::SessionCommand::Control(
+                zevria_session_api::ControlCommand::CancelTurn { turn_id: None }
+            )
+        ))
     ));
-    app.reduce_without_effects(SessionEvent::TurnRejected {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Rejected {
         turn_id: TurnId::new(99),
         error: "stale continuation".into(),
-    });
+    }));
     assert!(!app.history().iter().any(
         |row| matches!(row, HistoryEntry::Error(text) if text.contains("stale continuation"))
     ));
@@ -84,34 +95,42 @@ fn capturing_overlays_pause_root_dispatch_until_dismissed() {
     views.open_session_picker(vec![]);
     assert_eq!(views.dispatch_queued_root_work(), None);
     views.handle_event(key(KeyCode::Esc));
+    views.show_jobs();
+    assert_eq!(views.dispatch_queued_root_work(), None);
+    views.workspace.root.engine_disconnected();
     assert!(matches!(
         views.dispatch_queued_root_work(),
-        Some(UiAction::Submit { .. })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Submit { .. }
+        )))
     ));
 
     let mut app = busy();
     complete(&mut app, TEST_TURN_ID);
-    app.reduce_without_effects(SessionEvent::JobContinuationChanged {
+    app.reduce_without_effects(SessionEvent::Job(JobEvent::ContinuationChanged {
         mode: Some(SessionMode::Build),
-    });
+    }));
     idle(&mut app);
     let mut views = test_session_views(app);
     views
-        .overlays
+        .workspace
+        .controls
         .set_question(Some(crate::question::QuestionDialog::new(
             TEST_TURN_ID,
             question_request("dispatch-gate"),
         )));
     assert_eq!(views.dispatch_queued_root_work(), None);
-    views.apply(SessionEvent::QuestionClosed {
+    views.apply(SessionEvent::Question(QuestionEvent::Closed {
         turn_id: TEST_TURN_ID,
         request_id: QuestionRequestId::new("dispatch-gate"),
-    });
+    }));
     assert_eq!(
         views.dispatch_queued_root_work(),
-        Some(UiAction::ContinueAfterJobs {
-            mode: SessionMode::Build
-        })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::ContinueAfterJobs {
+                mode: SessionMode::Build
+            }
+        )))
     );
 }
 
@@ -139,20 +158,24 @@ fn job_notice_is_a_compact_system_block_without_stream_output() {
         "Command job update: hidden stream output".into(),
     );
     let mut app = App::new();
-    app.reduce_without_effects(SessionEvent::JobContinuationStarted {
+    app.reduce_without_effects(SessionEvent::Job(JobEvent::ContinuationStarted {
         turn_id: TEST_TURN_ID,
         mode: SessionMode::Build,
-        notice,
-    });
+        notice: Box::new(notice),
+    }));
     let text = rendered_text(&mut app, 100, 24);
     assert!(text.contains("Background jobs finished"));
     assert!(text.contains("✗ exited 1 · 0.0s · sleep 5; false"));
     assert!(!text.contains("hidden stream output"));
     assert!(matches!(
         app.handle_event(ctrl('c')),
-        Some(UiAction::CancelTurn {
-            turn_id: Some(TEST_TURN_ID)
-        })
+        Some(UiAction::Session(
+            zevria_session_api::SessionCommand::Control(
+                zevria_session_api::ControlCommand::CancelTurn {
+                    turn_id: Some(TEST_TURN_ID)
+                }
+            )
+        ))
     ));
 }
 
@@ -193,8 +216,36 @@ fn busy_prompt_orchestration_skill_and_image_only_drafts_are_queued_with_capture
     complete(&mut app, TEST_TURN_ID);
     idle(&mut app);
     assert!(
-        matches!(app.dispatch_next_queued(), Some(UiAction::Submit { text, .. }) if text == expected)
+        matches!(app.dispatch_next_queued(), Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(zevria_session_api::TurnCommand::Submit { text, .. }))) if text == expected)
     );
+}
+
+#[test]
+fn queued_orchestration_keeps_its_captured_plan_mode_and_recovers_on_engine_rejection() {
+    let mut app = App::new();
+    app.set_mode_for_test(SessionMode::Plan);
+    start_empty_turn(&mut app, TEST_TURN_ID, SessionMode::Plan);
+    let draft = "/orchestrate independent work";
+    enqueue(&mut app, draft);
+    complete(&mut app, TEST_TURN_ID);
+    idle(&mut app);
+
+    assert_eq!(
+        app.dispatch_next_queued(),
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Submit {
+                text: "independent work".into(),
+                mode: SessionMode::Plan,
+                behavior: RequestBehavior::Orchestrate,
+            }
+        )))
+    );
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Rejected {
+        turn_id: TurnId::new(800),
+        error: "Orchestration requires Build mode".into(),
+    }));
+    assert_eq!(app.input(), draft);
+    assert_eq!(app.next_mode(), SessionMode::Plan);
 }
 
 #[test]
@@ -305,11 +356,13 @@ fn fifo_dispatch_waits_for_barriers_accepts_detached_drafts_and_preserves_new_co
     idle(&mut app);
     assert_eq!(
         app.dispatch_next_queued(),
-        Some(UiAction::Submit {
-            text: "first".into(),
-            mode: SessionMode::Build,
-            behavior: RequestBehavior::Orchestrate,
-        })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Submit {
+                text: "first".into(),
+                mode: SessionMode::Build,
+                behavior: RequestBehavior::Orchestrate,
+            }
+        )))
     );
     assert_eq!(app.draft_for_test(), draft);
     assert!(app.interaction().is_insert());
@@ -324,19 +377,21 @@ fn fifo_dispatch_waits_for_barriers_accepts_detached_drafts_and_preserves_new_co
     idle(&mut app);
     assert_eq!(
         app.dispatch_next_queued(),
-        Some(UiAction::InvokeSkill {
-            name: SkillName::parse("review").unwrap(),
-            args: "second".into(),
-            mode: SessionMode::Build,
-        })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::InvokeSkill {
+                name: SkillName::parse("review").unwrap(),
+                args: "second".into(),
+                mode: SessionMode::Build,
+            }
+        )))
     );
     assert_eq!(app.queue_for_test().len, 0);
     assert_eq!(app.draft_for_test(), draft);
     start_empty_turn(&mut app, TurnId::new(801), SessionMode::Build);
-    app.reduce_without_effects(SessionEvent::TurnFailed {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Failed {
         turn_id: TurnId::new(801),
         error: "accepted failure".into(),
-    });
+    }));
     assert_eq!(app.draft_for_test(), draft);
     assert!(
         !context_help(&app).contains("recover draft"),
@@ -353,11 +408,11 @@ fn plan_completion_ready_idle_race_pauses_until_explicit_send_even_after_revise(
         complete(&mut app, TEST_TURN_ID);
         assert_eq!(app.dispatch_next_queued(), None);
         let artifact = test_plan_artifact();
-        app.reduce_without_effects(SessionEvent::PlanStateChanged {
-            state: PlanWorkflowState::Ready {
+        app.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
+            state: Box::new(PlanWorkflowState::Ready {
                 artifact: artifact.clone(),
-            },
-        });
+            }),
+        }));
         idle(&mut app);
         assert_eq!(pause_label(&app), Some("Plan decision required"));
         assert!(
@@ -368,18 +423,20 @@ fn plan_completion_ready_idle_race_pauses_until_explicit_send_even_after_revise(
         assert_eq!(app.dispatch_next_queued(), None);
         assert!(matches!(
             app.handle_event(key(KeyCode::Enter)),
-            Some(UiAction::ResolvePlan {
-                decision: PlanDecision::Revise,
-                ..
-            })
+            Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                zevria_session_api::TurnCommand::ResolvePlan {
+                    decision: PlanDecision::Revise,
+                    ..
+                }
+            )))
         ));
-        app.reduce_without_effects(SessionEvent::PlanStateChanged {
-            state: PlanWorkflowState::Planning {
+        app.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
+            state: Box::new(PlanWorkflowState::Planning {
                 id: artifact.version.id,
                 previous: Some(artifact),
                 draft: None,
-            },
-        });
+            }),
+        }));
         idle(&mut app);
         assert_eq!(app.dispatch_next_queued(), None);
         if insert {
@@ -392,10 +449,12 @@ fn plan_completion_ready_idle_race_pauses_until_explicit_send_even_after_revise(
         };
         assert!(matches!(
             app.handle_event(event),
-            Some(UiAction::Submit {
-                mode: SessionMode::Plan,
-                ..
-            })
+            Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                zevria_session_api::TurnCommand::Submit {
+                    mode: SessionMode::Plan,
+                    ..
+                }
+            )))
         ));
         assert_eq!(pause_label(&app), None);
         assert!(app.interaction().is_normal());
@@ -421,7 +480,7 @@ fn explicit_send_also_drains_a_running_queue_without_any_idle_barrier() {
             key(KeyCode::Enter)
         };
         assert!(
-            matches!(app.handle_event(event), Some(UiAction::Submit { text, .. }) if text == "not stranded".into())
+            matches!(app.handle_event(event), Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(zevria_session_api::TurnCommand::Submit { text, .. }))) if text == "not stranded".into())
         );
         assert!(app.has_pending_prompt());
         let frame = rendered_text(&mut app, 100, 24);
@@ -436,15 +495,19 @@ fn cancellation_pauses_at_request_time_and_idle_cancel_clears_before_quitting() 
     enqueue(&mut app, "wait for consent");
     assert_eq!(
         app.handle_event(ctrl('c')),
-        Some(UiAction::CancelTurn {
-            turn_id: Some(TEST_TURN_ID)
-        })
+        Some(UiAction::Session(
+            zevria_session_api::SessionCommand::Control(
+                zevria_session_api::ControlCommand::CancelTurn {
+                    turn_id: Some(TEST_TURN_ID)
+                }
+            )
+        ))
     );
     assert_eq!(pause_label(&app), Some("cancellation requested"));
     enqueue(&mut app, "also waits");
-    app.reduce_without_effects(SessionEvent::TurnCancelled {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Cancelled {
         turn_id: TEST_TURN_ID,
-    });
+    }));
     idle(&mut app);
     assert_eq!(app.dispatch_next_queued(), None);
     assert!(context_help(&app).contains("clear queue"));
@@ -456,17 +519,23 @@ fn cancellation_pauses_at_request_time_and_idle_cancel_clears_before_quitting() 
     let mut after = busy();
     assert!(matches!(
         after.handle_event(ctrl('c')),
-        Some(UiAction::CancelTurn { .. })
+        Some(UiAction::Session(
+            zevria_session_api::SessionCommand::Control(
+                zevria_session_api::ControlCommand::CancelTurn { .. }
+            )
+        ))
     ));
     enqueue(&mut after, "queued after cancellation");
     assert_eq!(pause_label(&after), None);
-    after.reduce_without_effects(SessionEvent::TurnCancelled {
+    after.reduce_without_effects(SessionEvent::Turn(TurnEvent::Cancelled {
         turn_id: TEST_TURN_ID,
-    });
+    }));
     idle(&mut after);
     assert!(matches!(
         after.dispatch_next_queued(),
-        Some(UiAction::Submit { .. })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Submit { .. }
+        )))
     ));
 }
 
@@ -505,15 +574,15 @@ fn failed_and_rejected_direct_or_queued_work_pause_the_remaining_queue_and_recov
                     app.handle_event(Event::Paste("newer".into()));
                 }
                 let event = if failed {
-                    SessionEvent::TurnFailed {
+                    SessionEvent::Turn(TurnEvent::Failed {
                         turn_id: TurnId::new(802),
                         error: "failed".into(),
-                    }
+                    })
                 } else {
-                    SessionEvent::TurnRejected {
+                    SessionEvent::Turn(TurnEvent::Rejected {
                         turn_id: TurnId::new(802),
                         error: "rejected".into(),
-                    }
+                    })
                 };
                 assert!(app.has_pending_prompt());
                 app.reduce_without_effects(event);
@@ -561,11 +630,11 @@ fn hidden_ready_direct_revision_resumes_but_never_dispatches_the_paused_queue() 
         complete(&mut app, TEST_TURN_ID);
         let artifact = test_plan_artifact();
         let expected = artifact.version;
-        app.reduce_without_effects(SessionEvent::PlanStateChanged {
-            state: PlanWorkflowState::Ready {
+        app.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
+            state: Box::new(PlanWorkflowState::Ready {
                 artifact: artifact.clone(),
-            },
-        });
+            }),
+        }));
         idle(&mut app);
         assert_eq!(pause_label(&app), Some("Plan decision required"));
         app.handle_event(key(KeyCode::Esc));
@@ -581,23 +650,23 @@ fn hidden_ready_direct_revision_resumes_but_never_dispatches_the_paused_queue() 
         ));
         let action = app.handle_event(ctrl_enter());
         assert!(matches!(action,
-            Some(UiAction::RevisePlanWithMessage { expected: target, .. }
-                | UiAction::RevisePlanWithSkill { expected: target, .. }) if target == expected
+            Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(zevria_session_api::TurnCommand::RevisePlanWithMessage { expected: target, .. }))
+                | UiAction::Session(zevria_session_api::SessionCommand::Turn(zevria_session_api::TurnCommand::RevisePlanWithSkill { expected: target, .. }))) if target == expected
         ));
         assert_eq!(pause_label(&app), None);
         assert_eq!(app.queue_for_test().len, 1);
         start_empty_turn(&mut app, TurnId::new(803), SessionMode::Plan);
-        app.reduce_without_effects(SessionEvent::PlanStateChanged {
-            state: PlanWorkflowState::Planning {
+        app.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
+            state: Box::new(PlanWorkflowState::Planning {
                 id: expected.id,
                 previous: Some(artifact),
                 draft: None,
-            },
-        });
+            }),
+        }));
         complete(&mut app, TurnId::new(803));
         idle(&mut app);
         assert!(
-            matches!(app.dispatch_next_queued(), Some(UiAction::Submit { mode: SessionMode::Plan, text, .. }) if text == "queued plan feedback".into())
+            matches!(app.dispatch_next_queued(), Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(zevria_session_api::TurnCommand::Submit { mode: SessionMode::Plan, text, .. }))) if text == "queued plan feedback".into())
         );
     }
 }
@@ -613,9 +682,9 @@ fn a_direct_prompt_like_send_while_paused_runs_ahead_and_resumes_followups() {
         let mut app = busy();
         enqueue(&mut app, "queued");
         app.handle_event(ctrl('c'));
-        app.reduce_without_effects(SessionEvent::TurnCancelled {
+        app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Cancelled {
             turn_id: TEST_TURN_ID,
-        });
+        }));
         enter_insert(&mut app);
         app.handle_event(Event::Paste(text.into()));
         let action = app.handle_event(ctrl_enter());
@@ -623,9 +692,13 @@ fn a_direct_prompt_like_send_while_paused_runs_ahead_and_resumes_followups() {
             matches!(
                 action,
                 Some(
-                    UiAction::Submit { .. }
-                        | UiAction::InvokeSkill { .. }
-                        | UiAction::RunEnsemble { .. }
+                    UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                        zevria_session_api::TurnCommand::Submit { .. }
+                    )) | UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                        zevria_session_api::TurnCommand::InvokeSkill { .. }
+                    )) | UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                        zevria_session_api::TurnCommand::RunEnsemble { .. }
+                    ))
                 )
             ),
             "{text}: {action:?}"
@@ -637,7 +710,7 @@ fn a_direct_prompt_like_send_while_paused_runs_ahead_and_resumes_followups() {
             complete(&mut app, TurnId::new(803));
             idle(&mut app);
             assert!(
-                matches!(app.dispatch_next_queued(), Some(UiAction::Submit { text, .. }) if text == "queued".into())
+                matches!(app.dispatch_next_queued(), Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(zevria_session_api::TurnCommand::Submit { text, .. }))) if text == "queued".into())
             );
         }
     }
@@ -655,10 +728,12 @@ fn mode_mismatch_pauses_and_only_explicit_send_uses_the_captured_mode() {
     assert_eq!(app.next_mode(), SessionMode::Plan);
     assert!(matches!(
         app.handle_event(key(KeyCode::Enter)),
-        Some(UiAction::Submit {
-            mode: SessionMode::Build,
-            ..
-        })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Submit {
+                mode: SessionMode::Build,
+                ..
+            }
+        )))
     ));
     assert_eq!(app.in_flight_mode(), Some(SessionMode::Build));
 }
@@ -714,7 +789,9 @@ fn recall_replacements_are_not_queued_and_edit_queued_is_unavailable_during_reca
     app.set_input_for_test("replacement", 11);
     assert!(matches!(
         app.handle_event(ctrl_enter()),
-        Some(UiAction::EditTranscript(_))
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::EditTranscript(_)
+        )))
     ));
     assert_eq!(app.queue_for_test().len, 1);
 }
@@ -725,11 +802,11 @@ fn session_replacement_and_fresh_plan_choices_and_retries_refuse_to_drop_queued_
         let mut app = busy();
         enqueue(&mut app, "keep me");
         complete(&mut app, TEST_TURN_ID);
-        app.reduce_without_effects(SessionEvent::PlanStateChanged {
-            state: PlanWorkflowState::Ready {
+        app.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
+            state: Box::new(PlanWorkflowState::Ready {
                 artifact: test_plan_artifact(),
-            },
-        });
+            }),
+        }));
         app.handle_event(key(KeyCode::Esc));
         enter_insert(&mut app);
         app.handle_event(Event::Paste(command.into()));
@@ -746,11 +823,11 @@ fn session_replacement_and_fresh_plan_choices_and_retries_refuse_to_drop_queued_
     enqueue(&mut app, "keep me");
     complete(&mut app, TEST_TURN_ID);
     let artifact = test_plan_artifact();
-    app.reduce_without_effects(SessionEvent::PlanStateChanged {
-        state: PlanWorkflowState::Ready {
+    app.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
+        state: Box::new(PlanWorkflowState::Ready {
             artifact: artifact.clone(),
-        },
-    });
+        }),
+    }));
     app.handle_event(key(KeyCode::Char('2')));
     assert_eq!(app.handle_event(key(KeyCode::Enter)), None);
     assert!(!app.is_busy());
@@ -794,7 +871,7 @@ fn running_queue_preserves_fifo_in_the_idle_window_before_the_barrier() {
     assert!(!app.is_busy());
     idle(&mut app);
     assert!(
-        matches!(app.dispatch_next_queued(), Some(UiAction::Submit { text, .. }) if text == "first".into())
+        matches!(app.dispatch_next_queued(), Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(zevria_session_api::TurnCommand::Submit { text, .. }))) if text == "first".into())
     );
 }
 
@@ -805,9 +882,9 @@ fn mode_changes_compaction_and_transcript_edits_do_not_resume_a_paused_queue() {
     start_empty_turn(&mut app, TEST_TURN_ID, SessionMode::Build);
     enqueue(&mut app, "paused follow up");
     app.handle_event(ctrl('c'));
-    app.reduce_without_effects(SessionEvent::TurnRecovered {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Recovered {
         turn_id: TEST_TURN_ID,
-    });
+    }));
     idle(&mut app);
     toggle_mode_with_ack(&mut app);
     assert_eq!(app.next_mode(), SessionMode::Plan);
@@ -816,17 +893,19 @@ fn mode_changes_compaction_and_transcript_edits_do_not_resume_a_paused_queue() {
     app.handle_event(Event::Paste("/compact".into()));
     assert!(matches!(
         app.handle_event(ctrl_enter()),
-        Some(UiAction::Compact { .. })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Compact { .. }
+        )))
     ));
-    app.reduce_without_effects(SessionEvent::CompactionStarted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::CompactionStarted {
         turn_id: TurnId::new(812),
         trigger: CompactionTrigger::Manual,
-    });
-    app.reduce_without_effects(SessionEvent::CompactionCompleted {
+    }));
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::CompactionCompleted {
         turn_id: TurnId::new(812),
         trigger: CompactionTrigger::Manual,
         backend: CompactionBackend::LocalSummary,
-    });
+    }));
     idle(&mut app);
     assert_eq!(pause_label(&app), Some("cancellation requested"));
     assert_eq!(app.dispatch_next_queued(), None);
@@ -837,7 +916,9 @@ fn mode_changes_compaction_and_transcript_edits_do_not_resume_a_paused_queue() {
     app.set_input_for_test("replacement", 11);
     assert!(matches!(
         app.handle_event(ctrl_enter()),
-        Some(UiAction::EditTranscript(_))
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::EditTranscript(_)
+        )))
     ));
     start_empty_turn(&mut app, TurnId::new(813), SessionMode::Plan);
     complete(&mut app, TurnId::new(813));
@@ -870,16 +951,20 @@ fn cancelled_unacknowledged_queued_drafts_use_staged_recovery_without_loss() {
         assert!(app.dispatch_next_queued().is_some());
         assert_eq!(
             app.handle_event(ctrl('c')),
-            Some(UiAction::CancelTurn { turn_id: None })
+            Some(UiAction::Session(
+                zevria_session_api::SessionCommand::Control(
+                    zevria_session_api::ControlCommand::CancelTurn { turn_id: None }
+                )
+            ))
         );
         if newer {
             enter_insert(&mut app);
             app.handle_event(Event::Paste("newer".into()));
         }
         assert!(app.has_pending_prompt());
-        app.reduce_without_effects(SessionEvent::TurnCancelled {
+        app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Cancelled {
             turn_id: TurnId::new(814),
-        });
+        }));
         assert!(!app.has_pending_prompt());
         idle(&mut app);
         assert_eq!(app.dispatch_next_queued(), None);
@@ -916,9 +1001,9 @@ fn queue_hints_and_render_tail_are_local_sanitized_and_not_history_or_selection(
         );
     }
     app.handle_event(ctrl('c'));
-    app.reduce_without_effects(SessionEvent::TurnRecovered {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Recovered {
         turn_id: TEST_TURN_ID,
-    });
+    }));
     for width in [1, 5, 10, 32, 120] {
         let lines = crate::render::queue_status_lines(&app.queue_for_test(), width);
         assert_eq!(lines.len(), 7, "five rows, pause header, hidden count");
@@ -964,26 +1049,26 @@ fn hidden_root_queue_drains_while_a_child_is_visible_and_restore_clears_it() {
     let mut root = busy();
     enqueue(&mut root, "hidden root follow up");
     let mut views = test_session_views(root);
-    views.apply(SessionEvent::SubtaskLaunched {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
         turn_id: TEST_TURN_ID,
         call_id: "launch".into(),
         entry_index: 0,
-        descriptor: child_descriptor("queue-child", "child"),
-    });
+        descriptor: Box::new(child_descriptor("queue-child", "child")),
+    }));
     views.handle_event(ctrl('i'));
     assert_eq!(
         views.visible_child_id(),
         Some(&SubtaskId::new("queue-child"))
     );
-    views.apply(SessionEvent::TurnCompleted {
+    views.apply(SessionEvent::Turn(TurnEvent::Completed {
         turn_id: TEST_TURN_ID,
         message: Message::assistant("done"),
         attempt_id: None,
-    });
+    }));
     assert_eq!(views.dispatch_queued_root_work(), None);
     views.apply(SessionEvent::EngineIdle);
     assert!(
-        matches!(views.dispatch_queued_root_work(), Some(UiAction::Submit { text, .. }) if text == "hidden root follow up".into())
+        matches!(views.dispatch_queued_root_work(), Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(zevria_session_api::TurnCommand::Submit { text, .. }))) if text == "hidden root follow up".into())
     );
     assert!(!rendered_views_text(&mut views, 100, 25).contains("queued"));
     let mut app = busy();

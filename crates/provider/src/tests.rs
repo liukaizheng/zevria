@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::TurnEvent;
 #[path = "recovery_tests.rs"]
 mod bounded_recovery;
 #[cfg(feature = "cache-diagnostics")]
@@ -414,7 +415,7 @@ fn resolved_profile(
         image_accounting: Default::default(),
         profile: zevria_foundation::ModelProfileRef::new(provider, model),
         protocol: ProfileProtocol::Responses {
-            endpoint: ProviderEndpoint {
+            endpoint: std::sync::Arc::new(ProviderEndpoint {
                 base_url,
                 api_key: LiteralApiKey::new(api_key).into(),
                 supports_websockets,
@@ -425,7 +426,7 @@ fn resolved_profile(
                 compaction,
                 input_token_count: InputTokenCountConfig::default(),
                 web_search: WebSearchConfig::default(),
-            },
+            }),
             reasoning_summary_level,
         },
         context_window_tokens,
@@ -630,7 +631,7 @@ fn test_session_with_pump(
     let endpoints = OpenAiResponseEndpoints::parse(url).expect("test endpoint");
     OpenAiProvider {
         cache_diagnostics: Default::default(),
-        responses_cache: Default::default(),
+        slot_cache: Default::default(),
         request_properties_cache: None,
         image_accounting: zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
         profile: zevria_foundation::ModelProfileRef::new("test-provider", "gpt-test"),
@@ -647,26 +648,27 @@ fn test_session_with_pump(
         },
         additional_params: Default::default(),
         prompt_cache_key: "test-session".to_string(),
-        ws: OpenAiParkedWebSocket {
-            session,
-            config: OpenAiWebSocketConfig {
-                connect_timeout: std::time::Duration::from_secs(1),
-                keepalive: std::time::Duration::ZERO,
-                prewarm: false,
-                url: url.to_string(),
-                headers: HeaderMap::new(),
-                api_key: ApiKeySource::literal("test-key"),
-                provider: "test-provider".into(),
+        responses_transport: crate::connection::ResponsesTransport::new(
+            OpenAiParkedWebSocket {
+                session,
+                config: OpenAiWebSocketConfig {
+                    connect_timeout: std::time::Duration::from_secs(1),
+                    keepalive: std::time::Duration::ZERO,
+                    prewarm: false,
+                    url: url.to_string(),
+                    headers: HeaderMap::new(),
+                    api_key: ApiKeySource::literal("test-key"),
+                    provider: "test-provider".into(),
+                },
+                socket_generation: 0,
+                websocket_connection_request_id: None,
+                continuation: None,
+                pending_done_response_id: pending_done_response_id.map(ToOwned::to_owned),
+                last_activity: std::time::Instant::now(),
             },
-            socket_generation: 0,
-            websocket_connection_request_id: None,
-            continuation: None,
-            pending_done_response_id: pending_done_response_id.map(ToOwned::to_owned),
-            last_activity: std::time::Instant::now(),
-        },
+            OpenAiTransport::WebSocket,
+        ),
         responses_url: endpoints.http,
-        transport: OpenAiTransport::WebSocket,
-        http_fallback: None,
         recovery: RecoveryPolicy::default(),
         compaction_url: None,
         compaction_timeout: std::time::Duration::from_secs(300),
@@ -675,12 +677,13 @@ fn test_session_with_pump(
         input_token_count_unsupported: false,
         api_key: ApiKeySource::literal("test-key"),
         http: reqwest::Client::new(),
-        maintenance_http: reqwest::Client::new(),
+        maintenance_http: Default::default(),
     }
 }
 
 fn continuation_response_id(openai: &OpenAiProvider) -> Option<&str> {
     openai
+        .responses_transport
         .ws
         .continuation
         .as_ref()
@@ -1289,6 +1292,7 @@ async fn exact_input_count_posts_the_complete_logical_request_without_touching_c
     assert_eq!(count, InputTokenCount::Exact(321));
     assert_eq!(
         openai
+            .responses_transport
             .ws
             .continuation
             .as_ref()
@@ -1531,7 +1535,7 @@ async fn configured_remote_compaction_posts_ordered_input_and_preserves_opaque_o
     };
     let request =
         parts.request_with_role_and_skills(ModelRole::Plan, Some("preserved compaction body"));
-    let normal = crate::turn::prepare_turn_request(&request, &mut openai)
+    let normal = crate::responses::prepare_turn_request(&request, &mut openai)
         .await
         .unwrap();
     let result = openai.compact(request).await.expect("remote compaction");
@@ -1664,14 +1668,18 @@ async fn replacing_a_session_isolates_events_by_session_receiver() {
     tokio::task::yield_now().await;
 
     openai
+        .responses_transport
         .ws
         .reconnect()
         .await
         .expect("replacement handshake should succeed");
-    let event = tokio::time::timeout(std::time::Duration::from_secs(1), openai.ws.session.next())
-        .await
-        .expect("the replacement event should arrive")
-        .expect("the replacement event should exist");
+    let event = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        openai.responses_transport.ws.session.next(),
+    )
+    .await
+    .expect("the replacement event should arrive")
+    .expect("the replacement event should exist");
     match event {
         OpenAiWebSocketInbound::Message(WebSocketMessage::Text(text)) => {
             assert_eq!(text, "new-generation-event");
@@ -1746,11 +1754,17 @@ async fn provider_cancellation_terminates_the_socket_and_invalidates_continuatio
     <OpenAiProvider as zevria_session_api::ModelProvider>::cancel(&mut openai);
 
     assert_eq!(
-        openai.ws.session.terminal_status(),
+        openai.responses_transport.ws.session.terminal_status(),
         Some(OpenAiWebSocketTerminalCategory::LocalCancellation)
     );
-    assert!(openai.ws.continuation.is_none());
-    assert!(openai.ws.pending_done_response_id.is_none());
+    assert!(openai.responses_transport.ws.continuation.is_none());
+    assert!(
+        openai
+            .responses_transport
+            .ws
+            .pending_done_response_id
+            .is_none()
+    );
     server.await.expect("server task should finish");
 }
 
@@ -2239,7 +2253,7 @@ async fn seed_test_continuation(openai: &mut OpenAiProvider, response_id: &str) 
         allowed_tool_names: None,
     };
     let request = parts.request();
-    let prepared = crate::turn::prepare_turn_request(&request, openai)
+    let prepared = crate::responses::prepare_turn_request(&request, openai)
         .await
         .unwrap();
     let output = completed_event("resp_seed", "msg_seed", "old")["response"]["output"]
@@ -2251,10 +2265,10 @@ async fn seed_test_continuation(openai: &mut OpenAiProvider, response_id: &str) 
         output,
     ))
     .unwrap();
-    openai.ws.continuation = Some(
+    openai.responses_transport.ws.continuation = Some(
         ContinuationState::after_response(
             &prepared,
-            openai.ws.socket_generation,
+            openai.responses_transport.ws.socket_generation,
             response_id.into(),
             &response,
         )
@@ -2289,7 +2303,10 @@ fn expected_token_usage() -> TokenUsage {
 fn usage_events(receiver: &mut SessionEventReceiver) -> Vec<TokenUsage> {
     let mut usages = Vec::new();
     while let Ok(update) = receiver.try_recv() {
-        if let SessionUpdate::Lifecycle(SessionEvent::UsageUpdated { usage, .. }) = update {
+        if let SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::UsageUpdated {
+            usage, ..
+        })) = update
+        {
             usages.push(usage);
         }
     }
@@ -3293,7 +3310,11 @@ async fn run_turn_chains_incrementally_and_ignores_late_done() {
     assert_eq!(state.history.len(), 2);
     assert_eq!(continuation_response_id(&openai), Some("resp_1"));
     assert_eq!(
-        openai.ws.pending_done_response_id.as_deref(),
+        openai
+            .responses_transport
+            .ws
+            .pending_done_response_id
+            .as_deref(),
         Some("resp_1")
     );
 
@@ -3314,7 +3335,11 @@ async fn run_turn_chains_incrementally_and_ignores_late_done() {
     assert_eq!(state.history.len(), 4);
     assert_eq!(continuation_response_id(&openai), Some("resp_2"));
     assert_eq!(
-        openai.ws.pending_done_response_id.as_deref(),
+        openai
+            .responses_transport
+            .ws
+            .pending_done_response_id
+            .as_deref(),
         Some("resp_2")
     );
 
@@ -3499,6 +3524,7 @@ async fn native_output_items_survive_capture_and_full_replay_after_reconnect() {
     let loaded = transcript::load(writer.path()).expect("transcript should resume");
 
     openai
+        .responses_transport
         .ws
         .reconnect()
         .await
@@ -4037,7 +4063,7 @@ async fn provider_rejection_event_fails_the_turn_without_reconnecting() {
     );
     assert!(error.to_string().contains("context_too_large"));
     assert!(state.result.is_empty());
-    assert!(openai.ws.continuation.is_none());
+    assert!(openai.responses_transport.ws.continuation.is_none());
 
     server.await.expect("server task should finish");
 }
@@ -4125,7 +4151,11 @@ async fn run_turn_retries_missing_response_id_with_full_history_once() {
     assert_eq!(state.history.len(), 4);
     assert_eq!(continuation_response_id(&openai), Some("resp_fresh"));
     assert_eq!(
-        openai.ws.pending_done_response_id.as_deref(),
+        openai
+            .responses_transport
+            .ws
+            .pending_done_response_id
+            .as_deref(),
         Some("resp_fresh")
     );
     let history = serde_json::to_string(&state.history).expect("history should serialize");
@@ -4253,8 +4283,8 @@ async fn run_turn_discards_partial_result_on_failed_done() {
     assert!(error.to_string().contains("Failed"));
     assert!(state.result.is_empty());
     assert_eq!(state.history.len(), 2);
-    assert!(openai.ws.continuation.is_none());
-    assert_eq!(openai.ws.pending_done_response_id, None);
+    assert!(openai.responses_transport.ws.continuation.is_none());
+    assert_eq!(openai.responses_transport.ws.pending_done_response_id, None);
 
     server.await.expect("server task should finish");
 }
@@ -4315,8 +4345,8 @@ async fn missing_native_output_fails_without_committing_or_continuing() {
         2,
         "no new prompt or assistant was committed"
     );
-    assert!(openai.ws.continuation.is_none());
-    assert_eq!(openai.ws.pending_done_response_id, None);
+    assert!(openai.responses_transport.ws.continuation.is_none());
+    assert_eq!(openai.responses_transport.ws.pending_done_response_id, None);
 
     server.await.expect("server task should finish");
 }
@@ -4388,8 +4418,8 @@ async fn unconvertible_native_output_fails_without_committing_or_continuing() {
         2,
         "no new prompt or assistant was committed"
     );
-    assert!(openai.ws.continuation.is_none());
-    assert_eq!(openai.ws.pending_done_response_id, None);
+    assert!(openai.responses_transport.ws.continuation.is_none());
+    assert_eq!(openai.responses_transport.ws.pending_done_response_id, None);
 
     server.await.expect("server task should finish");
 }
@@ -4423,13 +4453,17 @@ async fn engine_reset_invalidates_a_live_continuation() {
         .expect("turn should establish continuation");
     assert_eq!(continuation_response_id(&openai), Some("resp_reset"));
     assert_eq!(
-        openai.ws.pending_done_response_id.as_deref(),
+        openai
+            .responses_transport
+            .ws
+            .pending_done_response_id
+            .as_deref(),
         Some("resp_reset")
     );
 
     <OpenAiProvider as zevria_session_api::ModelProvider>::reset(&mut openai);
-    assert!(openai.ws.continuation.is_none());
-    assert_eq!(openai.ws.pending_done_response_id, None);
+    assert!(openai.responses_transport.ws.continuation.is_none());
+    assert_eq!(openai.responses_transport.ws.pending_done_response_id, None);
 
     server.await.expect("server task should finish");
 }
@@ -4473,8 +4507,8 @@ async fn run_turn_rejects_completed_done_without_response_id() {
 
     assert!(error.to_string().contains("did not include a response ID"));
     assert!(state.result.is_empty());
-    assert!(openai.ws.continuation.is_none());
-    assert_eq!(openai.ws.pending_done_response_id, None);
+    assert!(openai.responses_transport.ws.continuation.is_none());
+    assert_eq!(openai.responses_transport.ws.pending_done_response_id, None);
 
     server.await.expect("server task should finish");
 }
@@ -4596,7 +4630,7 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
         .http;
     let openai = OpenAiProvider {
         cache_diagnostics: Default::default(),
-        responses_cache: Default::default(),
+        slot_cache: Default::default(),
         request_properties_cache: None,
         image_accounting: zevria_foundation::image_accounting::ImageAccountingPolicy::Unresolved,
         profile: test_profile_ref(),
@@ -4613,26 +4647,27 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
         },
         additional_params: Default::default(),
         prompt_cache_key: "test-session".to_string(),
-        ws: OpenAiParkedWebSocket {
-            session: OpenAiWebSocketSession::new(socket, std::time::Duration::ZERO),
-            config: OpenAiWebSocketConfig {
-                connect_timeout: std::time::Duration::from_secs(1),
-                keepalive: std::time::Duration::ZERO,
-                prewarm: false,
-                url: url.clone(),
-                headers: HeaderMap::new(),
-                api_key: ApiKeySource::literal("test-key"),
-                provider: "test-provider".into(),
+        responses_transport: crate::connection::ResponsesTransport::new(
+            OpenAiParkedWebSocket {
+                session: OpenAiWebSocketSession::new(socket, std::time::Duration::ZERO),
+                config: OpenAiWebSocketConfig {
+                    connect_timeout: std::time::Duration::from_secs(1),
+                    keepalive: std::time::Duration::ZERO,
+                    prewarm: false,
+                    url: url.clone(),
+                    headers: HeaderMap::new(),
+                    api_key: ApiKeySource::literal("test-key"),
+                    provider: "test-provider".into(),
+                },
+                socket_generation: 0,
+                websocket_connection_request_id: None,
+                continuation: None,
+                pending_done_response_id: None,
+                last_activity: std::time::Instant::now(),
             },
-            socket_generation: 0,
-            websocket_connection_request_id: None,
-            continuation: None,
-            pending_done_response_id: None,
-            last_activity: std::time::Instant::now(),
-        },
+            OpenAiTransport::WebSocket,
+        ),
         responses_url,
-        transport: OpenAiTransport::WebSocket,
-        http_fallback: None,
         recovery: RecoveryPolicy {
             response_idle_timeout: std::time::Duration::from_millis(80),
             ..fast_recovery_policy(4)
@@ -4644,7 +4679,7 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
         input_token_count_unsupported: false,
         api_key: ApiKeySource::literal("test-key"),
         http: reqwest::Client::new(),
-        maintenance_http: reqwest::Client::new(),
+        maintenance_http: Default::default(),
     };
     let transcript_directory = tempfile::tempdir().expect("temporary transcript directory");
     let transcript =
@@ -4679,7 +4714,7 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
         std::iter::from_fn(|| event_rx.try_recv().ok()).any(|update| {
             matches!(
                 update,
-                SessionUpdate::Lifecycle(SessionEvent::TurnCompleted { .. })
+                SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Completed { .. }))
             )
         })
     );
@@ -5122,7 +5157,7 @@ async fn a_close_observed_while_parked_reconnects_before_the_next_request() {
     .expect("initial turn should complete");
     assert_eq!(continuation_response_id(&openai), Some("resp_parked"));
 
-    let terminal = wait_for_terminal(&openai.ws.session).await;
+    let terminal = wait_for_terminal(&openai.responses_transport.ws.session).await;
     assert_eq!(terminal, OpenAiWebSocketTerminalCategory::CloseFrame);
     let continuation = RequestParts {
         tools: zevria_model::ToolDeclarations::default(),
@@ -5145,7 +5180,11 @@ async fn a_close_observed_while_parked_reconnects_before_the_next_request() {
 
     let mut retries = Vec::new();
     while let Ok(update) = events.try_recv() {
-        if let SessionUpdate::Lifecycle(SessionEvent::TurnRetrying { retry_after, .. }) = update {
+        if let SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Retrying {
+            retry_after,
+            ..
+        })) = update
+        {
             retries.push(retry_after);
         }
     }
@@ -5153,7 +5192,7 @@ async fn a_close_observed_while_parked_reconnects_before_the_next_request() {
         retries.is_empty(),
         "a parked reconnect starts attempt one, not a separate recovery cycle"
     );
-    assert_eq!(openai.ws.socket_generation, 1);
+    assert_eq!(openai.responses_transport.ws.socket_generation, 1);
     assert_eq!(continuation_response_id(&openai), Some("resp_replaced"));
     server.await.expect("server task should finish");
 }
@@ -5248,7 +5287,7 @@ async fn response_idle_timeout_reconnects_after_only_a_late_prior_done() {
     .await
     .expect("the first-event timeout should reconnect and replay");
 
-    assert_eq!(openai.ws.socket_generation, 1);
+    assert_eq!(openai.responses_transport.ws.socket_generation, 1);
     assert_eq!(continuation_response_id(&openai), Some("resp_timeout_new"));
     server.await.expect("server task should finish");
 }
@@ -5361,8 +5400,8 @@ async fn stale_id_full_retry_consumes_budget_then_falls_back_to_http() {
     .await
     .expect("the stale fallback timeout should reconnect and replay");
 
-    assert_eq!(openai.transport, OpenAiTransport::Http);
-    assert!(openai.ws.continuation.is_none());
+    assert_eq!(openai.transport(), OpenAiTransport::Http);
+    assert!(openai.responses_transport.ws.continuation.is_none());
     server.await.expect("server task should finish");
 }
 
@@ -5431,7 +5470,7 @@ async fn send_timeout_reconnects_and_replays_on_a_fresh_pump() {
     .await
     .expect("the send timeout should reconnect and replay");
 
-    assert_eq!(openai.ws.socket_generation, 1);
+    assert_eq!(openai.responses_transport.ws.socket_generation, 1);
     assert_eq!(continuation_response_id(&openai), Some("resp_send_timeout"));
     server.await.expect("server task should finish");
 }
@@ -5535,7 +5574,7 @@ async fn websocket_connection_limit_reconnects_and_replays_full_history() {
     .await
     .expect("the connection limit should reconnect and replay");
 
-    assert_eq!(openai.ws.socket_generation, 1);
+    assert_eq!(openai.responses_transport.ws.socket_generation, 1);
     assert_eq!(continuation_response_id(&openai), Some("resp_limit_new"));
     server.await.expect("server task should finish");
 }
@@ -5571,28 +5610,57 @@ async fn failed_replacement_handshake_preserves_all_socket_scoped_state() {
     run_turn("question", &mut openai, &mut state, &discard_updates())
         .await
         .expect("initial turn should establish state");
-    openai.ws.websocket_connection_request_id = Some("ws_preserved".to_string());
-    let generation = openai.ws.socket_generation;
+    openai
+        .responses_transport
+        .ws
+        .websocket_connection_request_id = Some("ws_preserved".to_string());
+    let generation = openai.responses_transport.ws.socket_generation;
     let response_id = continuation_response_id(&openai).map(ToOwned::to_owned);
-    let pending_done = openai.ws.pending_done_response_id.clone();
-    let last_activity = openai.ws.last_activity;
-    assert!(openai.ws.session.terminal_status().is_none());
+    let pending_done = openai
+        .responses_transport
+        .ws
+        .pending_done_response_id
+        .clone();
+    let last_activity = openai.responses_transport.ws.last_activity;
+    assert!(
+        openai
+            .responses_transport
+            .ws
+            .session
+            .terminal_status()
+            .is_none()
+    );
 
     openai
+        .responses_transport
         .ws
         .reconnect()
         .await
         .expect_err("the replacement handshake should fail");
 
-    assert_eq!(openai.ws.socket_generation, generation);
+    assert_eq!(openai.responses_transport.ws.socket_generation, generation);
     assert_eq!(continuation_response_id(&openai), response_id.as_deref());
-    assert_eq!(openai.ws.pending_done_response_id, pending_done);
     assert_eq!(
-        openai.ws.websocket_connection_request_id.as_deref(),
+        openai.responses_transport.ws.pending_done_response_id,
+        pending_done
+    );
+    assert_eq!(
+        openai
+            .responses_transport
+            .ws
+            .websocket_connection_request_id
+            .as_deref(),
         Some("ws_preserved")
     );
-    assert_eq!(openai.ws.last_activity, last_activity);
-    assert!(openai.ws.session.terminal_status().is_none());
+    assert_eq!(openai.responses_transport.ws.last_activity, last_activity);
+    assert!(
+        openai
+            .responses_transport
+            .ws
+            .session
+            .terminal_status()
+            .is_none()
+    );
 
     let _ = release_server.send(());
     server.await.expect("server task should finish");
@@ -5664,12 +5732,14 @@ async fn turn_survives_repeated_drops_within_the_recovery_budget() {
     // Each recovery cycle announced itself as a retry, never a failure.
     let mut retry_attempts = Vec::new();
     while let Ok(update) = events.try_recv() {
-        if let SessionUpdate::Lifecycle(zevria_session_api::SessionEvent::TurnRetrying {
-            attempt,
-            retrying_for,
-            retry_after,
-            ..
-        }) = update
+        if let SessionUpdate::Lifecycle(zevria_session_api::SessionEvent::Turn(
+            TurnEvent::Retrying {
+                attempt,
+                retrying_for,
+                retry_after,
+                ..
+            },
+        )) = update
         {
             assert!(retrying_for <= std::time::Duration::from_secs(5));
             retry_attempts.push((attempt, retry_after));
@@ -5820,8 +5890,9 @@ async fn a_healthy_socket_remains_incremental_after_more_than_sixty_seconds_idle
     .await
     .expect("the initial turn should establish a continuation");
 
-    openai.ws.last_activity = std::time::Instant::now() - std::time::Duration::from_secs(120);
-    let original_generation = openai.ws.socket_generation;
+    openai.responses_transport.ws.last_activity =
+        std::time::Instant::now() - std::time::Duration::from_secs(120);
+    let original_generation = openai.responses_transport.ws.socket_generation;
     let continuation = RequestParts {
         tools: zevria_model::ToolDeclarations::default(),
         forbid_tool_calls: false,
@@ -5847,7 +5918,10 @@ async fn a_healthy_socket_remains_incremental_after_more_than_sixty_seconds_idle
     .await
     .expect("the turn should remain on the healthy parked socket");
 
-    assert_eq!(openai.ws.socket_generation, original_generation);
+    assert_eq!(
+        openai.responses_transport.ws.socket_generation,
+        original_generation
+    );
     assert_eq!(
         attempt_message(&state),
         Message::Assistant(rig_core::message::AssistantMessage::new(vec![
@@ -5948,8 +6022,8 @@ async fn http_only_transport_posts_full_streaming_request_and_accumulates_fragme
     .await
     .expect("HTTP turn should complete");
 
-    assert_eq!(openai.transport, OpenAiTransport::Http);
-    assert!(openai.ws.continuation.is_none());
+    assert_eq!(openai.transport(), OpenAiTransport::Http);
+    assert!(openai.responses_transport.ws.continuation.is_none());
     assert!(
         usage_events(&mut events).is_empty(),
         "provider returns usage without awaiting core publication"
@@ -6333,12 +6407,12 @@ async fn http_retries_server_errors_and_partial_stream_loss_with_identical_reque
 
     let mut retries = Vec::new();
     while let Ok(update) = events.try_recv() {
-        if let SessionUpdate::Lifecycle(SessionEvent::TurnRetrying {
+        if let SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Retrying {
             attempt,
             error,
             retry_after,
             ..
-        }) = update
+        })) = update
         {
             retries.push((attempt, error, retry_after));
         }
@@ -6408,7 +6482,9 @@ async fn http_stream_retry_and_terminal_error_keep_their_per_attempt_request_ids
     assert!(!error.contains("req_stream_first"), "{error}");
 
     let retry_error = std::iter::from_fn(|| events.try_recv().ok()).find_map(|update| {
-        let SessionUpdate::Lifecycle(SessionEvent::TurnRetrying { error, .. }) = update else {
+        let SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Retrying { error, .. })) =
+            update
+        else {
             return None;
         };
         Some(error)
@@ -6716,7 +6792,7 @@ async fn startup_websocket_426_immediately_selects_sticky_http() {
     )
     .await
     .expect("426 should not fail provider construction");
-    assert_eq!(openai.transport, OpenAiTransport::Http);
+    assert_eq!(openai.transport(), OpenAiTransport::Http);
 
     let mut state = AttemptState::default();
     run_turn(
@@ -6727,7 +6803,7 @@ async fn startup_websocket_426_immediately_selects_sticky_http() {
     )
     .await
     .expect("HTTP fallback turn");
-    assert_eq!(openai.transport, OpenAiTransport::Http);
+    assert_eq!(openai.transport(), OpenAiTransport::Http);
     assert_eq!(continuation_response_id(&openai), None);
     assert_eq!(
         attempt_message(&state),
@@ -6823,13 +6899,13 @@ async fn exhausted_websocket_retries_fall_back_with_full_input_and_remain_http()
     )
     .await
     .expect("HTTP fallback should recover the logical request");
-    assert_eq!(openai.transport, OpenAiTransport::Http);
-    assert!(openai.ws.continuation.is_none());
+    assert_eq!(openai.transport(), OpenAiTransport::Http);
+    assert!(openai.responses_transport.ws.continuation.is_none());
 
     run_turn("next question", &mut openai, &mut state, &discard_updates())
         .await
         .expect("later turn should stay on HTTP");
-    assert_eq!(openai.transport, OpenAiTransport::Http);
+    assert_eq!(openai.transport(), OpenAiTransport::Http);
     assert_eq!(
         attempt_message(&state),
         Message::Assistant(rig_core::message::AssistantMessage::new(vec![
@@ -6896,9 +6972,9 @@ async fn transient_startup_preconnect_failure_is_retried_by_the_first_request() 
     )
     .await
     .expect("transient startup failure is best effort");
-    assert_eq!(openai.transport, OpenAiTransport::WebSocket);
+    assert_eq!(openai.transport(), OpenAiTransport::WebSocket);
     assert_eq!(
-        openai.ws.session.terminal_status(),
+        openai.responses_transport.ws.session.terminal_status(),
         Some(OpenAiWebSocketTerminalCategory::StartupConnectFailed)
     );
 
@@ -6920,7 +6996,7 @@ async fn transient_startup_preconnect_failure_is_retried_by_the_first_request() 
     )
     .await
     .expect("first request should reconnect WebSocket");
-    assert_eq!(openai.transport, OpenAiTransport::WebSocket);
+    assert_eq!(openai.transport(), OpenAiTransport::WebSocket);
     assert_eq!(continuation_response_id(&openai), Some("resp_preconnect"));
     let request = server.await.expect("preconnect server");
     assert!(request.get("previous_response_id").is_none());
@@ -7164,7 +7240,7 @@ async fn http_only_responses_gateway_supports_arbitrary_models_tools_and_replay(
     )
     .await
     .expect("HTTP-only Responses gateway provider");
-    assert_eq!(openai.transport, OpenAiTransport::Http);
+    assert_eq!(openai.transport(), OpenAiTransport::Http);
     assert!(openai.compaction_url.is_none());
 
     let transcript_directory = tempfile::tempdir().expect("gateway transcript directory");
@@ -7213,13 +7289,13 @@ async fn http_only_responses_gateway_supports_arbitrary_models_tools_and_replay(
                     saw_preview = true;
                 }
             }
-            SessionUpdate::Lifecycle(SessionEvent::ToolResults { .. }) => {
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::ToolResults { .. })) => {
                 saw_tool_results = true;
             }
-            SessionUpdate::Lifecycle(SessionEvent::UsageUpdated { .. }) => {
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::UsageUpdated { .. })) => {
                 usage_updates += 1;
             }
-            SessionUpdate::Lifecycle(SessionEvent::TurnCompleted { .. }) => break,
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Completed { .. })) => break,
             SessionUpdate::Lifecycle(_) => {}
         }
     }
@@ -7377,8 +7453,8 @@ async fn factory_root_and_child_keep_independent_sticky_transport_state() {
     );
     let mut root = factory.connect("root").await.expect("root provider");
     let mut child = factory.connect("child").await.expect("child provider");
-    assert_eq!(root.transport, OpenAiTransport::Http);
-    assert_eq!(child.transport, OpenAiTransport::WebSocket);
+    assert_eq!(root.transport(), OpenAiTransport::Http);
+    assert_eq!(child.transport(), OpenAiTransport::WebSocket);
 
     let mut root_state = AttemptState::default();
     let mut child_state = AttemptState::default();
@@ -7399,8 +7475,8 @@ async fn factory_root_and_child_keep_independent_sticky_transport_state() {
     .await
     .expect("child WebSocket turn");
 
-    assert_eq!(root.transport, OpenAiTransport::Http);
-    assert_eq!(child.transport, OpenAiTransport::WebSocket);
+    assert_eq!(root.transport(), OpenAiTransport::Http);
+    assert_eq!(child.transport(), OpenAiTransport::WebSocket);
     assert_eq!(continuation_response_id(&root), None);
     assert_eq!(continuation_response_id(&child), Some("resp_child_ws"));
     let (root_request, child_request) = server.await.expect("independent transport server");
@@ -8212,7 +8288,7 @@ async fn incident_prefix_flow(developer_messages: bool, cached_tokens: [u64; 4])
     {
         if index == 1 {
             assert_eq!(
-                wait_for_terminal(&engine.provider().ws.session).await,
+                wait_for_terminal(&engine.provider().responses_transport.ws.session).await,
                 OpenAiWebSocketTerminalCategory::CloseFrame
             );
         }
@@ -8237,11 +8313,12 @@ async fn incident_prefix_flow(developer_messages: bool, cached_tokens: [u64; 4])
                 assert!(
                     !matches!(
                         event,
-                        SessionEvent::TurnFailed { .. } | SessionEvent::TurnRejected { .. }
+                        SessionEvent::Turn(TurnEvent::Failed { .. })
+                            | SessionEvent::Turn(TurnEvent::Rejected { .. })
                     ),
                     "{event:?}"
                 );
-                completed |= matches!(event, SessionEvent::TurnCompleted { .. });
+                completed |= matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. }));
             }
         }
         assert!(completed);
@@ -8251,7 +8328,10 @@ async fn incident_prefix_flow(developer_messages: bool, cached_tokens: [u64; 4])
             "recovery must not rerun earlier tools"
         );
     }
-    assert_eq!(engine.provider().ws.socket_generation, 1);
+    assert_eq!(
+        engine.provider().responses_transport.ws.socket_generation,
+        1
+    );
     let requests = server.await.unwrap();
     assert_eq!(requests.len(), 4);
     requests

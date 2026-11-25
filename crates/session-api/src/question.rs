@@ -6,6 +6,7 @@
 //! answer resumes the existing model/tool loop instead of becoming a new user
 //! turn.
 
+use crate::QuestionEvent;
 use std::sync::{Arc, Mutex};
 
 use crate::{SessionEvent, SessionEventSender, TurnContext};
@@ -79,10 +80,10 @@ impl QuestionRegistrationGuard {
         if self.announced {
             let _ = self
                 .events
-                .send(SessionEvent::QuestionClosed {
+                .send(SessionEvent::Question(QuestionEvent::Closed {
                     turn_id: self.turn_id,
                     request_id: self.request_id.clone(),
-                })
+                }))
                 .await;
         }
         self.finished = true;
@@ -98,16 +99,16 @@ impl Drop for QuestionRegistrationGuard {
         if !self.announced {
             return;
         }
-        let event = SessionEvent::QuestionClosed {
+        let event = SessionEvent::Question(QuestionEvent::Closed {
             turn_id: self.turn_id,
             request_id: self.request_id.clone(),
-        };
+        });
         if let Err(error) = self.events.try_send(event) {
             let event = error.into_inner();
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 let events = self.events.clone();
                 runtime.spawn(async move {
-                    let _ = events.send(event).await;
+                    let _ = events.send(*event).await;
                 });
             }
         }
@@ -164,10 +165,10 @@ impl QuestionRequester {
 
         if self
             .events
-            .send(SessionEvent::QuestionAsked {
+            .send(SessionEvent::Question(QuestionEvent::Asked {
                 turn_id: turn.id,
                 request: request.clone(),
-            })
+            }))
             .await
             .is_err()
         {
@@ -290,7 +291,10 @@ mod tests {
         });
 
         let request = match events_rx.recv().await.expect("question event") {
-            SessionUpdate::Lifecycle(SessionEvent::QuestionAsked { request, .. }) => request,
+            SessionUpdate::Lifecycle(SessionEvent::Question(QuestionEvent::Asked {
+                request,
+                ..
+            })) => request,
             update => panic!("unexpected update: {update:?}"),
         };
         assert!(!request.allow_choice_notes);
@@ -309,10 +313,10 @@ mod tests {
         assert_eq!(wait.await.expect("join").expect("answer"), response);
         assert!(matches!(
             events_rx.recv().await,
-            Some(SessionUpdate::Lifecycle(SessionEvent::QuestionClosed {
+            Some(SessionUpdate::Lifecycle(SessionEvent::Question(QuestionEvent::Closed {
                 turn_id,
                 request_id,
-            })) if turn_id == TurnId::new(7) && request_id == request.id
+            }))) if turn_id == TurnId::new(7) && request_id == request.id
         ));
         assert!(
             !channels
@@ -334,7 +338,10 @@ mod tests {
                 .await
         });
         let request = match events_rx.recv().await.expect("question event") {
-            SessionUpdate::Lifecycle(SessionEvent::QuestionAsked { request, .. }) => request,
+            SessionUpdate::Lifecycle(SessionEvent::Question(QuestionEvent::Asked {
+                request,
+                ..
+            })) => request,
             update => panic!("unexpected update: {update:?}"),
         };
         cancellation.cancel();
@@ -344,10 +351,10 @@ mod tests {
         );
         assert!(matches!(
             events_rx.recv().await,
-            Some(SessionUpdate::Lifecycle(SessionEvent::QuestionClosed {
+            Some(SessionUpdate::Lifecycle(SessionEvent::Question(QuestionEvent::Closed {
                 request_id,
                 ..
-            })) if request_id == request.id
+            }))) if request_id == request.id
         ));
         assert!(
             !channels
@@ -367,7 +374,10 @@ mod tests {
                 .await
         });
         let request = match events_rx.recv().await.expect("question event") {
-            SessionUpdate::Lifecycle(SessionEvent::QuestionAsked { request, .. }) => request,
+            SessionUpdate::Lifecycle(SessionEvent::Question(QuestionEvent::Asked {
+                request,
+                ..
+            })) => request,
             update => panic!("unexpected update: {update:?}"),
         };
 
@@ -434,17 +444,20 @@ mod tests {
                 .await
         });
         let first = match events_rx.recv().await.expect("first question") {
-            SessionUpdate::Lifecycle(SessionEvent::QuestionAsked { request, .. }) => request,
+            SessionUpdate::Lifecycle(SessionEvent::Question(QuestionEvent::Asked {
+                request,
+                ..
+            })) => request,
             update => panic!("unexpected update: {update:?}"),
         };
         waiter.abort();
         assert!(waiter.await.expect_err("aborted waiter").is_cancelled());
         assert!(matches!(
             events_rx.recv().await,
-            Some(SessionUpdate::Lifecycle(SessionEvent::QuestionClosed {
+            Some(SessionUpdate::Lifecycle(SessionEvent::Question(QuestionEvent::Closed {
                 request_id,
                 ..
-            })) if request_id == first.id
+            }))) if request_id == first.id
         ));
 
         let requester = channels.requester.clone();
@@ -458,7 +471,10 @@ mod tests {
                 .await
         });
         let second = match events_rx.recv().await.expect("second question") {
-            SessionUpdate::Lifecycle(SessionEvent::QuestionAsked { request, .. }) => request,
+            SessionUpdate::Lifecycle(SessionEvent::Question(QuestionEvent::Asked {
+                request,
+                ..
+            })) => request,
             update => panic!("unexpected update: {update:?}"),
         };
         assert!(

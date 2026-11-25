@@ -89,7 +89,7 @@ fn picker_vim_pages_and_half_pages_use_the_last_rendered_height() {
 #[test]
 fn skills_help_and_filter_do_not_leak_keys_into_the_composer() {
     let mut views = test_session_views(App::new());
-    views.overlays.show_skills();
+    views.workspace.controls.show_skills();
     views.handle_event(key(KeyCode::Char('?')));
     let help = rendered_views_text(&mut views, 60, 24);
     assert!(help.contains("Skills help"));
@@ -104,7 +104,7 @@ fn skills_help_and_filter_do_not_leak_keys_into_the_composer() {
     assert!(views.root().input().is_empty());
     views.handle_event(key(KeyCode::Esc));
     views.handle_event(key(KeyCode::Char('q')));
-    assert!(!views.overlays.skills.is_open());
+    assert!(!views.workspace.controls.skills.is_open());
 }
 
 #[test]

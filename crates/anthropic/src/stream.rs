@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use zevria_foundation::ModelProfileRef;
+use zevria_model::RetryCategory;
 use zevria_model::{ProviderReplay, ReplayMessage, anthropic::ContentBlock};
 
 #[derive(Debug, Deserialize)]
@@ -73,7 +74,7 @@ pub struct FinishedMessage {
     pub input_transformations: Value,
 }
 fn protocol(message: impl Into<String>) -> ApiError {
-    ApiError::new(ErrorKind::Retryable("protocol"), message)
+    ApiError::new(ErrorKind::Retryable(RetryCategory::Protocol), message)
 }
 fn terminal(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorKind::Terminal, message)
@@ -176,7 +177,7 @@ impl MessageAccumulator {
                     .filter(|b| !b.stopped)
                     .ok_or_else(|| protocol("stop without an open content block"))?;
                 if block.raw["type"] == "tool_use" && !block.partial_json.is_empty() {
-                    let input: serde_json::Map<String, Value> = serde_json::from_str(&block.partial_json).map_err(|error| ApiError::new(ErrorKind::Retryable("invalid_tool_json"), format!("invalid tool JSON at content_block_stop: {error}; try compatibility.eager_tool_input_streaming: false if this persists")))?;
+                    let input: serde_json::Map<String, Value> = serde_json::from_str(&block.partial_json).map_err(|error| ApiError::new(ErrorKind::Retryable(RetryCategory::InvalidToolJson), format!("invalid tool JSON at content_block_stop: {error}; try compatibility.eager_tool_input_streaming: false if this persists")))?;
                     block.raw["input"] = Value::Object(input);
                 }
                 ContentBlock::validate_known(&block.raw).map_err(|error| {

@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use zevria_foundation::policy::{SessionMode, TurnId};
 use zevria_foundation::question::QuestionTerminalDisposition;
 use zevria_foundation::tool_result::ToolCallOutcome;
+use zevria_session_api::PlanEvent;
 use zevria_session_api::event::{SessionEvent, SessionEventSender};
 use zevria_session_api::provider::ModelProvider;
 use zevria_session_api::turn::TurnContext;
@@ -436,12 +437,12 @@ impl<P: ModelProvider> SessionEngine<P> {
             }
             Err((path, error)) if self.plan_projection_warnings.insert(draft.target.id) => {
                 let _ = events
-                    .send(SessionEvent::PlanProjectionWarning {
+                    .send(SessionEvent::Plan(PlanEvent::ProjectionWarning {
                         version: draft.target,
                         draft: Some(draft.sequence),
                         path,
                         error,
-                    })
+                    }))
                     .await;
             }
             Err(_) => {}
@@ -457,9 +458,9 @@ impl<P: ModelProvider> SessionEngine<P> {
     ) -> Result<(), SessionReplayError> {
         if &previous != self.plan_state()? {
             let _ = events
-                .send(SessionEvent::PlanStateChanged {
-                    state: self.plan_state()?.clone(),
-                })
+                .send(SessionEvent::Plan(PlanEvent::StateChanged {
+                    state: Box::new(self.plan_state()?.clone()),
+                }))
                 .await;
         }
         Ok(())
@@ -527,7 +528,9 @@ impl<P: ModelProvider> SessionEngine<P> {
             }
             self.emit_selected_mode(events).await;
             let _ = events
-                .send(SessionEvent::FreshPlanHandoffRequested { handoff })
+                .send(SessionEvent::Plan(PlanEvent::FreshHandoffRequested {
+                    handoff: Box::new(handoff),
+                }))
                 .await;
             return Ok(AcceptedTurn::new(AcceptedKind::PlanDecision));
         }
@@ -608,16 +611,18 @@ impl<P: ModelProvider> SessionEngine<P> {
             PlanDecision::Revise => Ok(AcceptedTurn::new(AcceptedKind::PlanDecision)),
             PlanDecision::ImplementFresh => {
                 let _ = events
-                    .send(SessionEvent::FreshPlanHandoffRequested { handoff })
+                    .send(SessionEvent::Plan(PlanEvent::FreshHandoffRequested {
+                        handoff: Box::new(handoff),
+                    }))
                     .await;
                 Ok(AcceptedTurn::new(AcceptedKind::PlanDecision))
             }
             PlanDecision::ImplementCurrent => {
                 let _ = events
-                    .send(SessionEvent::PlanHandoffStarted {
+                    .send(SessionEvent::Plan(PlanEvent::HandoffStarted {
                         turn_id: turn.id,
-                        handoff,
-                    })
+                        handoff: Box::new(handoff),
+                    }))
                     .await;
                 Ok(AcceptedTurn::new(AcceptedKind::Handoff))
             }
@@ -694,10 +699,10 @@ impl<P: ModelProvider> SessionEngine<P> {
         }
         self.emit_selected_mode(events).await;
         let _ = events
-            .send(SessionEvent::PlanHandoffStarted {
+            .send(SessionEvent::Plan(PlanEvent::HandoffStarted {
                 turn_id: turn.id,
-                handoff,
-            })
+                handoff: Box::new(handoff),
+            }))
             .await;
         Ok(AcceptedTurn::new(AcceptedKind::Handoff))
     }

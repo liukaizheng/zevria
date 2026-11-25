@@ -5,10 +5,12 @@
 //! call sites use this facade in either build configuration.
 use crate::{
     connection::{OpenAiProvider, OpenAiTransport},
-    http::HttpAttemptError,
+    recovery::AttemptError,
     responses::PreparedRequest,
     websocket_session::OpenAiWebSocketTerminalCategory as Category,
 };
+#[cfg(feature = "cache-diagnostics")]
+use zevria_model::RetryCategory;
 use zevria_model::{ModelResponse, TokenUsage};
 
 #[derive(Default)]
@@ -139,7 +141,7 @@ impl Diagnostics {
         crate::cache_diagnostics::recovery(prepared, openai);
     }
     pub(crate) fn disconnected_recovery(prepared: &PreparedRequest, openai: &OpenAiProvider) {
-        if openai.ws.session.terminal_status() != Some(Category::NotConnected) {
+        if openai.responses_transport.ws.session.terminal_status() != Some(Category::NotConnected) {
             crate::cache_diagnostics::recovery(prepared, openai);
         }
     }
@@ -192,14 +194,14 @@ impl Diagnostics {
         openai: &mut OpenAiProvider,
         request: &reqwest::RequestBuilder,
         attempt: usize,
-    ) -> Result<(), HttpAttemptError> {
+    ) -> Result<(), AttemptError> {
         let diagnostic = request
             .try_clone()
             .expect("JSON request is cloneable")
             .build()
             .map_err(|error| {
-                HttpAttemptError::retryable(
-                    "request_error",
+                AttemptError::retryable(
+                    RetryCategory::RequestError,
                     anyhow::Error::new(error.without_url()).context("OpenAI HTTP request failed"),
                 )
             })?;
@@ -325,7 +327,7 @@ impl Diagnostics {
         openai: &mut OpenAiProvider,
         request: &reqwest::RequestBuilder,
         attempt: usize,
-    ) -> Result<(), HttpAttemptError> {
+    ) -> Result<(), AttemptError> {
         Ok(())
     }
     pub(crate) fn configure_runtime(

@@ -3,21 +3,15 @@
 
 use crate::composer::{ComposerDraft, ComposerState};
 
-#[derive(Default)]
-pub(super) struct DraftSubmissions {
-    pending: Option<StagedDraft>,
-    rejected: Vec<ComposerDraft>,
-}
+use zevria_presentation::draft::DraftSlot;
 
-struct StagedDraft {
-    draft: ComposerDraft,
-    replacement_generation: u64,
-}
+#[derive(Default)]
+pub(super) struct DraftSubmissions(DraftSlot<ComposerDraft>);
 
 impl DraftSubmissions {
     pub(super) fn stage(&mut self, composer: &mut ComposerState) {
         assert!(
-            self.pending.is_none(),
+            !self.0.has_pending(),
             "work admission must precede draft staging"
         );
         let draft = composer.snapshot();
@@ -26,29 +20,22 @@ impl DraftSubmissions {
     }
 
     pub(super) fn stage_detached(&mut self, draft: ComposerDraft, replacement_generation: u64) {
-        assert!(
-            self.pending.is_none(),
-            "work admission must precede draft staging"
-        );
-        self.pending = Some(StagedDraft {
-            draft,
-            replacement_generation,
-        });
+        self.0.stage(draft, replacement_generation);
     }
 
     pub(super) fn has_pending(&self) -> bool {
-        self.pending.is_some()
+        self.0.has_pending()
     }
 
     pub(super) fn accept(&mut self) {
         // Staging already created an independent replacement slot. Acceptance
         // has no right to mutate that slot, including its cursor and undo stack.
-        self.pending = None;
+        self.0.accept();
     }
 
     pub(super) fn reject(&mut self, composer: &mut ComposerState) {
-        if let Some(staged) = self.pending.take() {
-            self.restore_or_retain(composer, staged.draft, staged.replacement_generation);
+        if let Some(staged) = self.0.take() {
+            self.restore_or_retain(composer, staged.draft, staged.generation);
         }
     }
 
@@ -58,22 +45,25 @@ impl DraftSubmissions {
         draft: ComposerDraft,
         generation: u64,
     ) {
-        if composer.generation() == generation && composer.is_empty() {
+        if let Some(draft) = self.0.restore_or_retain(
+            draft,
+            generation,
+            composer.generation(),
+            composer.is_empty(),
+        ) {
             composer.restore(draft);
-        } else {
-            self.rejected.push(draft);
         }
     }
 
     pub(super) fn retain(&mut self, draft: ComposerDraft) {
-        self.rejected.push(draft);
+        self.0.retain(draft);
     }
 
     pub(super) fn recover(&mut self, composer: &mut ComposerState) -> bool {
         if !composer.is_empty() {
             return false;
         }
-        let Some(draft) = self.rejected.pop() else {
+        let Some(draft) = self.0.recover() else {
             return false;
         };
         composer.restore(draft);
@@ -81,7 +71,7 @@ impl DraftSubmissions {
     }
 
     pub(super) fn has_recovery(&self) -> bool {
-        !self.rejected.is_empty()
+        !self.0.recovery().is_empty()
     }
 }
 

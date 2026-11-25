@@ -1,5 +1,6 @@
 //! Actual worker binary against a deterministic local Responses endpoint.
 use super::acp_skills::Rpc;
+use zevria_session_api::TurnEvent;
 #[path = "../../../tools/tests/support/inspection.rs"]
 mod inspection;
 use serde_json::{Value, json};
@@ -547,12 +548,12 @@ fn fresh_native_worker_and_parent_synthesis_inspection_smoke() {
                 while let Some(update) = events.recv().await {
                     if let zevria_session_api::SessionUpdate::Lifecycle(event) = update {
                         match event {
-                            zevria_session_api::SessionEvent::TurnCompleted { message, .. } => {
+                            zevria_session_api::SessionEvent::Turn(TurnEvent::Completed { message, .. }) => {
                                 assert!(format!("{message:?}").contains("Parent synthesis independently verified"));
                                 return;
                             }
-                            zevria_session_api::SessionEvent::TurnFailed { error, .. }
-                            | zevria_session_api::SessionEvent::TurnRejected { error, .. } => panic!("smoke failed: {error}"),
+                            zevria_session_api::SessionEvent::Turn(TurnEvent::Failed { error, .. })
+                            | zevria_session_api::SessionEvent::Turn(TurnEvent::Rejected { error, .. }) => panic!("smoke failed: {error}"),
                             _ => {}
                         }
                     }

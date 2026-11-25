@@ -122,7 +122,7 @@ async fn one_batch_call_preserves_arrays_strict_schema_replay_and_cache_prefix_o
             }
             // Reconstruct a complete native request after an ordinary continuation
             // so replay must carry BOTH full arrays, not presentation sidecars.
-            openai.ws.continuation = None;
+            openai.responses_transport.ws.continuation = None;
             run_declared_turn(
                 "finish",
                 &declared,

@@ -2,6 +2,7 @@
 use super::*;
 use agent_client_protocol::schema::v1::{Error as AcpError, PlanCapabilities};
 use agent_client_protocol::{Agent, ConnectionTo};
+use zevria_session_api::{PlanEvent, QuestionEvent, TurnEvent};
 
 fn artifact() -> PlanArtifact {
     PlanArtifact {
@@ -69,24 +70,24 @@ impl SessionRuntimeFactory for WorkerFactory {
                         }) => {
                             turn += 1;
                             let turn_id = TurnId::new(turn);
-                            tx.send(SessionEvent::TurnStarted {
+                            tx.send(SessionEvent::Turn(TurnEvent::Started {
                                 turn_id,
                                 mode,
                                 message: text.to_message(),
-                            })
+                            }))
                             .await
                             .unwrap();
                             if text == zevria_content::UserPrompt::from_text("provider failure") {
-                                tx.send(SessionEvent::TurnFailed {
+                                tx.send(SessionEvent::Turn(TurnEvent::Failed {
                                     turn_id,
                                     error: "provider unavailable".into(),
-                                })
+                                }))
                                 .await
                                 .unwrap();
                                 continue;
                             }
                             if text == zevria_content::UserPrompt::from_text("question") {
-                                tx.send(SessionEvent::QuestionAsked {
+                                tx.send(SessionEvent::Question(QuestionEvent::Asked {
                                     turn_id,
                                     request: QuestionRequest {
                                         allow_choice_notes: false,
@@ -109,15 +110,15 @@ impl SessionRuntimeFactory for WorkerFactory {
                                         source_label: None,
                                         dismissible: true,
                                     },
-                                })
+                                }))
                                 .await
                                 .unwrap();
                                 continue;
                             }
                             if text == zevria_content::UserPrompt::from_text("draft only") {
                                 for sequence in [1, 2] {
-                                    tx.send(SessionEvent::PlanStateChanged {
-                                        state: PlanWorkflowState::Planning {
+                                    tx.send(SessionEvent::Plan(PlanEvent::StateChanged {
+                                        state: Box::new(PlanWorkflowState::Planning {
                                             id: artifact.version.id,
                                             previous: None,
                                             draft: Some(zevria_workflow::PlanDraft {
@@ -129,17 +130,17 @@ impl SessionRuntimeFactory for WorkerFactory {
                                                 ),
                                                 source_turn_id: turn_id,
                                             }),
-                                        },
-                                    })
+                                        }),
+                                    }))
                                     .await
                                     .unwrap();
                                 }
                             }
-                            let terminal = SessionEvent::TurnCompleted {
+                            let terminal = SessionEvent::Turn(TurnEvent::Completed {
                                 attempt_id: None,
                                 turn_id,
                                 message: Message::assistant("report complete"),
-                            };
+                            });
                             if [
                                 "plan",
                                 "terminal first",
@@ -148,7 +149,7 @@ impl SessionRuntimeFactory for WorkerFactory {
                             ]
                             .contains(&text.text_projection().as_str())
                             {
-                                tx.send(SessionEvent::ToolResults {
+                                tx.send(SessionEvent::Turn(TurnEvent::ToolResults {
                                     turn_id,
                                     message: Message::tool_result(
                                         rig_core::message::CallId::from_wire("submit"),
@@ -164,7 +165,7 @@ impl SessionRuntimeFactory for WorkerFactory {
                                         outcome: ToolCallOutcome::Success,
                                         detail: None,
                                     }],
-                                })
+                                }))
                                 .await
                                 .unwrap();
                                 if text != zevria_content::UserPrompt::from_text("plan") {
@@ -176,11 +177,11 @@ impl SessionRuntimeFactory for WorkerFactory {
                                 // Separate scheduling turns exercise a terminal waiting for Ready.
                                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                                 for _ in 0..2 {
-                                    tx.send(SessionEvent::PlanStateChanged {
-                                        state: PlanWorkflowState::Ready {
+                                    tx.send(SessionEvent::Plan(PlanEvent::StateChanged {
+                                        state: Box::new(PlanWorkflowState::Ready {
                                             artifact: artifact.clone(),
-                                        },
-                                    })
+                                        }),
+                                    }))
                                     .await
                                     .unwrap();
                                 }
@@ -194,20 +195,20 @@ impl SessionRuntimeFactory for WorkerFactory {
                         SessionCommand::Control(
                             zevria_session_api::ControlCommand::AnswerQuestion { .. },
                         ) => {
-                            tx.send(SessionEvent::TurnCompleted {
+                            tx.send(SessionEvent::Turn(TurnEvent::Completed {
                                 attempt_id: None,
                                 turn_id: TurnId::new(turn),
                                 message: Message::assistant("question handled"),
-                            })
+                            }))
                             .await
                             .unwrap();
                         }
                         SessionCommand::Control(
                             zevria_session_api::ControlCommand::CancelTurn { .. },
                         ) => {
-                            tx.send(SessionEvent::TurnCancelled {
+                            tx.send(SessionEvent::Turn(TurnEvent::Cancelled {
                                 turn_id: TurnId::new(turn),
-                            })
+                            }))
                             .await
                             .unwrap();
                         }
@@ -217,20 +218,20 @@ impl SessionRuntimeFactory for WorkerFactory {
                         }) => {
                             assert_eq!(expected, artifact.version);
                             turn += 1;
-                            tx.send(SessionEvent::PlanStateChanged {
-                                state: PlanWorkflowState::Planning {
+                            tx.send(SessionEvent::Plan(PlanEvent::StateChanged {
+                                state: Box::new(PlanWorkflowState::Planning {
                                     id: artifact.version.id,
                                     previous: Some(artifact.clone()),
                                     draft: None,
-                                },
-                            })
+                                }),
+                            }))
                             .await
                             .unwrap();
-                            tx.send(SessionEvent::TurnCompleted {
+                            tx.send(SessionEvent::Turn(TurnEvent::Completed {
                                 attempt_id: None,
                                 turn_id: TurnId::new(turn),
                                 message: Message::assistant("revision opened"),
-                            })
+                            }))
                             .await
                             .unwrap();
                             artifact.version.revision += 1;

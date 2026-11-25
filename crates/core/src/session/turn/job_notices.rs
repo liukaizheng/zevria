@@ -5,6 +5,7 @@ use crate::session::kernel::state::EnginePhase;
 use crate::session::turn::execution::{AcceptedKind, AcceptedTurn, Failure, Rejection};
 use crate::session::workflow::plan::{PlanSubmissionGate, workflow_transition_for_mode};
 use zevria_foundation::policy::{SessionMode, TurnId, TurnPolicy};
+use zevria_session_api::JobEvent;
 use zevria_session_api::event::{ProgressReporter, SessionEvent, SessionEventSender};
 use zevria_session_api::provider::ModelProvider;
 use zevria_session_api::turn::TurnContext;
@@ -161,10 +162,10 @@ impl<P: ModelProvider> SessionEngine<P> {
         }
         let _ = progress
             .events()
-            .send(SessionEvent::CommandJobsReported {
+            .send(SessionEvent::Job(JobEvent::Reported {
                 turn_id: progress.turn().id,
-                notice,
-            })
+                notice: Box::new(notice),
+            }))
             .await;
         Ok(())
     }
@@ -215,7 +216,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         if self.capabilities.job_follow.advertised != Some(mode) {
             self.capabilities.job_follow.advertised = Some(mode);
             let _ = events
-                .send(SessionEvent::JobContinuationChanged { mode })
+                .send(SessionEvent::Job(JobEvent::ContinuationChanged { mode }))
                 .await;
         }
     }
@@ -289,11 +290,11 @@ impl<P: ModelProvider> SessionEngine<P> {
         self.capabilities.job_follow.consecutive += 1;
         self.emit_selected_mode(events).await;
         let _ = events
-            .send(SessionEvent::JobContinuationStarted {
+            .send(SessionEvent::Job(JobEvent::ContinuationStarted {
                 turn_id: turn.id,
                 mode,
-                notice,
-            })
+                notice: Box::new(notice),
+            }))
             .await;
         let mut accepted = AcceptedTurn::new(AcceptedKind::Continuation { mode });
         accepted.request = request;

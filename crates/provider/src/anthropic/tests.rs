@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::TurnEvent;
 #[path = "credential_tests.rs"]
 mod command_credentials;
 #[path = "integration_tests.rs"]
@@ -87,7 +88,7 @@ async fn anthropic_prewarm_never_contacts_the_endpoint() {
         listener.local_addr().unwrap()
     ));
     if let ProfileProtocol::Anthropic { endpoint, .. } = &mut profile.protocol {
-        endpoint.network.prewarm = true;
+        std::sync::Arc::make_mut(endpoint).network.prewarm = true;
     }
     let mut runtime = runtime(&profile);
     runtime.prewarm(ModelRole::Build).await;
@@ -139,7 +140,7 @@ async fn headers_streaming_usage_counting_and_local_compaction() {
     while let Ok(update) = receiver.try_recv() {
         saw_usage |= matches!(
             update,
-            SessionUpdate::Lifecycle(SessionEvent::UsageUpdated { .. })
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::UsageUpdated { .. }))
         );
     }
     assert!(
@@ -282,7 +283,7 @@ async fn unavailable_counting_is_cached_and_bearer_auth_is_supported() {
     });
     let mut profile = profile(url);
     if let ProfileProtocol::Anthropic { endpoint, .. } = &mut profile.protocol {
-        endpoint.auth = AnthropicAuth::Bearer;
+        std::sync::Arc::make_mut(endpoint).auth = AnthropicAuth::Bearer;
     }
     let mut provider = runtime(&profile);
     for _ in 0..2 {

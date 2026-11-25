@@ -7,6 +7,7 @@ use rig_core::message::Message;
 use std::{future::Future, time::Duration};
 use zevria_session_api::ManagementCommand;
 use zevria_session_api::session_event_channel;
+use zevria_session_api::{ManagementEvent, PlanEvent, TurnEvent};
 use zevria_workflow::PlanId;
 use zevria_workflow::PlanResolution;
 
@@ -151,13 +152,13 @@ fn selected_updates(updates: &[AcpSessionUpdate]) -> Vec<String> {
 }
 
 fn accepted(request_id: String, mode: SessionMode) -> SessionEvent {
-    SessionEvent::ModeResult {
+    SessionEvent::Manage(ManagementEvent::ModeResult {
         request_id,
         result: ModeSelectionResult::Accepted {
             mode,
             changed: true,
         },
-    }
+    })
 }
 
 fn artifact() -> PlanArtifact {
@@ -258,13 +259,13 @@ async fn selection_waits_for_correlated_ack_and_locks_prompt_and_management() {
             assert_eq!(live.mode(), SessionMode::Plan);
             let same = live.set_mode(SessionMode::Plan)?;
             commands.recv().await.unwrap();
-            live.handle_event(SessionEvent::ModeResult {
+            live.handle_event(SessionEvent::Manage(ManagementEvent::ModeResult {
                 request_id: same.request_id,
                 result: ModeSelectionResult::Accepted {
                     mode: SessionMode::Plan,
                     changed: false,
                 },
-            })?;
+            }))?;
             same.response.await.unwrap()?;
             let prompt =
                 live.begin_prompt(zevria_content::UserPrompt::from_text("implement directly"))?;
@@ -296,13 +297,13 @@ async fn rejection_and_stale_replies_never_change_selection() {
         async move |live, mut commands| {
             let rejected = live.set_mode(SessionMode::Plan)?;
             commands.recv().await.unwrap();
-            live.handle_event(SessionEvent::ModeResult {
+            live.handle_event(SessionEvent::Manage(ManagementEvent::ModeResult {
                 request_id: rejected.request_id.clone(),
                 result: ModeSelectionResult::Rejected {
                     code: "busy".into(),
                     message: "model management pending".into(),
                 },
-            })?;
+            }))?;
             let error = rejected.response.await.unwrap().unwrap_err();
             assert!(error.to_string().contains("model management pending"));
             assert_eq!(live.mode(), SessionMode::Build);
@@ -315,7 +316,7 @@ async fn rejection_and_stale_replies_never_change_selection() {
                 next.response.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
             ));
-            assert!(live.state.lock().unwrap().pending_mode.is_some());
+            assert!(live.state.lock().unwrap().admission.pending_mode.is_some());
             live.handle_event(accepted(next.request_id, SessionMode::Plan))?;
             next.response.await.unwrap()?;
             live.handle_event(accepted(rejected.request_id, SessionMode::Plan))?;
@@ -358,7 +359,7 @@ async fn abandoned_selection_keeps_admission_locked_until_accepted_or_rejected()
                     assert_eq!(live.mode(), SessionMode::Build);
                     {
                         let state = live.state.lock().unwrap();
-                        let locked = state.pending_mode.as_ref().unwrap();
+                        let locked = state.admission.pending_mode.as_ref().unwrap();
                         assert_eq!(locked.request_id, pending.request_id);
                         assert!(locked.outcome.is_none());
                     }
@@ -378,7 +379,7 @@ async fn abandoned_selection_keeps_admission_locked_until_accepted_or_rejected()
                     );
                     assert!(commands.try_recv().is_err());
                     live.handle_event(accepted("unrelated".into(), SessionMode::Plan))?;
-                    assert!(live.state.lock().unwrap().pending_mode.is_some());
+                    assert!(live.state.lock().unwrap().admission.pending_mode.is_some());
                     let result = if accepts {
                         ModeSelectionResult::Accepted {
                             mode: SessionMode::Plan,
@@ -390,17 +391,17 @@ async fn abandoned_selection_keeps_admission_locked_until_accepted_or_rejected()
                             message: "model management pending".into(),
                         }
                     };
-                    live.handle_event(SessionEvent::ModeResult {
+                    live.handle_event(SessionEvent::Manage(ManagementEvent::ModeResult {
                         request_id: pending.request_id.clone(),
                         result,
-                    })?;
+                    }))?;
                     let expected = if accepts {
                         SessionMode::Plan
                     } else {
                         SessionMode::Build
                     };
                     assert_eq!(live.mode(), expected);
-                    assert!(live.state.lock().unwrap().pending_mode.is_none());
+                    assert!(live.state.lock().unwrap().admission.pending_mode.is_none());
                     let prompt =
                         live.begin_prompt(zevria_content::UserPrompt::from_text("after ack"))?;
                     assert!(matches!(
@@ -461,7 +462,7 @@ async fn dropped_mode_waiter_keeps_admission_locked_until_ack() {
             );
             live.handle_event(accepted(pending.request_id, SessionMode::Plan))?;
             assert_eq!(live.mode(), SessionMode::Plan);
-            assert!(live.state.lock().unwrap().pending_mode.is_none());
+            assert!(live.state.lock().unwrap().admission.pending_mode.is_none());
             Ok(())
         },
     )
@@ -479,7 +480,7 @@ async fn failed_enqueue_releases_selection_without_committing() {
             commands.close();
             assert!(live.set_mode(SessionMode::Plan).is_err());
             assert_eq!(live.mode(), SessionMode::Build);
-            assert!(live.state.lock().unwrap().pending_mode.is_none());
+            assert!(live.state.lock().unwrap().admission.pending_mode.is_none());
             Ok(())
         },
     )
@@ -505,7 +506,7 @@ async fn runtime_failure_and_shutdown_never_reopen_unknown_selection() {
                 let error = pending.response.await.unwrap().unwrap_err();
                 if runtime_failure {
                     assert!(error.to_string().contains("original mode failure"));
-                    assert!(live.state.lock().unwrap().pending_mode.is_some());
+                    assert!(live.state.lock().unwrap().admission.pending_mode.is_some());
                 }
                 assert!(live.set_mode(SessionMode::Plan).is_err());
                 assert!(
@@ -514,7 +515,7 @@ async fn runtime_failure_and_shutdown_never_reopen_unknown_selection() {
                 );
                 live.shutdown().await.unwrap();
                 assert!(live.is_closed());
-                assert!(live.state.lock().unwrap().pending_mode.is_none());
+                assert!(live.state.lock().unwrap().admission.pending_mode.is_none());
                 // Only a permanently closed session may discard an unresolved
                 // commit: it can no longer submit work with stale selection.
                 live.handle_event(accepted(pending.request_id, SessionMode::Plan))?;
@@ -550,7 +551,7 @@ async fn mismatched_ack_fails_closed_instead_of_admitting_unknown_selection() {
                 live.begin_prompt(zevria_content::UserPrompt::from_text("not queued"))
                     .is_err()
             );
-            assert!(live.state.lock().unwrap().unavailable.is_some());
+            assert!(live.state.lock().unwrap().admission.unavailable.is_some());
             Ok(())
         },
     )
@@ -640,12 +641,12 @@ async fn pending_skill_mutation_blocks_mode_selection_and_root_prompts() {
                     .is_err()
             );
             assert!(commands.try_recv().is_err());
-            live.handle_event(SessionEvent::SkillsResult {
+            live.handle_event(SessionEvent::Manage(ManagementEvent::SkillsResult {
                 request_id,
-                result: zevria_instructions::skill::SkillManagementResult::error(
+                result: Box::new(zevria_instructions::skill::SkillManagementResult::error(
                     "test", "resolved",
-                ),
-            })?;
+                )),
+            }))?;
             request.await.unwrap()?;
             let mode = live.set_mode(SessionMode::Plan)?;
             commands.recv().await.unwrap();
@@ -685,36 +686,38 @@ async fn retained_plan_snapshots_and_turn_modes_do_not_erase_explicit_selection(
                 },
                 PlanWorkflowState::Idle,
             ] {
-                live.handle_event(SessionEvent::PlanStateChanged { state })?;
+                live.handle_event(SessionEvent::Plan(PlanEvent::StateChanged {
+                    state: Box::new(state),
+                }))?;
                 assert_eq!(live.mode(), SessionMode::Build);
             }
-            live.handle_event(SessionEvent::TurnStarted {
+            live.handle_event(SessionEvent::Turn(TurnEvent::Started {
                 turn_id: TurnId::new(2),
                 mode: SessionMode::Plan,
                 message: Message::user("retained turn"),
-            })?;
+            }))?;
             assert_eq!(live.mode(), SessionMode::Build);
-            live.handle_event(SessionEvent::PlanStateChanged {
-                state: PlanWorkflowState::Ready {
+            live.handle_event(SessionEvent::Plan(PlanEvent::StateChanged {
+                state: Box::new(PlanWorkflowState::Ready {
                     artifact: plan.clone(),
-                },
-            })?;
+                }),
+            }))?;
             assert_eq!(live.mode(), SessionMode::Plan);
             assert!(live.set_mode(SessionMode::Build).is_err());
             assert!(live.set_mode(SessionMode::Plan).is_err());
-            live.handle_event(SessionEvent::ModeChanged {
+            live.handle_event(SessionEvent::Turn(TurnEvent::ModeChanged {
                 mode: SessionMode::Build,
-            })?;
+            }))?;
             assert_eq!(live.mode(), SessionMode::Plan, "Ready remains modal");
-            live.handle_event(SessionEvent::PlanStateChanged {
-                state: PlanWorkflowState::Resolved {
+            live.handle_event(SessionEvent::Plan(PlanEvent::StateChanged {
+                state: Box::new(PlanWorkflowState::Resolved {
                     artifact: plan,
                     resolution: PlanResolution::ImplementedCurrent,
-                },
-            })?;
-            live.handle_event(SessionEvent::ModeChanged {
+                }),
+            }))?;
+            live.handle_event(SessionEvent::Turn(TurnEvent::ModeChanged {
                 mode: SessionMode::Build,
-            })?;
+            }))?;
             assert_eq!(live.mode(), SessionMode::Build);
             Ok(())
         },
@@ -744,13 +747,20 @@ async fn implementing_a_published_plan_from_plan_still_selects_build() {
                 ))
             );
             assert_eq!(
-                live.state.lock().unwrap().pending.as_ref().unwrap().mode,
+                live.state
+                    .lock()
+                    .unwrap()
+                    .admission
+                    .pending
+                    .as_ref()
+                    .unwrap()
+                    .mode,
                 SessionMode::Build
             );
-            live.handle_event(SessionEvent::PlanHandoffStarted {
+            live.handle_event(SessionEvent::Plan(PlanEvent::HandoffStarted {
                 turn_id: TurnId::new(2),
-                handoff: zevria_workflow::PlanHandoff::new(plan, "mode-test"),
-            })?;
+                handoff: Box::new(zevria_workflow::PlanHandoff::new(plan, "mode-test")),
+            }))?;
             assert_eq!(live.mode(), SessionMode::Build);
             live.finish_prompt(Ok(StopReason::EndTurn));
             pending.response.await.unwrap()?;
@@ -778,11 +788,11 @@ async fn workers_reject_request_orchestration_and_never_send_root_management() {
             assert_eq!(live.mode(), SessionMode::Build);
             live.set_mode(SessionMode::Plan)?.response.await.unwrap()?;
             assert_eq!(live.mode(), SessionMode::Plan);
-            live.handle_event(SessionEvent::PlanStateChanged {
-                state: PlanWorkflowState::Ready {
+            live.handle_event(SessionEvent::Plan(PlanEvent::StateChanged {
+                state: Box::new(PlanWorkflowState::Ready {
                     artifact: artifact(),
-                },
-            })?;
+                }),
+            }))?;
             assert!(live.set_mode(SessionMode::Build).is_err());
             assert!(
                 live.begin_prompt_with_behavior(

@@ -1,5 +1,6 @@
 use super::*;
 use zevria_model::ToolDeclaration;
+use zevria_session_api::TurnEvent;
 
 struct DescribedCommand(&'static str);
 impl Tool for DescribedCommand {
@@ -56,7 +57,8 @@ async fn submit(engine: &mut SessionEngine<ScriptedProvider>, mode: SessionMode,
     assert!(
         !events.iter().any(|event| matches!(
             event,
-            SessionEvent::TurnFailed { .. } | SessionEvent::TurnRejected { .. }
+            SessionEvent::Turn(TurnEvent::Failed { .. })
+                | SessionEvent::Turn(TurnEvent::Rejected { .. })
         )),
         "{events:?}"
     );
@@ -785,7 +787,7 @@ async fn mcp_additions_preserve_prefix_and_stale_tools_are_denied() {
         collect_events(&mut receiver)
             .await
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
     );
     let requests = engine.provider.requests.lock().unwrap();
     assert_eq!(requests[0].instructions, requests[1].instructions);

@@ -17,6 +17,7 @@ use std::{
     },
     time::SystemTime,
 };
+use zevria_session_api::{ManagementEvent, PlanEvent, QuestionEvent, TurnEvent};
 
 use agent_client_protocol::schema::{
     ProtocolVersion,
@@ -714,7 +715,10 @@ impl SessionRuntimeFactory for FakeFactory {
                                 selected_mode = *mode;
                             }
                             let _ = events_tx
-                                .send(SessionEvent::ModeResult { request_id, result })
+                                .send(SessionEvent::Manage(ManagementEvent::ModeResult {
+                                    request_id,
+                                    result,
+                                }))
                                 .await;
                             continue;
                         }
@@ -726,11 +730,11 @@ impl SessionRuntimeFactory for FakeFactory {
                             {
                                 if let Some(turn_id) = active {
                                     events_tx
-                                        .try_send(SessionEvent::TurnCompleted {
+                                        .try_send(SessionEvent::Turn(TurnEvent::Completed {
                                             attempt_id: None,
                                             turn_id,
                                             message: Message::assistant("contradictory success"),
-                                        })
+                                        }))
                                         .unwrap();
                                 }
                                 let _ = exit_tx.send(RuntimeExit::failed(
@@ -774,10 +778,12 @@ impl SessionRuntimeFactory for FakeFactory {
                                 let unchanged = before == revision;
                                 if !unchanged {
                                     let _ = events_tx
-                                        .send(SessionEvent::SkillsChanged {
-                                            revision: revision.clone(),
-                                            counts: counts.clone(),
-                                        })
+                                        .send(SessionEvent::Manage(
+                                            ManagementEvent::SkillsChanged {
+                                                revision: revision.clone(),
+                                                counts: counts.clone(),
+                                            },
+                                        ))
                                         .await;
                                 }
                                 SkillManagementResult::Changed {
@@ -787,7 +793,10 @@ impl SessionRuntimeFactory for FakeFactory {
                                 }
                             };
                             let _ = events_tx
-                                .send(SessionEvent::SkillsResult { request_id, result })
+                                .send(SessionEvent::Manage(ManagementEvent::SkillsResult {
+                                    request_id,
+                                    result: Box::new(result),
+                                }))
                                 .await;
                             continue;
                         }
@@ -800,10 +809,10 @@ impl SessionRuntimeFactory for FakeFactory {
                                 skills.resolve(&name, SkillInvocationOrigin::Explicit)
                             {
                                 let _ = events_tx
-                                    .send(SessionEvent::TurnRejected {
+                                    .send(SessionEvent::Turn(TurnEvent::Rejected {
                                         turn_id: TurnId::new(next_turn),
                                         error: error.to_string(),
-                                    })
+                                    }))
                                     .await;
                                 next_turn += 1;
                                 continue;
@@ -815,13 +824,13 @@ impl SessionRuntimeFactory for FakeFactory {
                                     .expect("current fake Plan")
                                     .clone();
                                 let _ = events_tx
-                                    .send(SessionEvent::PlanStateChanged {
-                                        state: PlanWorkflowState::Planning {
+                                    .send(SessionEvent::Plan(PlanEvent::StateChanged {
+                                        state: Box::new(PlanWorkflowState::Planning {
                                             id: expected.id,
                                             previous: Some(artifact),
                                             draft: None,
-                                        },
-                                    })
+                                        }),
+                                    }))
                                     .await;
                             }
                             let snapshot = skills
@@ -848,24 +857,26 @@ impl SessionRuntimeFactory for FakeFactory {
                             next_turn += 1;
                             if text.is_blank() {
                                 let _ = events_tx
-                                    .send(SessionEvent::TurnRejected {
+                                    .send(SessionEvent::Turn(TurnEvent::Rejected {
                                         turn_id,
                                         error: "a message turn requires non-empty text".into(),
-                                    })
+                                    }))
                                     .await;
                                 continue;
                             }
                             active = Some(turn_id);
                             selected_mode = mode;
-                            let _ = events_tx.send(SessionEvent::ModeChanged { mode }).await;
                             let _ = events_tx
-                                .send(SessionEvent::TurnStarted {
+                                .send(SessionEvent::Turn(TurnEvent::ModeChanged { mode }))
+                                .await;
+                            let _ = events_tx
+                                .send(SessionEvent::Turn(TurnEvent::Started {
                                     turn_id,
                                     message: skill_display
                                         .unwrap_or_else(|| text.clone())
                                         .to_message(),
                                     mode,
-                                })
+                                }))
                                 .await;
                             if text == zevria_content::UserPrompt::from_text("make plan")
                                 && mode == SessionMode::Plan
@@ -891,7 +902,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                     ),
                                 );
                                 let _ = events_tx
-                                    .send(SessionEvent::Intermediate {
+                                    .send(SessionEvent::Turn(TurnEvent::Intermediate {
                                         attempt_id: None,
                                         turn_id,
                                         message: Message::Assistant(
@@ -899,10 +910,10 @@ impl SessionRuntimeFactory for FakeFactory {
                                                 AssistantContent::ToolCall(call),
                                             ]),
                                         ),
-                                    })
+                                    }))
                                     .await;
                                 let _ = events_tx
-                                    .send(SessionEvent::ToolResults {
+                                    .send(SessionEvent::Turn(TurnEvent::ToolResults {
                                         turn_id,
                                         message: Message::tool_result(
                                             rig_core::message::CallId::from_wire(
@@ -920,21 +931,21 @@ impl SessionRuntimeFactory for FakeFactory {
                                             outcome: ToolCallOutcome::Success,
                                             detail: None,
                                         }],
-                                    })
+                                    }))
                                     .await;
                                 let _ = events_tx
-                                    .send(SessionEvent::PlanStateChanged {
-                                        state: PlanWorkflowState::Ready {
+                                    .send(SessionEvent::Plan(PlanEvent::StateChanged {
+                                        state: Box::new(PlanWorkflowState::Ready {
                                             artifact: artifact.clone(),
-                                        },
-                                    })
+                                        }),
+                                    }))
                                     .await;
                                 let _ = events_tx
-                                    .send(SessionEvent::TurnCompleted {
+                                    .send(SessionEvent::Turn(TurnEvent::Completed {
                                         attempt_id: None,
                                         turn_id,
                                         message: Message::assistant("Plan submitted"),
-                                    })
+                                    }))
                                     .await;
                                 current_artifact = Some(artifact);
                                 active = None;
@@ -945,7 +956,7 @@ impl SessionRuntimeFactory for FakeFactory {
                             }
                             if text == zevria_content::UserPrompt::from_text("question") {
                                 let _ = events_tx
-                                    .send(SessionEvent::QuestionAsked {
+                                    .send(SessionEvent::Question(QuestionEvent::Asked {
                                         turn_id,
                                         request: QuestionRequest {
                                             allow_choice_notes: false,
@@ -968,7 +979,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                             source_label: None,
                                             dismissible: true,
                                         },
-                                    })
+                                    }))
                                     .await;
                                 continue;
                             }
@@ -983,7 +994,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                 ),
                             );
                             let _ = events_tx
-                                .send(SessionEvent::Intermediate {
+                                .send(SessionEvent::Turn(TurnEvent::Intermediate {
                                     attempt_id: None,
                                     turn_id,
                                     message: Message::Assistant(
@@ -991,10 +1002,10 @@ impl SessionRuntimeFactory for FakeFactory {
                                             AssistantContent::ToolCall(call),
                                         ]),
                                     ),
-                                })
+                                }))
                                 .await;
                             let _ = events_tx
-                                .send(SessionEvent::ToolResults {
+                                .send(SessionEvent::Turn(TurnEvent::ToolResults {
                                     turn_id,
                                     message: Message::tool_result(
                                         rig_core::message::CallId::from_wire("call-1"),
@@ -1010,14 +1021,14 @@ impl SessionRuntimeFactory for FakeFactory {
                                         outcome: ToolCallOutcome::Success,
                                         detail: None,
                                     }],
-                                })
+                                }))
                                 .await;
                             let _ = events_tx
-                                .send(SessionEvent::TurnCompleted {
+                                .send(SessionEvent::Turn(TurnEvent::Completed {
                                     attempt_id: None,
                                     turn_id,
                                     message: Message::assistant("hello world"),
-                                })
+                                }))
                                 .await;
                             active = None;
                         }
@@ -1030,11 +1041,11 @@ impl SessionRuntimeFactory for FakeFactory {
                                 .push(response);
                             if let Some(turn_id) = active.take() {
                                 let _ = events_tx
-                                    .send(SessionEvent::TurnCompleted {
+                                    .send(SessionEvent::Turn(TurnEvent::Completed {
                                         attempt_id: None,
                                         turn_id,
                                         message: Message::assistant("question answered"),
-                                    })
+                                    }))
                                     .await;
                             }
                         }
@@ -1043,7 +1054,7 @@ impl SessionRuntimeFactory for FakeFactory {
                         ) => {
                             if let Some(turn_id) = active.take() {
                                 let _ = events_tx
-                                    .send(SessionEvent::TurnCancelled { turn_id })
+                                    .send(SessionEvent::Turn(TurnEvent::Cancelled { turn_id }))
                                     .await;
                             }
                         }
@@ -1061,58 +1072,58 @@ impl SessionRuntimeFactory for FakeFactory {
                                 PlanDecision::Revise => {
                                     selected_mode = SessionMode::Plan;
                                     let _ = events_tx
-                                        .send(SessionEvent::ModeChanged {
+                                        .send(SessionEvent::Turn(TurnEvent::ModeChanged {
                                             mode: selected_mode,
-                                        })
+                                        }))
                                         .await;
                                     let _ = events_tx
-                                        .send(SessionEvent::PlanStateChanged {
-                                            state: PlanWorkflowState::Planning {
+                                        .send(SessionEvent::Plan(PlanEvent::StateChanged {
+                                            state: Box::new(PlanWorkflowState::Planning {
                                                 id: artifact.version.id,
                                                 previous: Some(artifact),
                                                 draft: None,
-                                            },
-                                        })
+                                            }),
+                                        }))
                                         .await;
                                 }
                                 PlanDecision::ImplementCurrent => {
                                     selected_mode = SessionMode::Build;
                                     let _ = events_tx
-                                        .send(SessionEvent::ModeChanged {
+                                        .send(SessionEvent::Turn(TurnEvent::ModeChanged {
                                             mode: selected_mode,
-                                        })
+                                        }))
                                         .await;
                                     let _ = events_tx
-                                        .send(SessionEvent::PlanStateChanged {
-                                            state: PlanWorkflowState::Resolved {
+                                        .send(SessionEvent::Plan(PlanEvent::StateChanged {
+                                            state: Box::new(PlanWorkflowState::Resolved {
                                                 artifact: artifact.clone(),
                                                 resolution: PlanResolution::ImplementedCurrent,
-                                            },
-                                        })
+                                            }),
+                                        }))
                                         .await;
                                     let turn_id = TurnId::new(next_turn);
                                     next_turn += 1;
                                     let handoff =
                                         PlanHandoff::new(artifact, runtime_session_id.clone());
                                     let _ = events_tx
-                                        .send(SessionEvent::PlanHandoffStarted {
+                                        .send(SessionEvent::Plan(PlanEvent::HandoffStarted {
                                             turn_id,
-                                            handoff: handoff.clone(),
-                                        })
+                                            handoff: Box::new(handoff.clone()),
+                                        }))
                                         .await;
                                     let _ = events_tx
-                                        .send(SessionEvent::TurnStarted {
+                                        .send(SessionEvent::Turn(TurnEvent::Started {
                                             turn_id,
                                             message: handoff.prompt,
                                             mode: SessionMode::Build,
-                                        })
+                                        }))
                                         .await;
                                     let _ = events_tx
-                                        .send(SessionEvent::TurnCompleted {
+                                        .send(SessionEvent::Turn(TurnEvent::Completed {
                                             attempt_id: None,
                                             turn_id,
                                             message: Message::assistant("implemented plan"),
-                                        })
+                                        }))
                                         .await;
                                 }
                                 PlanDecision::ImplementFresh => {}

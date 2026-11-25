@@ -213,7 +213,7 @@ fn prompt_phase_badges_use_icons_and_keep_attempts_colors_and_copy() {
                 separator_before: false,
                 item_gap_before: false,
                 selected: false,
-                folded: zevria_presentation::fold::BlockFold::Expanded,
+                folded: crate::fold::BlockFold::Expanded,
                 reasoning_heading: false,
                 appearance: TranscriptAppearance::Acp,
             },
@@ -841,8 +841,8 @@ fn snapshots_and_mirrors_upsert_one_outcome_in_either_order_and_keep_independent
                 assert!(!notices(&app)[0].1.contains("remains available"));
                 assert!(blocks(&app).any(|block| matches!(&block.kind, PresentationBlockKind::Error(text) if text == "provider down")));
             }
-            state.synthesis_error = Some("payload is too large".into());
-            state.diagnostic = Some("connection unavailable".into());
+            state.proposals.synthesis_error = Some("payload is too large".into());
+            state.connection_diagnostic = Some("connection unavailable".into());
             reducer.apply_review_snapshot(app.conversation_projection_mut(), &state);
             reducer.apply_review_snapshot(app.conversation_projection_mut(), &state);
             assert_eq!(notices(&app).len(), 3);

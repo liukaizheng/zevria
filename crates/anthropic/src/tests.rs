@@ -2,6 +2,7 @@ use super::*;
 use rig_core::message::Message;
 use serde_json::json;
 use zevria_foundation::{ModelProfileRef, ModelRole, ReasoningLevel};
+use zevria_model::RetryCategory;
 use zevria_model::{ModelRequest, ModelRequestItem, ProviderReplay, ReplayMessage};
 
 #[test]
@@ -28,7 +29,7 @@ fn thinking_binding_survives_a_tool_loop_and_strips_after_system_edit() {
     let first = project::project(
         &[ModelRequestItem::message(&user)],
         &target,
-        true,
+        &crate::Compatibility::default(),
         &system,
         &tools,
         false,
@@ -56,12 +57,20 @@ fn thinking_binding_survives_a_tool_loop_and_strips_after_system_edit() {
         ModelRequestItem::replay_backed(&replay),
         ModelRequestItem::message(&result),
     ];
-    let same = project::project(&input, &target, true, &system, &tools, false).unwrap();
+    let same = project::project(
+        &input,
+        &target,
+        &crate::Compatibility::default(),
+        &system,
+        &tools,
+        false,
+    )
+    .unwrap();
     assert_eq!(same.messages[1]["content"][0], replay.replay().items[0]);
     let changed = project::project(
         &input,
         &target,
-        true,
+        &crate::Compatibility::default(),
         &json!([{"type":"text","text":"changed"}]),
         &tools,
         false,
@@ -162,7 +171,10 @@ fn stream_preserves_signature_and_rejects_invalid_json_and_unknown_deltas() {
     let error = stream
         .push(r#"{"type":"content_block_stop","index":0}"#)
         .unwrap_err();
-    assert_eq!(error.kind, error::ErrorKind::Retryable("invalid_tool_json"));
+    assert_eq!(
+        error.kind,
+        error::ErrorKind::Retryable(RetryCategory::InvalidToolJson)
+    );
 }
 
 #[test]

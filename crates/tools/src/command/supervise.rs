@@ -28,7 +28,7 @@ pub(super) fn spawn_job(
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let worker = job.clone();
-    let task = tokio::spawn(async move {
+    job.spawn_supervisor(async move {
         let (status, drained) = {
             // Poll drains with the supervisor so pipes cannot back up. This scope
             // drops the readers and child borrow before disarming the tree guard.
@@ -97,9 +97,7 @@ pub(super) fn spawn_job(
         };
         tree.disarm();
         worker.finish(status).await;
-    });
-    job.set_supervisor(task.abort_handle());
-    Ok(())
+    })
 }
 async fn drain(
     mut stream: impl AsyncRead + Unpin,

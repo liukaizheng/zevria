@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::TurnEvent;
 
 #[tokio::test]
 async fn submit_edit_replaces_the_message_and_rewrites_the_transcript() {
@@ -80,7 +81,7 @@ async fn submit_edit_replaces_the_message_and_rewrites_the_transcript() {
         .await
         .into_iter()
         .filter_map(|event| match event {
-            SessionEvent::TurnStarted { message, .. } => Some(message),
+            SessionEvent::Turn(TurnEvent::Started { message, .. }) => Some(message),
             _ => None,
         })
         .next_back()
@@ -141,7 +142,7 @@ async fn submit_edit_out_of_range_fails_without_touching_history_or_transcript()
         collect_events(&mut receiver)
             .await
             .iter()
-            .any(|event| { matches!(event, SessionEvent::TurnRejected { .. }) })
+            .any(|event| { matches!(event, SessionEvent::Turn(TurnEvent::Rejected { .. })) })
     );
 }
 

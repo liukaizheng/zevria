@@ -64,7 +64,6 @@ async fn native_id_collision_rebuilds_wire_prefix_and_forces_full_replay_before_
         "session",
         "stable-cache-key",
     )
-    .await
     .unwrap();
     let call = zevria_content::message::tool_call_from_wire(
         "portable_item",

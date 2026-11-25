@@ -4,6 +4,7 @@ use zevria_model::models::ModelManagementRequest;
 use zevria_model::models::ModelSelectionPreview;
 use zevria_model::models::ModelSelectionScope;
 use zevria_model::models::ModelSettingsService;
+use zevria_session_api::TurnEvent;
 use zevria_transcript::test_support::TranscriptRewriteBlocker;
 
 fn engine() -> (tempfile::TempDir, SessionEngine<ScriptedProvider>) {
@@ -481,7 +482,7 @@ async fn invalid_committed_replay_is_fatal_but_a_cancelled_response_never_commit
             assert!(
                 events
                     .iter()
-                    .any(|event| matches!(event, SessionEvent::TurnCancelled { .. }))
+                    .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Cancelled { .. })))
             );
             continue;
         }
@@ -504,9 +505,9 @@ async fn invalid_committed_replay_is_fatal_but_a_cancelled_response_never_commit
         let events = collect_events(&mut receiver).await;
         assert!(!events.iter().any(|event| matches!(
             event,
-            SessionEvent::TurnCompleted { .. }
-                | SessionEvent::TurnFailed { .. }
-                | SessionEvent::TurnCancelled { .. }
+            SessionEvent::Turn(TurnEvent::Completed { .. })
+                | SessionEvent::Turn(TurnEvent::Failed { .. })
+                | SessionEvent::Turn(TurnEvent::Cancelled { .. })
         )));
         let path = engine.conversation.path().to_path_buf();
         let bytes = std::fs::read(&path).unwrap();
@@ -520,9 +521,9 @@ async fn invalid_committed_replay_is_fatal_but_a_cancelled_response_never_commit
             .unwrap();
         let (blocked, _receiver) = session_event_channel(1);
         blocked
-            .try_send(SessionEvent::TurnCancelled {
+            .try_send(SessionEvent::Turn(TurnEvent::Cancelled {
                 turn_id: TurnId::new(99),
-            })
+            }))
             .unwrap();
         let returned = tokio::time::timeout(
             std::time::Duration::from_secs(1),
@@ -693,9 +694,9 @@ async fn cancellation_after_prompt_commit_preserves_count_until_the_next_measure
     );
     let (events, mut receiver) = session_event_channel(1);
     events
-        .try_send(SessionEvent::TurnCancelled {
+        .try_send(SessionEvent::Turn(TurnEvent::Cancelled {
             turn_id: TurnId::new(0),
-        })
+        }))
         .unwrap();
     {
         let execution = engine.handle_turn(
@@ -723,7 +724,7 @@ async fn cancellation_after_prompt_commit_preserves_count_until_the_next_measure
         receiver.try_recv().unwrap();
         let (result, ()) = tokio::join!(execution, async {
             while let Some(update) = receiver.recv().await {
-                if matches!(update, SessionUpdate::Lifecycle(SessionEvent::TurnCancelled { turn_id }) if turn_id == first.id)
+                if matches!(update, SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Cancelled { turn_id })) if turn_id == first.id)
                 {
                     break;
                 }

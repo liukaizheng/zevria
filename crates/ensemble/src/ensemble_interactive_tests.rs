@@ -90,6 +90,7 @@ async fn ensemble_restored_cancellation_settles_queued_feedback_without_starting
         evidence.acp_session_id = Some("previous-session".into());
         evidence.plan = journal
             .state
+            .proposals
             .candidate
             .as_ref()
             .map(|snapshot| snapshot.plan.clone());
@@ -106,7 +107,7 @@ async fn ensemble_restored_cancellation_settles_queued_feedback_without_starting
             },
         );
         let mut state = journal.state.clone();
-        let retained = state.retained.clone();
+        let retained = state.proposals.retained.clone();
         for event in [
             WorkerReviewEvent::InputAccepted {
                 input: WorkerInput {
@@ -147,7 +148,7 @@ async fn ensemble_restored_cancellation_settles_queued_feedback_without_starting
             )
             .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while state.settled_generation < 2 {
+            while state.inputs.settled_generation < 2 {
                 let update = execution
                     .updates
                     .recv()
@@ -158,13 +159,13 @@ async fn ensemble_restored_cancellation_settles_queued_feedback_without_starting
         })
         .await
         .expect("durably cancelled feedback settles without provider IO");
-        assert_eq!(state.cancel_requested, None);
+        assert_eq!(state.inputs.cancel_requested, None);
         assert_eq!(state.eligible_snapshot(), retained.as_ref());
-        assert!(state.confirmation.is_none());
-        assert!(!state.connected);
+        assert!(state.proposals.confirmation.is_none());
+        assert!(!state.connection.connected);
         assert!(
             state
-                .diagnostic
+                .diagnostic()
                 .as_deref()
                 .unwrap()
                 .contains("cancelled before startup")
@@ -326,10 +327,9 @@ for line in sys.stdin:
 
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::QuestionClosed {
-                request_id,
-                ..
-            })) = receiver.recv().await
+            if let Some(zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::Question(
+                QuestionEvent::Closed { request_id, .. },
+            ))) = receiver.recv().await
                 && request_id == question.id
             {
                 break;
@@ -347,7 +347,7 @@ for line in sys.stdin:
 
     let mut settled_first = false;
     tokio::time::timeout(Duration::from_secs(10), async {
-        while state.settled_generation < 2 {
+        while state.inputs.settled_generation < 2 {
             let update = execution
                 .updates
                 .recv()
@@ -372,7 +372,10 @@ for line in sys.stdin:
     .await
     .expect("held elicitation cancellation and queued successor settle");
     assert!(settled_first);
-    assert!(state.connected, "worker-local cancellation keeps the ACP connection");
+    assert!(
+        state.connection.connected,
+        "worker-local cancellation keeps the ACP connection"
+    );
     assert_eq!(
         state.evidence.acp_session_id.as_deref(),
         Some("held-cancel-session")
@@ -558,7 +561,11 @@ for line in sys.stdin:
             .all(|state| state.eligible_snapshot().is_some())
     })
     .await;
-    assert!(states.iter().all(|state| state.confirmation.is_none()));
+    assert!(
+        states
+            .iter()
+            .all(|state| state.proposals.confirmation.is_none())
+    );
     for state in &states {
         let records =
             load_agent_run(&agent_run_path(&logs, &start.run_id, &state.descriptor.id)).unwrap();
@@ -572,7 +579,7 @@ for line in sys.stdin:
     for text in ["prose", "revise"] {
         let state = &mut states[0];
         let input = WorkerInput {
-            generation: state.accepted_generation + 1,
+            generation: state.inputs.accepted_generation + 1,
             request_id: WorkerControlId::new(),
             kind: WorkerPromptKind::UserFeedback,
             text: text.into(),
@@ -587,7 +594,7 @@ for line in sys.stdin:
             .unwrap();
     }
     until(&mut execution, &mut states, |states| {
-        states[0].settled_generation == 3
+        states[0].inputs.settled_generation == 3
     })
     .await;
     assert_eq!(states[0].evidence.acp_session_id, first_session);
@@ -600,7 +607,7 @@ for line in sys.stdin:
             .as_deref(),
         Some("# Proposal a revised")
     );
-    let retained = states[0].retained.clone();
+    let retained = states[0].proposals.retained.clone();
     let input = WorkerInput {
         generation: 4,
         request_id: WorkerControlId::new(),
@@ -616,16 +623,16 @@ for line in sys.stdin:
         .send(WorkerActorCommand::Prompt(input))
         .unwrap();
     until(&mut execution, &mut states, |states| {
-        states[0].settled_generation == 4
+        states[0].inputs.settled_generation == 4
     })
     .await;
     assert_eq!(states[0].eligible_snapshot(), retained.as_ref());
-    assert!(!states[0].connected);
-    assert!(states[0].confirmation.is_none());
+    assert!(!states[0].connection.connected);
+    assert!(states[0].proposals.confirmation.is_none());
     // A subsequent input recovers the established conversation, not a new session.
     for text in ["revise", "hang"] {
         let input = WorkerInput {
-            generation: states[0].accepted_generation + 1,
+            generation: states[0].inputs.accepted_generation + 1,
             request_id: WorkerControlId::new(),
             kind: WorkerPromptKind::UserFeedback,
             text: text.into(),
@@ -640,7 +647,7 @@ for line in sys.stdin:
             .unwrap();
         if text == "revise" {
             until(&mut execution, &mut states, |states| {
-                states[0].settled_generation == 5
+                states[0].inputs.settled_generation == 5
             })
             .await;
         }
@@ -681,11 +688,11 @@ for line in sys.stdin:
         .send(WorkerActorCommand::Prompt(input))
         .unwrap();
     until(&mut execution, &mut states, |states| {
-        states[0].settled_generation >= 6
+        states[0].inputs.settled_generation >= 6
     })
     .await;
     assert!(
-        states[0].connected,
+        states[0].connection.connected,
         "cooperative prompt cancellation preserves the healthy connection"
     );
     assert!(
@@ -697,13 +704,13 @@ for line in sys.stdin:
         .send(WorkerActorCommand::CancelPrompt { generation: 6 })
         .unwrap();
     until(&mut execution, &mut states, |states| {
-        states[0].settled_generation == 7
+        states[0].inputs.settled_generation == 7
     })
     .await;
     assert_eq!(states[0].evidence.acp_session_id, first_session);
     assert!(states[0].evidence.failure.is_none());
-    assert!(states[0].connected);
-    let retained_b = states[1].retained.clone();
+    assert!(states[0].connection.connected);
+    let retained_b = states[1].proposals.retained.clone();
     let input = WorkerInput {
         generation: 2,
         request_id: WorkerControlId::new(),
@@ -719,10 +726,10 @@ for line in sys.stdin:
         .send(WorkerActorCommand::Prompt(input))
         .unwrap();
     until(&mut execution, &mut states, |states| {
-        states[1].settled_generation == 2
+        states[1].inputs.settled_generation == 2
     })
     .await;
-    assert!(!states[1].connected);
+    assert!(!states[1].connection.connected);
     assert_eq!(states[1].eligible_snapshot(), retained_b.as_ref());
     // Explicit confirmation/baseline marking of b's disconnected fallback does not reconnect.
     // No prompt settlement or native publication implicitly confirmed a worker.
@@ -740,11 +747,13 @@ for line in sys.stdin:
                 },
             })
             .unwrap();
-        if !state.connected {
-            let mut marking = state.confirmation.clone().unwrap();
+        if !state.connection.connected {
+            let mut marking = state.proposals.confirmation.clone().unwrap();
             marking.request_id = WorkerControlId::new();
             marking.target.turn_id = TurnId::new(turn.id.get() + 1);
-            state.apply(&WorkerReviewEvent::BaselineMarked { receipt: marking }).unwrap();
+            state
+                .apply(&WorkerReviewEvent::BaselineMarked { receipt: marking })
+                .unwrap();
         }
         let (tx, rx) = oneshot::channel();
         execution.commands[&state.descriptor.id]
@@ -756,34 +765,92 @@ for line in sys.stdin:
         rx.await.unwrap().unwrap();
     }
     for state in &states {
-        let records = load_agent_run(&agent_run_path(&logs, &start.run_id, &state.descriptor.id)).unwrap();
-        let marks = records.iter().filter_map(|record| match record {
-            AgentRunTranscriptRecord::Event { event: AgentRunEvent::Review { event } } => match event.as_ref() { WorkerReviewEvent::BaselineMarked { receipt } => Some(receipt), _ => None },
-            _ => None,
-        }).collect::<Vec<_>>();
-        assert_eq!(marks, state.baseline.iter().collect::<Vec<_>>());
-        assert_eq!(records.last(), Some(&AgentRunTranscriptRecord::Outcome { outcome: state.outcome() }));
-        if state.baseline.is_some() {
+        let records =
+            load_agent_run(&agent_run_path(&logs, &start.run_id, &state.descriptor.id)).unwrap();
+        let marks = records
+            .iter()
+            .filter_map(|record| match record {
+                AgentRunTranscriptRecord::Event {
+                    event: AgentRunEvent::Review { event },
+                } => match event.as_ref() {
+                    WorkerReviewEvent::BaselineMarked { receipt } => Some(receipt),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(marks, state.proposals.baseline.iter().collect::<Vec<_>>());
+        assert_eq!(
+            records.last(),
+            Some(&AgentRunTranscriptRecord::Outcome {
+                outcome: state.outcome()
+            })
+        );
+        if state.proposals.baseline.is_some() {
             // Crash after the authoritative root seal but before any terminal
             // audit mirror/outcome: retain only execution evidence in this log.
-            let retained = records.iter().filter(|record| match record {
-                AgentRunTranscriptRecord::Outcome { .. } => false,
-                AgentRunTranscriptRecord::Event { event: AgentRunEvent::Review { event } } => !matches!(event.as_ref(), WorkerReviewEvent::Confirmed { .. } | WorkerReviewEvent::BaselineMarked { .. } | WorkerReviewEvent::Sealed),
-                _ => true,
-            }).map(|record| serde_json::to_string(record).unwrap()).collect::<Vec<_>>().join("\n") + "\n";
-            std::fs::write(agent_run_path(&logs, &start.run_id, &state.descriptor.id), retained).unwrap();
+            let retained = records
+                .iter()
+                .filter(|record| match record {
+                    AgentRunTranscriptRecord::Outcome { .. } => false,
+                    AgentRunTranscriptRecord::Event {
+                        event: AgentRunEvent::Review { event },
+                    } => !matches!(
+                        event.as_ref(),
+                        WorkerReviewEvent::Confirmed { .. }
+                            | WorkerReviewEvent::BaselineMarked { .. }
+                            | WorkerReviewEvent::Sealed
+                    ),
+                    _ => true,
+                })
+                .map(|record| serde_json::to_string(record).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            std::fs::write(
+                agent_run_path(&logs, &start.run_id, &state.descriptor.id),
+                retained,
+            )
+            .unwrap();
         }
     }
-    let outcomes = states.iter().map(WorkerReviewState::outcome).collect::<Vec<_>>();
+    let outcomes = states
+        .iter()
+        .map(WorkerReviewState::outcome)
+        .collect::<Vec<_>>();
     let (events, mut receiver) = session_event_channel(256);
     let replay_drain = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
-    let finalized = supervisor.finalize_review(EnsembleLaunchRequest { start: start.clone(), resume: true }, outcomes.clone(), events, turn.clone()).await.unwrap();
+    let finalized = supervisor
+        .finalize_review(
+            EnsembleLaunchRequest {
+                start: start.clone(),
+                resume: true,
+            },
+            outcomes.clone(),
+            events,
+            turn.clone(),
+        )
+        .await
+        .unwrap();
     assert_eq!(finalized, outcomes);
     replay_drain.await.unwrap();
-    let selected = states.iter().find(|state| state.baseline.is_some()).unwrap();
-    let records = load_agent_run(&agent_run_path(&logs, &start.run_id, &selected.descriptor.id)).unwrap();
-    assert!(records.iter().any(|record| matches!(record, AgentRunTranscriptRecord::Event { event: AgentRunEvent::Review { event } } if matches!(event.as_ref(), WorkerReviewEvent::BaselineMarked { receipt } if Some(receipt) == selected.baseline.as_ref()))));
-    assert_eq!(records.last(), Some(&AgentRunTranscriptRecord::Outcome { outcome: selected.outcome() }));
+    let selected = states
+        .iter()
+        .find(|state| state.proposals.baseline.is_some())
+        .unwrap();
+    let records = load_agent_run(&agent_run_path(
+        &logs,
+        &start.run_id,
+        &selected.descriptor.id,
+    ))
+    .unwrap();
+    assert!(records.iter().any(|record| matches!(record, AgentRunTranscriptRecord::Event { event: AgentRunEvent::Review { event } } if matches!(event.as_ref(), WorkerReviewEvent::BaselineMarked { receipt } if Some(receipt) == selected.proposals.baseline.as_ref()))));
+    assert_eq!(
+        records.last(),
+        Some(&AgentRunTranscriptRecord::Outcome {
+            outcome: selected.outcome()
+        })
+    );
     let requests = std::fs::read_to_string(trace)
         .unwrap()
         .lines()

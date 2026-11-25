@@ -81,9 +81,9 @@ fn assert_status_tokens_and_selection() {
                             item_gap_before: false,
                             selected,
                             folded: if folded {
-                                zevria_presentation::fold::BlockFold::Preview
+                                crate::fold::BlockFold::Preview
                             } else {
-                                zevria_presentation::fold::BlockFold::Expanded
+                                crate::fold::BlockFold::Expanded
                             },
                             reasoning_heading: false,
                             appearance: TranscriptAppearance::Native,

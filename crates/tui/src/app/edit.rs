@@ -16,15 +16,7 @@ pub(crate) enum EditState {
     Recalling(RecallEdit),
     AwaitingAcceptance {
         recall: RecallEdit,
-        #[cfg(test)]
-        compacted: bool,
     },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct AcceptedEdit {
-    pub(crate) target_index: usize,
-    pub(crate) compacted: bool,
 }
 
 impl EditState {
@@ -83,41 +75,13 @@ impl EditState {
             return None;
         };
         let target = edit.target.clone();
-        *self = Self::AwaitingAcceptance {
-            #[cfg(test)]
-            compacted: false,
-            recall: edit,
-        };
+        *self = Self::AwaitingAcceptance { recall: edit };
         Some(target)
     }
 
-    #[cfg(test)]
-    pub(crate) fn mark_automatic_pre_turn_compaction(&mut self) -> bool {
-        let Self::AwaitingAcceptance { compacted, .. } = self else {
-            return false;
-        };
-        *compacted = true;
-        true
-    }
-
-    pub(crate) fn accept(&mut self) -> Option<AcceptedEdit> {
-        let state = std::mem::take(self);
-        match state {
-            Self::AwaitingAcceptance {
-                recall,
-                #[cfg(test)]
-                compacted,
-            } => Some(AcceptedEdit {
-                target_index: recall.target_index,
-                #[cfg(test)]
-                compacted,
-                #[cfg(not(test))]
-                compacted: false,
-            }),
-            state @ (Self::None | Self::Recalling(_)) => {
-                *self = state;
-                None
-            }
+    pub(crate) fn accept(&mut self) {
+        if self.is_awaiting_acceptance() {
+            *self = Self::None;
         }
     }
 
@@ -157,14 +121,7 @@ mod tests {
         }));
         assert_eq!(state.stage_submission(), Some(target));
         assert!(state.is_awaiting_acceptance());
-        assert!(state.mark_automatic_pre_turn_compaction());
-        assert_eq!(
-            state.accept(),
-            Some(AcceptedEdit {
-                target_index: 2,
-                compacted: true,
-            })
-        );
+        state.accept();
         assert!(state.is_none());
     }
 }

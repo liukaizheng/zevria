@@ -3,23 +3,25 @@
 use super::*;
 use crate::app::{ConversationTail, RetryCountdown};
 use std::time::{Duration, Instant};
+use zevria_session_api::SessionStreamState;
+use zevria_session_api::{EnsembleEvent, PlanEvent, SubtaskEvent, TurnEvent};
 
 fn start_at(app: &mut App, now: Instant) {
     reduce_at(
         app,
-        SessionEvent::TurnStarted {
+        SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::User {
                 content: Vec::new(),
             },
             mode: SessionMode::Build,
-        },
+        }),
         now,
     );
 }
 
-fn reduce_at(app: &mut App, event: SessionEvent, now: Instant) {
-    assert!(app.reduce_at(event, now).is_empty());
+fn reduce_at(app: &mut App, event: impl Into<zevria_session_api::SessionUpdate>, now: Instant) {
+    assert!(app.apply_test_update_at(event, now).is_empty());
 }
 
 fn elapsed(app: &mut App) -> Option<Duration> {
@@ -33,14 +35,14 @@ fn elapsed(app: &mut App) -> Option<Duration> {
 }
 
 fn retry_event(attempt: usize, delay: Duration, error: &str) -> SessionEvent {
-    SessionEvent::TurnRetrying {
+    SessionEvent::Turn(TurnEvent::Retrying {
         call: 1,
         turn_id: TEST_TURN_ID,
         attempt,
         retrying_for: std::time::Duration::from_secs(280),
         retry_after: delay,
         error: error.into(),
-    }
+    })
 }
 
 fn network_event(
@@ -48,13 +50,13 @@ fn network_event(
     attempt: usize,
     status: zevria_session_api::event::NetworkStatus,
 ) -> SessionEvent {
-    SessionEvent::NetworkStatus {
+    SessionEvent::Turn(TurnEvent::NetworkStatus {
         turn_id: TEST_TURN_ID,
         call,
         attempt,
         transport: zevria_session_api::event::NetworkTransport::Http,
         status,
-    }
+    })
 }
 
 #[test]
@@ -126,20 +128,22 @@ fn routine_first_attempts_keep_the_ordinary_display_for_each_model_call() {
         let mut app = App::new();
         let now = Instant::now();
         start_at(&mut app, now);
-        let status = |call, attempt, status| SessionEvent::NetworkStatus {
-            turn_id: TEST_TURN_ID,
-            call,
-            attempt,
-            transport,
-            status,
+        let status = |call, attempt, status| {
+            SessionEvent::Turn(TurnEvent::NetworkStatus {
+                turn_id: TEST_TURN_ID,
+                call,
+                attempt,
+                transport,
+                status,
+            })
         };
         for call in [1, 2] {
             reduce_at(
                 &mut app,
-                SessionEvent::ModelCallStarted {
+                SessionEvent::Turn(TurnEvent::ModelCallStarted {
                     turn_id: TEST_TURN_ID,
                     call,
-                },
+                }),
                 now,
             );
             let waiting = rendered_text(&mut app, 160, 20);
@@ -155,10 +159,7 @@ fn routine_first_attempts_keep_the_ordinary_display_for_each_model_call() {
             }
             reduce_at(
                 &mut app,
-                SessionEvent::AssistantStreamUpdated {
-                    turn_id: TEST_TURN_ID,
-                    snapshot: Message::assistant("normal preview").into(),
-                },
+                SessionStreamState::new(TEST_TURN_ID, Message::assistant("normal preview").into()),
                 now,
             );
             let streaming = rendered_text(&mut app, 160, 20);
@@ -197,12 +198,14 @@ fn retry_attempts_still_show_transport_phases_and_clear_the_countdown() {
             retry_event(2, Duration::from_secs(1), "offline"),
             now,
         );
-        let status = |status| SessionEvent::NetworkStatus {
-            turn_id: TEST_TURN_ID,
-            call: 1,
-            attempt: 2,
-            transport,
-            status,
+        let status = |status| {
+            SessionEvent::Turn(TurnEvent::NetworkStatus {
+                turn_id: TEST_TURN_ID,
+                call: 1,
+                attempt: 2,
+                transport,
+                status,
+            })
         };
         for (phase, text) in [
             (
@@ -242,10 +245,10 @@ fn network_warning_preserves_preview_and_rejects_stale_call_attempt_and_turn_sta
     start_at(&mut app, now);
     reduce_at(
         &mut app,
-        SessionEvent::ModelCallStarted {
+        SessionEvent::Turn(TurnEvent::ModelCallStarted {
             turn_id: TEST_TURN_ID,
             call: 1,
-        },
+        }),
         now,
     );
     reduce_at(
@@ -255,10 +258,10 @@ fn network_warning_preserves_preview_and_rejects_stale_call_attempt_and_turn_sta
     );
     reduce_at(
         &mut app,
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: Message::assistant("preview stays visible").into(),
-        },
+        SessionStreamState::new(
+            TEST_TURN_ID,
+            Message::assistant("preview stays visible").into(),
+        ),
         now,
     );
     let quiet = NetworkStatus::Quiet {
@@ -277,10 +280,10 @@ fn network_warning_preserves_preview_and_rejects_stale_call_attempt_and_turn_sta
     // A coalesced/repeated snapshot is not evidence of classified progress.
     reduce_at(
         &mut app,
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: Message::assistant("preview stays visible").into(),
-        },
+        SessionStreamState::new(
+            TEST_TURN_ID,
+            Message::assistant("preview stays visible").into(),
+        ),
         now + Duration::from_secs(31),
     );
     assert!(rendered_text(&mut app, 160, 20).contains("No response progress"));
@@ -311,10 +314,10 @@ fn network_warning_preserves_preview_and_rejects_stale_call_attempt_and_turn_sta
     assert!(!rendered_text(&mut app, 160, 20).contains("No response progress"));
     reduce_at(
         &mut app,
-        SessionEvent::ModelCallStarted {
+        SessionEvent::Turn(TurnEvent::ModelCallStarted {
             turn_id: TEST_TURN_ID,
             call: 2,
-        },
+        }),
         now + Duration::from_secs(183),
     );
     reduce_at(
@@ -331,9 +334,9 @@ fn network_warning_preserves_preview_and_rejects_stale_call_attempt_and_turn_sta
     assert!(app.render_parts().network_status.is_some());
     reduce_at(
         &mut app,
-        SessionEvent::TurnCancelled {
+        SessionEvent::Turn(TurnEvent::Cancelled {
             turn_id: TEST_TURN_ID,
-        },
+        }),
         now + Duration::from_secs(186),
     );
     reduce_at(
@@ -352,34 +355,30 @@ fn child_network_warning_is_isolated_from_root_preview_and_cleared_on_completion
     start_at(&mut root, now);
     reduce_at(
         &mut root,
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: Message::assistant("root preview").into(),
-        },
+        SessionStreamState::new(TEST_TURN_ID, Message::assistant("root preview").into()),
         now,
     );
     let mut views = test_session_views(root);
     let id = SubtaskId::new("network-child");
-    views.apply(SessionEvent::SubtaskLaunched {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
         turn_id: TEST_TURN_ID,
         call_id: "launch".into(),
         entry_index: 0,
-        descriptor: child_descriptor("network-child", "network child"),
-    });
-    for event in [
-        SessionEvent::TurnStarted {
+        descriptor: Box::new(child_descriptor("network-child", "network child")),
+    }));
+    let updates: [zevria_session_api::SessionUpdate; 4] = [
+        SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("child"),
             mode: SessionMode::Build,
-        },
-        SessionEvent::ModelCallStarted {
+        })
+        .into(),
+        SessionEvent::Turn(TurnEvent::ModelCallStarted {
             turn_id: TEST_TURN_ID,
             call: 1,
-        },
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: Message::assistant("child preview").into(),
-        },
+        })
+        .into(),
+        SessionStreamState::new(TEST_TURN_ID, Message::assistant("child preview").into()).into(),
         network_event(
             1,
             1,
@@ -388,26 +387,38 @@ fn child_network_warning_is_isolated_from_root_preview_and_cleared_on_completion
                 will_retry: true,
                 retry_in: Duration::from_secs(150),
             },
-        ),
-    ] {
-        views.apply(SessionEvent::SubtaskSession {
-            id: id.clone(),
-            event: Box::new(event),
-        });
+        )
+        .into(),
+    ];
+    for update in updates {
+        match update {
+            zevria_session_api::SessionUpdate::Lifecycle(event) => {
+                views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
+                    id: id.clone(),
+                    event: Box::new(event),
+                }))
+            }
+            zevria_session_api::SessionUpdate::Streams(mut batch) => {
+                batch
+                    .subtasks
+                    .insert(id.clone(), batch.root.take().unwrap());
+                views.apply_streams(batch);
+            }
+        }
     }
     let text = rendered_views_text(&mut views, 160, 25);
     assert!(text.contains("root preview") && !text.contains("No response progress"));
     views.handle_event(ctrl('i'));
     let text = rendered_views_text(&mut views, 160, 25);
     assert!(text.contains("child preview") && text.contains("No response progress"));
-    views.apply(SessionEvent::SubtaskSession {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
         id,
-        event: Box::new(SessionEvent::TurnCompleted {
+        event: Box::new(SessionEvent::Turn(TurnEvent::Completed {
             turn_id: TEST_TURN_ID,
             message: Message::assistant("child complete"),
             attempt_id: None,
-        }),
-    });
+        })),
+    }));
     assert!(!rendered_views_text(&mut views, 160, 25).contains("No response progress"));
 }
 
@@ -429,18 +440,15 @@ fn actual_tail_spinner_is_info_colored_independently_of_headline() {
         match phase {
             "streaming" => reduce_at(
                 &mut app,
-                SessionEvent::AssistantStreamUpdated {
-                    turn_id: TEST_TURN_ID,
-                    snapshot: (Message::assistant("cached body")).into(),
-                },
+                SessionStreamState::new(TEST_TURN_ID, (Message::assistant("cached body")).into()),
                 now,
             ),
             "compacting" => reduce_at(
                 &mut app,
-                SessionEvent::CompactionStarted {
+                SessionEvent::Turn(TurnEvent::CompactionStarted {
                     turn_id: TEST_TURN_ID,
                     trigger: CompactionTrigger::AutomaticMidTurn,
-                },
+                }),
                 now,
             ),
             "retrying" => reduce_at(
@@ -487,10 +495,10 @@ fn numbered_header_only_tail_refreshes_decoration_outside_selection_and_gutter()
     start_at(&mut app, now);
     reduce_at(
         &mut app,
-        SessionEvent::ModelCallStarted {
+        SessionEvent::Turn(TurnEvent::ModelCallStarted {
             turn_id: TEST_TURN_ID,
             call: 1,
-        },
+        }),
         now,
     );
     let reference = rendered_buffer(&mut app, 100, 20);
@@ -541,10 +549,7 @@ fn numbered_header_only_tail_refreshes_decoration_outside_selection_and_gutter()
     }
     reduce_at(
         &mut app,
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: (opaque_reasoning_message()).into(),
-        },
+        SessionStreamState::new(TEST_TURN_ID, (opaque_reasoning_message()).into()),
         now + Duration::from_secs(2),
     );
     assert_eq!(
@@ -563,10 +568,10 @@ fn numbered_header_only_tail_refreshes_decoration_outside_selection_and_gutter()
     assert!(text.contains("● Assistant · #(1 - 1) · 3s"));
     reduce_at(
         &mut app,
-        SessionEvent::CompactionStarted {
+        SessionEvent::Turn(TurnEvent::CompactionStarted {
             turn_id: TEST_TURN_ID,
             trigger: CompactionTrigger::AutomaticMidTurn,
-        },
+        }),
         now + Duration::from_secs(4),
     );
     let text = rendered_text(&mut app, 100, 20);
@@ -574,9 +579,9 @@ fn numbered_header_only_tail_refreshes_decoration_outside_selection_and_gutter()
     assert!(text.contains("● Assistant · #(1 - 1) · 4s"));
     reduce_at(
         &mut app,
-        SessionEvent::TurnCancelled {
+        SessionEvent::Turn(TurnEvent::Cancelled {
             turn_id: TEST_TURN_ID,
-        },
+        }),
         now + Duration::from_secs(5),
     );
     assert!(!rendered_text(&mut app, 100, 20).contains("● Assistant"));
@@ -602,18 +607,15 @@ fn timed_stream_headers_advance_without_tokens_or_semantic_body_rebuilds() {
             start_at(&mut app, now);
             reduce_at(
                 &mut app,
-                SessionEvent::ModelCallStarted {
+                SessionEvent::Turn(TurnEvent::ModelCallStarted {
                     turn_id: TEST_TURN_ID,
                     call: 1,
-                },
+                }),
                 now,
             );
             reduce_at(
                 &mut app,
-                SessionEvent::AssistantStreamUpdated {
-                    turn_id: TEST_TURN_ID,
-                    snapshot: message.clone().into(),
-                },
+                SessionStreamState::new(TEST_TURN_ID, message.clone().into()),
                 now,
             );
             let buffer = rendered_buffer(&mut app, width, 30);
@@ -649,25 +651,25 @@ fn timed_stream_headers_advance_without_tokens_or_semantic_body_rebuilds() {
 #[test]
 fn terminals_freeze_uncommitted_clocks_without_retaining_transient_headers_or_bodies() {
     for terminal in [
-        SessionEvent::TurnCompleted {
+        SessionEvent::Turn(TurnEvent::Completed {
             turn_id: TEST_TURN_ID,
             message: opaque_reasoning_message(),
             attempt_id: None,
-        },
-        SessionEvent::TurnRecovered {
+        }),
+        SessionEvent::Turn(TurnEvent::Recovered {
             turn_id: TEST_TURN_ID,
-        },
-        SessionEvent::TurnFailed {
+        }),
+        SessionEvent::Turn(TurnEvent::Failed {
             turn_id: TEST_TURN_ID,
             error: "failed".into(),
-        },
-        SessionEvent::TurnRejected {
+        }),
+        SessionEvent::Turn(TurnEvent::Rejected {
             turn_id: TEST_TURN_ID,
             error: "rejected".into(),
-        },
-        SessionEvent::TurnCancelled {
+        }),
+        SessionEvent::Turn(TurnEvent::Cancelled {
             turn_id: TEST_TURN_ID,
-        },
+        }),
     ] {
         for streaming in [
             None,
@@ -679,20 +681,17 @@ fn terminals_freeze_uncommitted_clocks_without_retaining_transient_headers_or_bo
             start_at(&mut app, now);
             reduce_at(
                 &mut app,
-                SessionEvent::ModelCallStarted {
+                SessionEvent::Turn(TurnEvent::ModelCallStarted {
                     turn_id: TEST_TURN_ID,
                     call: 1,
-                },
+                }),
                 now + Duration::from_secs(3),
             );
             let header = app.render_parts().assistant_header.unwrap();
             if let Some(message) = streaming {
                 reduce_at(
                     &mut app,
-                    SessionEvent::AssistantStreamUpdated {
-                        turn_id: TEST_TURN_ID,
-                        snapshot: message.into(),
-                    },
+                    SessionStreamState::new(TEST_TURN_ID, message.into()),
                     now + Duration::from_secs(4),
                 );
             }
@@ -719,7 +718,9 @@ fn pending_clock_starts_at_input_lock_and_waiting_frames_derive_from_elapsed() {
     let now = Instant::now();
     assert!(matches!(
         app.handle_event_at(ctrl_enter(), now),
-        Some(UiAction::Submit { .. })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Submit { .. }
+        )))
     ));
     for (millis, glyph) in TIMED_FRAMES {
         app.observe_clock(now + Duration::from_millis(millis));
@@ -749,7 +750,7 @@ fn tools_keep_waiting_and_retry_tails_and_progress_replaces_the_notice() {
     start_at(&mut app, now);
     reduce_at(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -758,7 +759,7 @@ fn tools_keep_waiting_and_retry_tails_and_progress_replaces_the_notice() {
                 "command",
                 json!({"command": "slow tool"}),
             )]),
-        },
+        }),
         now + Duration::from_secs(12),
     );
     assert_eq!(tool_status(&app, 0, 0), ToolCallStatus::Executing);
@@ -812,7 +813,7 @@ fn tools_keep_waiting_and_retry_tails_and_progress_replaces_the_notice() {
     );
     reduce_at(
         &mut app,
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             turn_id: TEST_TURN_ID,
             message: Message::tool_result(
                 rig_core::message::CallId::from_wire("call-slow"),
@@ -820,7 +821,7 @@ fn tools_keep_waiting_and_retry_tails_and_progress_replaces_the_notice() {
                 "done",
             ),
             metadata: Vec::new(),
-        },
+        }),
         now + Duration::from_secs(15),
     );
     assert!(app.retry_notice().is_none());
@@ -848,10 +849,7 @@ fn streaming_status_animates_outside_caches_even_for_opaque_or_empty_bodies() {
         start_at(&mut app, now);
         reduce_at(
             &mut app,
-            SessionEvent::AssistantStreamUpdated {
-                turn_id: TEST_TURN_ID,
-                snapshot: message.into(),
-            },
+            SessionStreamState::new(TEST_TURN_ID, message.into()),
             now,
         );
         let first = rendered_text(&mut app, 100, 16);
@@ -1006,10 +1004,7 @@ fn retry_countdown_rounds_up_expires_without_recovery_and_uses_warning_style() {
     }
     reduce_at(
         &mut app,
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: (Message::assistant("resumed")).into(),
-        },
+        SessionStreamState::new(TEST_TURN_ID, (Message::assistant("resumed")).into()),
         received + Duration::from_secs(4),
     );
     assert!(app.retry_notice().is_none());
@@ -1041,10 +1036,10 @@ fn compaction_animates_without_a_header_and_keeps_whole_operation_time() {
         }
         reduce_at(
             &mut app,
-            SessionEvent::CompactionStarted {
+            SessionEvent::Turn(TurnEvent::CompactionStarted {
                 turn_id: TEST_TURN_ID,
                 trigger,
-            },
+            }),
             now + Duration::from_secs(12),
         );
         for (millis, glyph) in TIMED_FRAMES {
@@ -1066,11 +1061,11 @@ fn compaction_animates_without_a_header_and_keeps_whole_operation_time() {
         }
         reduce_at(
             &mut app,
-            SessionEvent::CompactionCompleted {
+            SessionEvent::Turn(TurnEvent::CompactionCompleted {
                 turn_id: TEST_TURN_ID,
                 trigger,
                 backend: CompactionBackend::LocalSummary,
-            },
+            }),
             now + Duration::from_secs(13),
         );
         if trigger == CompactionTrigger::Manual {
@@ -1096,7 +1091,9 @@ fn compaction_animates_without_a_header_and_keeps_whole_operation_time() {
     let now = Instant::now();
     assert!(matches!(
         manual.handle_event_at(ctrl_enter(), now),
-        Some(UiAction::Compact { .. })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Compact { .. }
+        )))
     ));
     for (millis, glyph) in TIMED_FRAMES {
         manual.observe_clock(now + Duration::from_millis(millis));
@@ -1110,25 +1107,25 @@ fn compaction_animates_without_a_header_and_keeps_whole_operation_time() {
 #[test]
 fn accepted_terminals_and_restoration_remove_timers_and_retry_notices() {
     for terminal in [
-        SessionEvent::TurnCompleted {
+        SessionEvent::Turn(TurnEvent::Completed {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: Message::assistant("done"),
-        },
-        SessionEvent::TurnRecovered {
+        }),
+        SessionEvent::Turn(TurnEvent::Recovered {
             turn_id: TEST_TURN_ID,
-        },
-        SessionEvent::TurnRejected {
+        }),
+        SessionEvent::Turn(TurnEvent::Rejected {
             turn_id: TEST_TURN_ID,
             error: "rejected".into(),
-        },
-        SessionEvent::TurnFailed {
+        }),
+        SessionEvent::Turn(TurnEvent::Failed {
             turn_id: TEST_TURN_ID,
             error: "failed".into(),
-        },
-        SessionEvent::TurnCancelled {
+        }),
+        SessionEvent::Turn(TurnEvent::Cancelled {
             turn_id: TEST_TURN_ID,
-        },
+        }),
     ] {
         for pending in [true, false] {
             let mut app = App::new();
@@ -1166,17 +1163,19 @@ fn pending_plan_decisions_hide_the_tail_and_settlement_does_not_leak_time() {
         let now = Instant::now();
         reduce_at(
             &mut app,
-            SessionEvent::PlanStateChanged {
-                state: PlanWorkflowState::Ready {
+            SessionEvent::Plan(PlanEvent::StateChanged {
+                state: Box::new(PlanWorkflowState::Ready {
                     artifact: artifact.clone(),
-                },
-            },
+                }),
+            }),
             now,
         );
         app.handle_event_at(key(KeyCode::Char(choice)), now);
         assert!(matches!(
             app.handle_event_at(key(KeyCode::Enter), now),
-            Some(UiAction::ResolvePlan { .. })
+            Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                zevria_session_api::TurnCommand::ResolvePlan { .. }
+            )))
         ));
         assert!(app.is_busy());
         app.observe_clock(now + Duration::from_secs(10));
@@ -1196,7 +1195,9 @@ fn pending_plan_decisions_hide_the_tail_and_settlement_does_not_leak_time() {
         };
         reduce_at(
             &mut app,
-            SessionEvent::PlanStateChanged { state },
+            SessionEvent::Plan(PlanEvent::StateChanged {
+                state: Box::new(state),
+            }),
             now + Duration::from_secs(12),
         );
         assert!(!app.is_busy());
@@ -1284,37 +1285,37 @@ fn child_call_clocks_are_independent_across_switches_and_hidden_completion() {
     start_at(&mut root, now);
     reduce_at(
         &mut root,
-        SessionEvent::ModelCallStarted {
+        SessionEvent::Turn(TurnEvent::ModelCallStarted {
             turn_id: TEST_TURN_ID,
             call: 1,
-        },
+        }),
         now,
     );
     let mut views = test_session_views(root);
     let id = SubtaskId::new("timed-child");
-    views.apply(SessionEvent::SubtaskLaunched {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
         turn_id: TEST_TURN_ID,
         call_id: "launch".into(),
         entry_index: 0,
-        descriptor: child_descriptor("timed-child", "timed child"),
-    });
+        descriptor: Box::new(child_descriptor("timed-child", "timed child")),
+    }));
     views.handle_event(ctrl('i'));
     views.observe_clock(now + Duration::from_secs(10));
     for event in [
-        SessionEvent::TurnStarted {
+        SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("child prompt"),
             mode: SessionMode::Build,
-        },
-        SessionEvent::ModelCallStarted {
+        }),
+        SessionEvent::Turn(TurnEvent::ModelCallStarted {
             turn_id: TEST_TURN_ID,
             call: 1,
-        },
+        }),
     ] {
-        views.apply(SessionEvent::SubtaskSession {
+        views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
             id: id.clone(),
             event: Box::new(event),
-        });
+        }));
     }
     assert!(rendered_views_text(&mut views, 120, 25).contains("● Assistant · #(1 - 1) · 0s"));
     views.observe_clock(now + Duration::from_secs(15));
@@ -1327,14 +1328,14 @@ fn child_call_clocks_are_independent_across_switches_and_hidden_completion() {
     assert!(rendered_views_text(&mut views, 120, 25).contains("● Assistant · #(1 - 1) · 20s"));
     views.handle_event(ctrl('o'));
     views.observe_clock(now + Duration::from_secs(50));
-    views.apply(SessionEvent::SubtaskSession {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
         id: id.clone(),
-        event: Box::new(SessionEvent::TurnCompleted {
+        event: Box::new(SessionEvent::Turn(TurnEvent::Completed {
             turn_id: TEST_TURN_ID,
             message: Message::assistant("child done"),
             attempt_id: None,
-        }),
-    });
+        })),
+    }));
     assert_eq!(views.visible_child_id(), None, "completion stayed hidden");
     assert!(rendered_views_text(&mut views, 120, 25).contains("● Assistant · #(1 - 1) · 50s"));
     views.handle_event(ctrl('i'));
@@ -1358,12 +1359,12 @@ fn clock_redraws_follow_visible_native_lifecycle_not_hidden_root_or_acp_work() {
     assert!(root.handle_event(ctrl_enter()).is_some());
     let mut views = test_session_views(root);
     assert!(views.clock_required());
-    views.apply(SessionEvent::SubtaskLaunched {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
         turn_id: TEST_TURN_ID,
         call_id: "child".into(),
         entry_index: 0,
-        descriptor: child_descriptor("clock-child", "clock child"),
-    });
+        descriptor: Box::new(child_descriptor("clock-child", "clock child")),
+    }));
     let id = SubtaskId::new("clock-child");
     views.handle_event(ctrl('i'));
     assert_eq!(views.visible_child_id(), Some(&id));
@@ -1372,14 +1373,14 @@ fn clock_redraws_follow_visible_native_lifecycle_not_hidden_root_or_acp_work() {
         "idle child disables a busy hidden root's clock"
     );
     views.handle_event(ctrl('o'));
-    views.apply(SessionEvent::SubtaskSession {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
         id: id.clone(),
-        event: Box::new(SessionEvent::TurnStarted {
+        event: Box::new(SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("child prompt"),
             mode: SessionMode::Build,
-        }),
-    });
+        })),
+    }));
     // Forwarded native lifecycle starts timing while the child is hidden.
     let now = Instant::now();
     views.observe_clock(now + Duration::from_secs(12));
@@ -1387,28 +1388,28 @@ fn clock_redraws_follow_visible_native_lifecycle_not_hidden_root_or_acp_work() {
     assert!(views.clock_required());
     views.observe_clock(now + Duration::from_secs(12));
     assert!(rendered_views_text(&mut views, 100, 14).contains("running… · 12s"));
-    views.apply(SessionEvent::SubtaskSession {
+    views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
         id,
-        event: Box::new(SessionEvent::TurnCancelled {
+        event: Box::new(SessionEvent::Turn(TurnEvent::Cancelled {
             turn_id: TEST_TURN_ID,
-        }),
-    });
+        })),
+    }));
     assert!(!views.clock_required());
     views.handle_event(ctrl('o'));
     assert!(views.clock_required());
-    views.apply(SessionEvent::TurnCancelled {
+    views.apply(SessionEvent::Turn(TurnEvent::Cancelled {
         turn_id: TEST_TURN_ID,
-    });
+    }));
     assert!(!views.clock_required());
 
     let run_id = EnsembleRunId::from_string("clock-acp");
     let agent = navigation_agent("clock-agent");
     let mut views = test_session_views(App::new());
-    views.apply(SessionEvent::EnsembleStarted {
+    views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TEST_TURN_ID,
-        start: navigation_ensemble_start(&run_id, &agent),
+        start: Box::new(navigation_ensemble_start(&run_id, &agent)),
         resumed: false,
-    });
+    }));
     assert!(views.clock_required());
     views.handle_event(ctrl('i'));
     assert_eq!(views.visible_agent_id(), Some(&agent.id));

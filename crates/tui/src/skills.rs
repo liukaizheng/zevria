@@ -6,12 +6,8 @@ use ratatui::{
     text::Line,
     widgets::{Paragraph, Wrap},
 };
-use std::collections::{HashMap, VecDeque};
-use zevria_instructions::skill::SkillManagementRequest as Request;
-use zevria_instructions::skill::SkillManagementResult as Result;
-use zevria_instructions::skill::SkillManagementView;
 use zevria_instructions::skill::SkillMeta;
-use zevria_session_api::SessionCommand;
+use zevria_presentation::skills::{SkillChange, SkillInspector};
 use zevria_session_api::SessionEvent;
 
 use crate::hints::{Eligibility, hint_line};
@@ -20,188 +16,47 @@ use crate::input::{Action, ChordState, KeyContext};
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use zevria_tui_widgets::overlay::{ListNav, modal};
 
-#[derive(Clone)]
-enum Purpose {
-    Completion,
-    Browser(u64),
-    Mutation,
-}
-
-#[derive(Default)]
-enum Browser {
-    #[default]
-    Closed,
-    List,
-    Inspect,
-}
-
 #[derive(Default)]
 pub(crate) struct SkillManager {
-    browser: Browser,
-    page: Option<SkillManagementView>,
+    pub(crate) inspector: SkillInspector,
     nav: ListNav,
     keys: ChordState,
     filter: Option<crate::composer::ComposerState>,
-    query: String,
-    message: String,
-    next_id: u64,
-    pending: HashMap<String, Purpose>,
-    pub commands: VecDeque<SessionCommand>,
-    refresh_again: bool,
-    browser_generation: u64,
 }
 
 impl SkillManager {
     pub(crate) fn is_open(&self) -> bool {
-        !matches!(self.browser, Browser::Closed)
+        self.inspector.is_open()
     }
+
     pub(crate) fn invalidate_geometry(&mut self) {
         self.nav.invalidate_geometry();
     }
 
-    fn send(&mut self, request: Request, purpose: Purpose) {
-        if self.pending.len() >= 32 {
-            self.message = "Too many pending skill requests; wait for their results".into();
-            return;
-        }
-        self.next_id += 1;
-        let id = format!("tui.skills.{}", self.next_id);
-        self.pending.insert(id.clone(), purpose);
-        self.commands.push_back(SessionCommand::Manage(
-            zevria_session_api::ManagementCommand::Skills {
-                request_id: id,
-                request,
-            },
-        ));
-    }
-    pub fn refresh(&mut self) {
-        if self
-            .pending
-            .values()
-            .any(|purpose| matches!(purpose, Purpose::Completion))
-        {
-            self.refresh_again = true;
-            return;
-        }
-        self.send(
-            Request::List {
-                query: String::new(),
-            },
-            Purpose::Completion,
-        );
-    }
     pub fn show(&mut self) {
-        self.browser = Browser::List;
         self.filter = None;
         self.nav.request_reveal();
         self.invalidate_geometry();
-        self.query.clear();
-        self.browse();
+        self.inspector.show(String::new());
     }
-    fn browse(&mut self) {
-        self.message = "Loading installed metadata…".into();
-        let request = if matches!(self.browser, Browser::Inspect) {
-            Request::Inspect {
-                name: self
-                    .query
-                    .parse()
-                    .expect("inspect query is a validated candidate name"),
-            }
-        } else {
-            Request::List {
-                query: self.query.clone(),
-            }
-        };
-        self.browser_generation += 1;
-        self.send(request, Purpose::Browser(self.browser_generation));
-    }
+
     pub fn event(&mut self, event: &SessionEvent) -> Option<Vec<SkillMeta>> {
-        match event {
-            SessionEvent::SkillsChanged { .. } => {
-                self.refresh();
-                if self.is_open() {
-                    self.browse();
-                }
+        match self.inspector.event(event, self.nav.selected)? {
+            SkillChange::Completions(entries) => Some(entries),
+            SkillChange::Page { selected } => {
+                self.nav.selected = selected;
+                self.nav.viewport.jump_start();
+                self.invalidate_geometry();
+                self.nav.request_reveal();
+                None
             }
-            SessionEvent::ModeChanged { .. }
-            | SessionEvent::ModeResult { .. }
-            | SessionEvent::TurnCompleted { .. }
-            | SessionEvent::TurnRecovered { .. }
-            | SessionEvent::TurnFailed { .. }
-            | SessionEvent::TurnRejected { .. }
-            | SessionEvent::TurnCancelled { .. } => self.refresh(),
-            SessionEvent::SkillsResult { request_id, result } => {
-                let purpose = self.pending.remove(request_id)?;
-                if matches!(purpose, Purpose::Browser(generation) if generation != self.browser_generation)
-                {
-                    return None;
-                }
-                match (purpose, result) {
-                    (Purpose::Completion, Result::View { view }) => {
-                        if std::mem::take(&mut self.refresh_again) {
-                            self.refresh();
-                        } else {
-                            return Some(view.completions.clone());
-                        }
-                    }
-                    (Purpose::Browser(_), Result::View { view: page }) => {
-                        let previous = self
-                            .page
-                            .as_ref()
-                            .and_then(|view| view.entries.get(self.nav.selected));
-                        self.nav.selected = previous
-                            .and_then(|selected| {
-                                page.entries
-                                    .iter()
-                                    .position(|entry| {
-                                        entry.name == selected.name
-                                            && entry.scope == selected.scope
-                                            && entry.manifest == selected.manifest
-                                    })
-                                    .or_else(|| {
-                                        page.entries
-                                            .iter()
-                                            .position(|entry| entry.name == selected.name)
-                                    })
-                            })
-                            .unwrap_or(self.nav.selected.min(page.entries.len().saturating_sub(1)));
-                        self.page = Some(page.clone());
-                        self.nav.viewport.jump_start();
-                        self.invalidate_geometry();
-                        self.nav.request_reveal();
-                        self.message.clear();
-                    }
-                    (Purpose::Mutation, Result::Changed { unchanged, .. }) => {
-                        self.message = if *unchanged {
-                            "Catalog unchanged"
-                        } else {
-                            "Saved and installed; other sessions require their own reload"
-                        }
-                        .into();
-                        self.refresh();
-                        if self.is_open() {
-                            self.browse();
-                        }
-                    }
-                    (Purpose::Completion, Result::Error { .. }) => {
-                        if std::mem::take(&mut self.refresh_again) {
-                            self.refresh();
-                        }
-                    }
-                    (_, Result::Error { code, message }) => {
-                        self.message = format!("{code}: {message}")
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
         }
-        None
     }
+
     pub(crate) fn context(&self) -> KeyContext {
         if self.filter.is_some() {
             KeyContext::TextEntry
-        } else if matches!(self.browser, Browser::Inspect) {
+        } else if self.inspector.inspecting() {
             KeyContext::SkillsInspect
         } else {
             KeyContext::SkillsList
@@ -213,13 +68,18 @@ impl SkillManager {
             hints
                 .labels
                 .extend([(Action::Confirm, "inspect"), (Action::Back, "list")]);
-            if self.page.as_ref().is_none_or(|page| page.entries.is_empty())
-                || self.pending.values().any(|purpose| matches!(purpose, Purpose::Browser(generation) if *generation == self.browser_generation))
+            if self
+                .inspector
+                .page()
+                .is_none_or(|page| page.entries.is_empty())
+                || self.inspector.loading()
             {
-                hints.disabled.extend([Action::Confirm, Action::Toggle, Action::Reload]);
+                hints
+                    .disabled
+                    .extend([Action::Confirm, Action::Toggle, Action::Reload]);
             }
         }
-        if matches!(self.browser, Browser::Inspect) {
+        if self.inspector.inspecting() {
             hints
                 .labels
                 .extend([(Action::Down, "scroll down"), (Action::Up, "scroll up")]);
@@ -232,7 +92,7 @@ impl SkillManager {
             return;
         };
         if action == Action::Cancel {
-            self.browser = Browser::Closed;
+            self.inspector.close();
             return;
         }
         self.handle_action(action);
@@ -262,13 +122,12 @@ impl SkillManager {
                     self.nav.request_reveal();
                 }
                 Action::Confirm => {
-                    self.query = self
+                    let query = self
                         .filter
                         .take()
                         .map(|filter| filter.text().to_string())
                         .unwrap_or_default();
-                    self.browser = Browser::List;
-                    self.browse();
+                    self.inspector.show(query);
                 }
                 Action::Backspace => {
                     filter.backspace();
@@ -279,60 +138,27 @@ impl SkillManager {
             return;
         }
         if matches!(action, Action::Confirm | Action::Toggle | Action::Reload)
-            && self.pending.values().any(|purpose| matches!(purpose, Purpose::Browser(generation) if *generation == self.browser_generation)) {
+            && self.inspector.loading()
+        {
             return;
         }
         match action {
-            Action::Close => self.browser = Browser::Closed,
+            Action::Close => self.inspector.close(),
             Action::Filter => self.filter = Some(crate::composer::ComposerState::default()),
-            Action::Confirm if !matches!(self.browser, Browser::Inspect) => {
-                if let Some(entry) = self
-                    .page
-                    .as_ref()
-                    .and_then(|page| page.entries.get(self.nav.selected))
-                {
-                    self.query = entry.name.to_string();
-                    self.browser = Browser::Inspect;
-                    self.browse();
-                }
+            Action::Confirm if !self.inspector.inspecting() => {
+                self.inspector.inspect(self.nav.selected)
             }
-            Action::Back => {
-                self.query.clear();
-                self.browser = Browser::List;
-                self.browse();
-            }
-            Action::Reload => {
-                if let Some(page) = &self.page {
-                    self.send(
-                        Request::Reload {
-                            expected_revision: page.revision.clone(),
-                        },
-                        Purpose::Mutation,
-                    );
-                }
-            }
-            Action::Toggle => {
-                if let Some(page) = &self.page
-                    && let Some(entry) = page.entries.get(self.nav.selected)
-                {
-                    self.send(
-                        Request::SetEnabled {
-                            expected_revision: page.revision.clone(),
-                            name: entry.name.clone(),
-                            enabled: !entry.enabled,
-                        },
-                        Purpose::Mutation,
-                    );
-                }
-            }
+            Action::Back => self.inspector.show(String::new()),
+            Action::Reload => self.inspector.reload(),
+            Action::Toggle => self.inspector.toggle(self.nav.selected),
             _ => {
                 if let Some(action) = action.list_action() {
-                    if matches!(self.browser, Browser::Inspect) {
+                    if self.inspector.inspecting() {
                         self.nav.pan(action);
                     } else {
                         self.nav.handle(
                             action,
-                            self.page.as_ref().map_or(0, |page| page.entries.len()),
+                            self.inspector.page().map_or(0, |page| page.entries.len()),
                         );
                     }
                 }
@@ -342,7 +168,7 @@ impl SkillManager {
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         let mut lines = Vec::new();
         let mut entry_lines = Vec::new();
-        if let Some(page) = &self.page {
+        if let Some(page) = self.inspector.page() {
             lines.push(Line::from(format!(
                 "Global: {}",
                 page.global_location.as_deref().unwrap_or("unavailable")
@@ -372,7 +198,7 @@ impl SkillManager {
                     if entry.pinned { ", pinned" } else { "" },
                     entry.metadata.description
                 )));
-                if matches!(self.browser, Browser::Inspect) {
+                if self.inspector.inspecting() {
                     lines.push(Line::from(format!(
                         "  Source: {:?} {} · resources: {} · policy: {:?}",
                         entry.scope,
@@ -417,7 +243,7 @@ impl SkillManager {
                 )));
             }
         }
-        lines.push(Line::from(self.message.clone()));
+        lines.push(Line::from(self.inspector.message().to_owned()));
         if let Some(filter) = &self.filter {
             lines.push(Line::from(format!("Filter: {}_", filter.text())));
         }
@@ -461,8 +287,8 @@ impl SkillManager {
             inner,
         );
         if self
-            .page
-            .as_ref()
+            .inspector
+            .page()
             .is_some_and(|page| !page.entries.is_empty())
             && self.filter.is_none()
         {

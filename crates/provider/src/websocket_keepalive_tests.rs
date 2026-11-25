@@ -123,7 +123,7 @@ async fn client_keepalive_pongs_never_extend_the_response_watchdog() {
     .await;
     assert!(result.is_err(), "pongs are not model progress");
     assert_eq!(
-        provider.ws.session.terminal_status(),
+        provider.responses_transport.ws.session.terminal_status(),
         Some(OpenAiWebSocketTerminalCategory::ResponseIdleTimeout)
     );
     assert!(

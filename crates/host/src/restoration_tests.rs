@@ -1,5 +1,6 @@
 //! One-time payload ownership does not consume the runtime's cleanup metadata.
 use super::*;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
@@ -47,8 +48,11 @@ async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
             agent_runs_root: directory.path().join("agent-runs"),
             transcript_path: path.clone(),
             transcript_items: items,
-            skill_catalog: Arc::new(SkillCatalog::default()),
-            active_skills,
+            skill_context: zevria_instructions::SkillContext {
+                catalog: Arc::new(SkillCatalog::default()),
+                pins: active_skills,
+                mode_enabled: false,
+            },
             startup_notices: vec!["startup notice".into()],
             plan_state: PlanWorkflowState::Idle,
             selected_mode: SessionMode::Plan,
@@ -66,7 +70,8 @@ async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
     assert_eq!(restored.transcript_items.len(), 1);
     assert_eq!(
         restored
-            .active_skills
+            .skill_context
+            .pins
             .snapshots()
             .next()
             .unwrap()

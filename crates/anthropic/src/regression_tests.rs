@@ -5,6 +5,7 @@ use rig_core::message::{
 };
 use serde_json::{Value, json};
 use zevria_foundation::{ModelProfileRef, ModelRole, ReasoningLevel};
+use zevria_model::RetryCategory;
 use zevria_model::{
     DirectiveContent, ModelRequest, ModelRequestItem, OwnedModelRequestItem, ProviderReplay,
     ReplayMessage,
@@ -75,15 +76,20 @@ fn sse_fixture_accumulates_all_block_types_and_semantic_progress() {
 fn management_preflight_accepts_idle_history_and_empty_assistants_do_not_strand_system_turns() {
     let user = Message::user("first");
     let answer = Message::assistant("complete");
-    assert!(project::preflight(&[], &target(), true).is_ok());
     assert!(
-        project::preflight(
+        project::assess_history(
+            &[],
+            project::HistoryOptions::new(&target(), &crate::Compatibility::default())
+        )
+        .is_ok()
+    );
+    assert!(
+        project::assess_history(
             &[
                 ModelRequestItem::message(&user),
                 ModelRequestItem::message(&answer)
             ],
-            &target(),
-            true
+            project::HistoryOptions::new(&target(), &crate::Compatibility::default()),
         )
         .is_ok()
     );
@@ -107,7 +113,7 @@ fn management_preflight_accepts_idle_history_and_empty_assistants_do_not_strand_
             ModelRequestItem::message(&next),
         ],
         &target(),
-        true,
+        &crate::Compatibility::default(),
         &json!([]),
         &Value::Null,
         false,
@@ -148,7 +154,15 @@ fn rolled_back_system_directive_does_not_change_the_next_thinking_binding() {
         ModelRequestItem::replay_backed(&stripped),
         ModelRequestItem::message(&second),
     ];
-    let prefix = project::project(&input, &target, true, &system, &tools, false).unwrap();
+    let prefix = project::project(
+        &input,
+        &target,
+        &crate::Compatibility::default(),
+        &system,
+        &tools,
+        false,
+    )
+    .unwrap();
     assert_eq!(
         prefix.messages,
         [
@@ -174,7 +188,15 @@ fn rolled_back_system_directive_does_not_change_the_next_thinking_binding() {
         ModelRequestItem::replay_backed(&following),
         ModelRequestItem::message(&next),
     ]);
-    let projected = project::project(&input, &target, true, &system, &tools, false).unwrap();
+    let projected = project::project(
+        &input,
+        &target,
+        &crate::Compatibility::default(),
+        &system,
+        &tools,
+        false,
+    )
+    .unwrap();
     assert_eq!(projected.stripped_thinking_turns, 1);
     assert_eq!(projected.messages[2]["content"][0], thinking);
     assert_eq!(
@@ -190,7 +212,7 @@ fn project_owned(history: &[OwnedModelRequestItem], system: &str) -> project::Pr
     project::project(
         &history.iter().map(|i| i.as_borrowed()).collect::<Vec<_>>(),
         &target(),
-        true,
+        &crate::Compatibility::default(),
         &json!([{"type":"text","text":system}]),
         &Value::Null,
         false,
@@ -280,9 +302,18 @@ fn directives_normalize_all_positions_and_merge_roles() {
         ],
     ] {
         for support in [true, false] {
-            let projected =
-                project::project(&input, &target(), support, &json!([]), &Value::Null, false)
-                    .unwrap();
+            let projected = project::project(
+                &input,
+                &target(),
+                &crate::Compatibility {
+                    system_messages: support,
+                    ..Default::default()
+                },
+                &json!([]),
+                &Value::Null,
+                false,
+            )
+            .unwrap();
             for (index, message) in projected.messages.iter().enumerate() {
                 if message["role"] == "system" {
                     assert!(support);
@@ -307,7 +338,7 @@ fn directives_normalize_all_positions_and_merge_roles() {
         project::project(
             &[ModelRequestItem::message(&raw)],
             &target(),
-            true,
+            &crate::Compatibility::default(),
             &json!([]),
             &Value::Null,
             false
@@ -321,7 +352,7 @@ fn directives_normalize_all_positions_and_merge_roles() {
                 ModelRequestItem::message(&answer)
             ],
             &target(),
-            true,
+            &crate::Compatibility::default(),
             &json!([]),
             &Value::Null,
             false
@@ -382,7 +413,10 @@ fn tool_results_precede_text_and_directives_and_images_documents_errors_map() {
             ModelRequestItem::message(&user),
         ],
         &target(),
-        false,
+        &crate::Compatibility {
+            system_messages: false,
+            ..Default::default()
+        },
         &json!([]),
         &Value::Null,
         false,
@@ -562,7 +596,10 @@ fn stream_stop_matrix_unknown_redacted_eager_json_and_errors() {
     let error = acc
         .push(r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"}}"#)
         .unwrap_err();
-    assert_eq!(error.kind, error::ErrorKind::Retryable("overloaded"));
+    assert_eq!(
+        error.kind,
+        error::ErrorKind::Retryable(RetryCategory::Overloaded)
+    );
     assert!(
         stream::MessageAccumulator::default()
             .finish(

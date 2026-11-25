@@ -5,6 +5,8 @@ use crate::layout::ConversationCache;
 use crate::presentation::{
     BlockVisibility, ConversationEntry, PresentationBlock, PresentationBlockId, TextFlavor,
 };
+use zevria_session_api::SessionStreamState;
+use zevria_session_api::{EnsembleEvent, PlanEvent, TurnEvent};
 
 const SELECTION_SHORTCUTS: [fn(&mut App); 2] = [double_escape, press_v];
 
@@ -57,17 +59,17 @@ fn elapsed_header_wrapping_keeps_selected_and_folded_body_paint_separate() {
             let mut app = App::new();
             let now = Instant::now();
             for event in [
-                SessionEvent::TurnStarted {
+                SessionEvent::Turn(TurnEvent::Started {
                     turn_id: TEST_TURN_ID,
                     message: Message::User {
                         content: Vec::new(),
                     },
                     mode: SessionMode::Build,
-                },
-                SessionEvent::ModelCallStarted {
+                }),
+                SessionEvent::Turn(TurnEvent::ModelCallStarted {
                     turn_id: TEST_TURN_ID,
                     call: 1,
-                },
+                }),
             ] {
                 assert!(app.reduce_at(event, now).is_empty());
             }
@@ -221,29 +223,29 @@ fn live_and_restored_user_jumps_include_both_ensemble_prompts_but_not_workers() 
                     TranscriptItem::Message(last),
                 ]);
             } else {
-                app.reduce_without_effects(SessionEvent::TurnStarted {
+                app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
                     turn_id: TEST_TURN_ID,
                     message: first,
                     mode: SessionMode::Build,
-                });
-                app.reduce_without_effects(SessionEvent::TurnRecovered {
+                }));
+                app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Recovered {
                     turn_id: TEST_TURN_ID,
-                });
-                app.reduce_without_effects(SessionEvent::EnsembleStarted {
+                }));
+                app.reduce_without_effects(SessionEvent::Ensemble(EnsembleEvent::Started {
                     turn_id: TurnId::new(2),
-                    start,
+                    start: Box::new(start),
                     resumed: false,
-                });
-                app.reduce_without_effects(SessionEvent::TurnCompleted {
+                }));
+                app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Completed {
                     turn_id: TurnId::new(2),
                     message: answer,
                     attempt_id: None,
-                });
-                app.reduce_without_effects(SessionEvent::TurnStarted {
+                }));
+                app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
                     turn_id: TurnId::new(3),
                     message: last,
                     mode: SessionMode::Build,
-                });
+                }));
             }
             app.detach_follow_for_test();
             app.select_for_test(cursor(0, 1));
@@ -503,18 +505,18 @@ fn live_and_restored_acp_projections_have_identical_user_jump_targets() {
                 );
                 views.restore_agent_run(records);
             } else {
-                views.apply(SessionEvent::EnsembleStarted {
+                views.apply(SessionEvent::Ensemble(EnsembleEvent::Started {
                     turn_id: TEST_TURN_ID,
-                    start: start.clone(),
+                    start: Box::new(start.clone()),
                     resumed: false,
-                });
+                }));
                 for event in mixed_role_jump_events() {
-                    views.apply(SessionEvent::AgentRunUpdated {
+                    views.apply(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
                         turn_id: TEST_TURN_ID,
                         ensemble_run_id: start.run_id.clone(),
                         agent_run_id: descriptor.id.clone(),
-                        event,
-                    });
+                        event: Box::new(event),
+                    }));
                 }
             }
             views.handle_event(ctrl('i'));
@@ -667,7 +669,7 @@ fn boundary_user_jumps_clear_pending_tool_yank_chords() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             turn_id: TEST_TURN_ID,
             attempt_id: None,
             message: assistant_message(vec![tool_call(
@@ -676,13 +678,13 @@ fn boundary_user_jumps_clear_pending_tool_yank_chords() {
                 "command",
                 json!({"command":"pwd"}),
             )]),
-        },
+        }),
     );
-    app.reduce_without_effects(SessionEvent::ToolResults {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::ToolResults {
         turn_id: TEST_TURN_ID,
         message: tool_result_message("yank-jump", None, "command", "output"),
         metadata: vec![],
-    });
+    }));
     app.select_for_test(cursor(0, 0));
     let now = Instant::now();
     let expected = Some(UiAction::Copy {
@@ -823,10 +825,10 @@ fn oversized_entry_stays_put_across_redraws_copy_ignored_keys_and_native_stream_
             Some(UiAction::Copy { text })
         );
         app.handle_event(key(KeyCode::Char('x')));
-        app.reduce_without_effects(SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: (Message::assistant("streamed background text")).into(),
-        });
+        app.reduce_without_effects(SessionStreamState::new(
+            TEST_TURN_ID,
+            (Message::assistant("streamed background text")).into(),
+        ));
         assert!(
             app.apply_conversation_change(crate::app::ConversationChange::default())
                 .is_empty()
@@ -845,10 +847,10 @@ fn fresh_plan_handoff_app() -> App {
         .map(|step| format!("Implementation step {step}.\n\n"))
         .collect();
     let mut app = App::new();
-    app.reduce_without_effects(SessionEvent::PlanHandoffStarted {
+    app.reduce_without_effects(SessionEvent::Plan(PlanEvent::HandoffStarted {
         turn_id: TEST_TURN_ID,
-        handoff: PlanHandoff::new(artifact, "source-session"),
-    });
+        handoff: Box::new(PlanHandoff::new(artifact, "source-session")),
+    }));
     assert!(matches!(app.history(), [HistoryEntry::PlanHandoff(..)]));
     app
 }
@@ -928,11 +930,11 @@ fn navigation_reveals_the_fitting_reply_and_oversized_handoff_without_redraw_dri
     rendered_text(&mut app, 80, 10);
     press_v(&mut app);
     assert_eq!(app.selection(), cursor(0, 0));
-    app.reduce_without_effects(SessionEvent::TurnCompleted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Completed {
         turn_id: TEST_TURN_ID,
         message: Message::assistant("Implemented the plan."),
         attempt_id: None,
-    });
+    }));
     let buffer = rendered_buffer(&mut app, 80, 10);
     let height = usize::from(conversation_content_area(&buffer, false).height);
     let entries = app.view_cache().entries();
@@ -1194,10 +1196,10 @@ fn nonselectable_only_windows_do_not_fall_back_or_detach_follow() {
         }
         start_empty_turn(&mut app, TEST_TURN_ID, SessionMode::Build);
         if streaming {
-            app.reduce_without_effects(SessionEvent::AssistantStreamUpdated {
-                turn_id: TEST_TURN_ID,
-                snapshot: (Message::assistant(numbered_lines(30))).into(),
-            });
+            app.reduce_without_effects(SessionStreamState::new(
+                TEST_TURN_ID,
+                (Message::assistant(numbered_lines(30))).into(),
+            ));
         }
         rendered_text(&mut app, 80, 10);
         if streaming {
@@ -1369,22 +1371,22 @@ fn ensemble_prompt_and_wrapped_worker_ranges_exclude_confirmation_summaries() {
         let start = editable_ensemble_start("visible-ensemble", workflow, "");
         let worker_id = start.agents[0].id.clone();
         let mut app = App::new();
-        app.reduce_without_effects(SessionEvent::EnsembleStarted {
+        app.reduce_without_effects(SessionEvent::Ensemble(EnsembleEvent::Started {
             turn_id: TEST_TURN_ID,
-            start: start.clone(),
+            start: Box::new(start.clone()),
             resumed: false,
-        });
-        app.reduce_without_effects(SessionEvent::AgentRunUpdated {
+        }));
+        app.reduce_without_effects(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
             turn_id: TEST_TURN_ID,
             ensemble_run_id: start.run_id,
             agent_run_id: worker_id.clone(),
-            event: AgentRunEvent::Status {
+            event: Box::new(AgentRunEvent::Status {
                 status: AgentRunStatus::Failed,
                 detail: Some(
                     "a failure whose details wrap over several rows in a narrow pane".into(),
                 ),
-            },
-        });
+            }),
+        }));
         rendered_text(&mut app, 36, 10);
         let entry = &app.view_cache().entries()[0];
         assert_eq!(entry.items.len(), 2);

@@ -3,6 +3,7 @@ use zevria_foundation::{
     CommandJobId, CommandJobMode, CommandJobNotice, CommandJobNoticeKind, CommandJobSnapshot,
     CommandJobStatus,
 };
+use zevria_session_api::JobEvent;
 fn notice(id: &str, kind: CommandJobNoticeKind) -> CommandJobNotice {
     CommandJobNotice::new(
         kind,
@@ -82,24 +83,27 @@ async fn acp_ignores_offers_and_projects_live_and_replayed_notices_as_thought_ch
                     .await?;
                 let sender = sender.lock().unwrap().clone().unwrap();
                 sender
-                    .send(SessionEvent::JobContinuationChanged {
+                    .send(SessionEvent::Job(JobEvent::ContinuationChanged {
                         mode: Some(SessionMode::Build),
-                    })
+                    }))
                     .await
                     .unwrap();
                 sender
-                    .send(SessionEvent::CommandJobsReported {
+                    .send(SessionEvent::Job(JobEvent::Reported {
                         turn_id: TurnId::new(1),
-                        notice: notice("job-live", CommandJobNoticeKind::Update),
-                    })
+                        notice: Box::new(notice("job-live", CommandJobNoticeKind::Update)),
+                    }))
                     .await
                     .unwrap();
                 sender
-                    .send(SessionEvent::JobContinuationStarted {
+                    .send(SessionEvent::Job(JobEvent::ContinuationStarted {
                         turn_id: TurnId::new(2),
                         mode: SessionMode::Build,
-                        notice: notice("job-defensive", CommandJobNoticeKind::Continuation),
-                    })
+                        notice: Box::new(notice(
+                            "job-defensive",
+                            CommandJobNoticeKind::Continuation,
+                        )),
+                    }))
                     .await
                     .unwrap();
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {

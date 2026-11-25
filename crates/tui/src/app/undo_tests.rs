@@ -2,6 +2,7 @@ use super::*;
 use ratatui::crossterm::event::KeyEvent;
 use ratatui::{Terminal, backend::TestBackend};
 use zevria_session_api::ModeSelectionResult;
+use zevria_session_api::TurnEvent;
 
 fn key(code: KeyCode) -> Event {
     Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -232,21 +233,26 @@ fn rejected_submissions_restore_history_but_acceptance_and_resets_discard_it() {
         let mut app = editable();
         type_text(&mut app, "first");
         app.handle_event(Event::Paste(" second".into()));
-        assert!(matches!(app.submit(), Some(UiAction::Submit { .. })));
+        assert!(matches!(
+            app.submit(),
+            Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                zevria_session_api::TurnCommand::Submit { .. }
+            )))
+        ));
         assert!(app.composer.is_empty());
         let turn_id = TurnId::new(1);
         if accepted {
-            app.reduce(SessionEvent::TurnStarted {
+            app.reduce(SessionEvent::Turn(TurnEvent::Started {
                 turn_id,
                 mode: SessionMode::Build,
                 message: Message::user("first second"),
-            });
-            app.reduce(SessionEvent::TurnCancelled { turn_id });
+            }));
+            app.reduce(SessionEvent::Turn(TurnEvent::Cancelled { turn_id }));
         } else {
-            app.reduce(SessionEvent::TurnRejected {
+            app.reduce(SessionEvent::Turn(TurnEvent::Rejected {
                 turn_id,
                 error: "rejected".into(),
-            });
+            }));
         }
         if !app.interaction.is_insert() {
             app.handle_event(key(KeyCode::Char('i')));
@@ -274,8 +280,9 @@ fn mode_selection_preserves_history_or_discards_an_accepted_command() {
         for accepted in [false, true] {
             let mut app = editable();
             type_text(&mut app, if command { "/plan" } else { "draft" });
-            let Some(UiAction::SetMode { request_id, mode }) =
-                app.begin_mode_selection(SessionMode::Plan, command)
+            let Some(UiAction::Session(zevria_session_api::SessionCommand::Manage(
+                zevria_session_api::ManagementCommand::SetMode { request_id, mode },
+            ))) = app.begin_mode_selection(SessionMode::Plan, command)
             else {
                 panic!("mode selection")
             };

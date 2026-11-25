@@ -1,42 +1,38 @@
 //! Long-lived ACP Plan workers. The root owns acceptance and confirmation;
 //! actors own IO, same-session continuation and prompt-scoped cancellation.
-use super::*;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use zevria_workflow::{WorkerEventObserver, WorkerObservation};
 
-#[derive(Default)]
-pub(super) struct InteractionCounter {
-    active: AtomicU64,
-    drained: tokio::sync::Notify,
-}
-
-impl InteractionCounter {
-    async fn wait_drained(&self) {
-        loop {
-            // `notify_waiters` covers futures created before the notification,
-            // even if they have not been polled yet.
-            let drained = self.drained.notified();
-            if self.active.load(AtomicOrdering::Acquire) == 0 {
-                return;
-            }
-            drained.await;
-        }
-    }
-}
-
-pub(super) struct PendingInteraction(Arc<InteractionCounter>);
-impl PendingInteraction {
-    pub(super) fn new(count: Arc<InteractionCounter>) -> Self {
-        count.active.fetch_add(1, AtomicOrdering::AcqRel);
-        Self(count)
-    }
-}
-impl Drop for PendingInteraction {
-    fn drop(&mut self) {
-        if self.0.active.fetch_sub(1, AtomicOrdering::AcqRel) == 1 {
-            self.0.drained.notify_waiters();
-        }
-    }
-}
+use super::EnsembleSupervisor;
+use super::attempt::{
+    InteractionCounter, WorkerAttemptContext, WorkerAttemptMode, WorkerAttemptProgress, WorkerEnd,
+};
+use super::diagnostics::RawDiagnosticSink;
+use super::failure::{acp_error, concise_process_failure, error_with_login_hint};
+use super::handoff::ClaudePlanHandoff;
+use super::history::preflight_existing_logs;
+use super::logging::RunLog;
+use super::prompt::{worker_attempt_prompt, worker_prompt};
+use super::recovery::{PromptRunContext, TransientRecoveryState, run_prompt_sequence};
+use super::run::MAX_LIVE_PROCESS_RECOVERY_ATTEMPTS;
+use crate::config::{EnsembleAgentConfig, PlanHandoffTransport};
+use agent_client_protocol::schema::v1::{Error as AcpError, SessionId};
+use agent_client_protocol::{Agent, ConnectionTo};
+use anyhow::Context as _;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::mpsc;
+use zevria_session_api::worker::{EnsembleReviewExecution, WorkerActorCommand, WorkerActorUpdate};
+use zevria_session_api::{EnsembleLaunchRequest, SessionEventSender, TurnContext};
+use zevria_transcript::agent_run_path;
+use zevria_workflow::ensemble_review::{
+    WORKER_CONTROL_CAPACITY, WorkerInput, WorkerPromptKind, WorkerReviewEvent, WorkerReviewState,
+};
+use zevria_workflow::{
+    AgentRunDescriptor, AgentRunEvent, AgentRunId, AgentRunStatus, EnsembleWorkflow,
+};
 
 struct ReviewDriver {
     task: tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -62,33 +58,14 @@ impl Drop for ReviewDriver {
 pub(super) struct ReviewPublication {
     worker_id: AgentRunId,
     updates: mpsc::Sender<WorkerActorUpdate>,
-    generation: Arc<AtomicU64>,
-    replay: Arc<AtomicBool>,
-    publishing: Arc<AtomicBool>,
+    observer: Arc<Mutex<WorkerEventObserver>>,
 }
 impl ReviewPublication {
     pub(super) async fn observe(&self, event: &AgentRunEvent) -> anyhow::Result<()> {
-        let transition = match event {
-            AgentRunEvent::ReplayBoundary => {
-                self.replay.store(true, AtomicOrdering::Release);
-                self.publishing.store(false, AtomicOrdering::Release);
-                None
-            }
-            AgentRunEvent::Review { event } => {
-                match event.as_ref() {
-                    WorkerReviewEvent::Dispatched { generation, .. } => {
-                        self.generation.store(*generation, AtomicOrdering::Release);
-                        self.publishing.store(false, AtomicOrdering::Release);
-                    }
-                    WorkerReviewEvent::Settled { .. } | WorkerReviewEvent::Interrupted { .. } => {
-                        self.generation.store(0, AtomicOrdering::Release);
-                        self.publishing.store(false, AtomicOrdering::Release);
-                    }
-                    WorkerReviewEvent::Recovering { .. } => {
-                        self.publishing.store(false, AtomicOrdering::Release);
-                    }
-                    _ => {}
-                }
+        let transition = {
+            let mut observer = self.observer.lock().expect("worker observation poisoned");
+            if let AgentRunEvent::Review { event } = event {
+                observer.observe_review(event);
                 matches!(
                     event.as_ref(),
                     WorkerReviewEvent::Dispatched { .. }
@@ -96,53 +73,12 @@ impl ReviewPublication {
                         | WorkerReviewEvent::Recovering { .. }
                         | WorkerReviewEvent::Settled { .. }
                 )
-                .then(|| *event.clone())
+                .then(|| event.as_ref().clone())
+            } else {
+                observer
+                    .observe(event, WorkerObservation::Live)
+                    .map_err(anyhow::Error::msg)?
             }
-            AgentRunEvent::Prompt { .. } => {
-                self.publishing.store(
-                    self.generation.load(AtomicOrdering::Acquire) > 0
-                        && !self.replay.load(AtomicOrdering::Acquire),
-                    AtomicOrdering::Release,
-                );
-                None
-            }
-            AgentRunEvent::SessionEstablished { .. } => {
-                self.replay.store(false, AtomicOrdering::Release);
-                None
-            }
-            AgentRunEvent::NativePlanCaptured { capture, .. }
-                if capture.generation != self.generation.load(AtomicOrdering::Acquire) =>
-            {
-                anyhow::bail!(
-                    "stale native capture does not belong to the active review generation"
-                );
-            }
-            AgentRunEvent::Plan { plan } | AgentRunEvent::NativePlanCaptured { plan, .. }
-                if self.publishing.load(AtomicOrdering::Acquire) =>
-            {
-                Some(WorkerReviewEvent::Published {
-                    generation: self.generation.load(AtomicOrdering::Acquire),
-                    plan: plan.clone(),
-                    replay: self.replay.load(AtomicOrdering::Acquire),
-                })
-            }
-            AgentRunEvent::Elicitation {
-                outcome: AgentElicitationOutcome::Accepted,
-                decision,
-                decision_unavailable,
-                ..
-            } => Some(WorkerReviewEvent::Decisions {
-                decision: decision.clone(),
-                unavailable: decision_unavailable.clone(),
-            }),
-            AgentRunEvent::PlanRemoved { plan_id }
-                if !self.replay.load(AtomicOrdering::Acquire) =>
-            {
-                Some(WorkerReviewEvent::Removed {
-                    plan_id: plan_id.clone(),
-                })
-            }
-            _ => None,
         };
         if let Some(event) = transition {
             self.send(event).await?;
@@ -168,24 +104,33 @@ struct PromptScope {
     accepting: Arc<AtomicBool>,
 }
 
-#[derive(Clone)]
-pub(super) struct InteractiveConnection {
-    queue: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<WorkerInput>>>,
-    current: Arc<Mutex<Option<WorkerInput>>>,
+/// Shared command-side state. Only the IO driver can drain accepted input.
+pub(super) struct InteractiveController {
+    input: Mutex<InteractiveInputState>,
     publication: ReviewPublication,
     descriptor: AgentRunDescriptor,
     permits: Arc<Semaphore>,
-    permit: Arc<Mutex<Option<OwnedSemaphorePermit>>>,
-    attempt: Arc<AtomicU64>,
+    permit: Mutex<Option<OwnedSemaphorePermit>>,
+    attempt: AtomicU64,
     native: bool,
-    continuing: Arc<AtomicBool>,
-    relaunches: Arc<AtomicU64>,
-    transient: Arc<Mutex<TransientRecoveryState>>,
-    prompt_scope: Arc<Mutex<Option<PromptScope>>>,
-    cancelled_inputs: Arc<Mutex<HashSet<u64>>>,
-    settled_generation: Arc<AtomicU64>,
+    continuing: AtomicBool,
+    relaunches: AtomicU64,
+    transient: Mutex<TransientRecoveryState>,
 }
-struct InteractiveCleanup(InteractiveConnection);
+
+struct InteractiveInputState {
+    current: Option<WorkerInput>,
+    scope: Option<PromptScope>,
+    cancelled: HashSet<u64>,
+    settled_generation: u64,
+}
+
+pub(super) struct InteractiveAttempt<'a> {
+    pub(super) controller: Arc<InteractiveController>,
+    pub(super) queue: &'a mut mpsc::UnboundedReceiver<WorkerInput>,
+}
+
+struct InteractiveCleanup(Arc<InteractiveController>);
 impl Drop for InteractiveCleanup {
     fn drop(&mut self) {
         self.0.close_prompt();
@@ -193,12 +138,24 @@ impl Drop for InteractiveCleanup {
     }
 }
 
-impl InteractiveConnection {
+async fn next_input(
+    queue: &mut mpsc::UnboundedReceiver<WorkerInput>,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Option<WorkerInput> {
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => None,
+        input = queue.recv() => input,
+    }
+}
+
+impl InteractiveController {
     fn close_prompt(&self) {
         if let Some(scope) = self
-            .prompt_scope
+            .input
             .lock()
-            .expect("worker scope poisoned")
+            .expect("worker input poisoned")
+            .scope
             .take()
         {
             scope.accepting.store(false, AtomicOrdering::Release);
@@ -215,9 +172,10 @@ impl InteractiveConnection {
         tokio_util::sync::CancellationToken,
         tokio_util::sync::CancellationToken,
     ) {
-        self.prompt_scope
+        self.input
             .lock()
-            .expect("worker scope poisoned")
+            .expect("worker input poisoned")
+            .scope
             .as_ref()
             .filter(|scope| scope.accepting.load(AtomicOrdering::Acquire))
             .map_or_else(
@@ -231,61 +189,59 @@ impl InteractiveConnection {
                 |scope| (scope.cancellation.clone(), scope.lifetime.clone()),
             )
     }
-    fn input_cancelled(&self) -> bool {
-        self.current
+
+    fn current_input(&self) -> Option<WorkerInput> {
+        self.input
             .lock()
             .expect("worker input poisoned")
-            .as_ref()
-            .is_some_and(|input| {
-                self.cancelled_inputs
-                    .lock()
-                    .expect("worker cancellation poisoned")
-                    .contains(&input.generation)
-            })
+            .current
+            .clone()
     }
+
+    fn input_cancelled(&self) -> bool {
+        let state = self.input.lock().expect("worker input poisoned");
+        state
+            .current
+            .as_ref()
+            .is_some_and(|input| state.cancelled.contains(&input.generation))
+    }
+
     fn cancel_input(&self, generation: u64, attempt: &tokio_util::sync::CancellationToken) {
-        if generation <= self.settled_generation.load(AtomicOrdering::Acquire) {
+        let mut state = self.input.lock().expect("worker input poisoned");
+        if generation <= state.settled_generation {
             return;
         }
-        self.cancelled_inputs
-            .lock()
-            .expect("worker cancellation poisoned")
-            .insert(generation);
-        if let Some(scope) = self
-            .prompt_scope
-            .lock()
-            .expect("worker scope poisoned")
+        state.cancelled.insert(generation);
+        if let Some(scope) = state
+            .scope
             .as_ref()
             .filter(|scope| scope.generation == generation)
         {
             scope.cancellation.cancel();
             scope.lifetime.cancel();
-        } else if self
+        } else if state
             .current
-            .lock()
-            .expect("worker input poisoned")
             .as_ref()
             .is_some_and(|input| input.generation == generation)
         {
             attempt.cancel();
         }
     }
-    async fn next(
-        &self,
-        cancellation: &tokio_util::sync::CancellationToken,
-    ) -> Option<WorkerInput> {
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => None,
-            input = async { self.queue.lock().await.recv().await } => input,
+
+    fn begin_prompt(&self, scope: PromptScope) {
+        let mut state = self.input.lock().expect("worker input poisoned");
+        if state.cancelled.contains(&scope.generation) {
+            scope.cancellation.cancel();
         }
+        state.scope = Some(scope);
     }
+
     async fn dispatch(&self, input: WorkerInput, log: &RunLog) -> Result<(), AcpError> {
         let event = WorkerReviewEvent::Dispatched {
             generation: input.generation,
             attempt: self.attempt.load(AtomicOrdering::Acquire),
         };
-        *self.current.lock().expect("worker input poisoned") = Some(input.clone());
+        self.input.lock().expect("worker input poisoned").current = Some(input);
         self.continuing.store(false, AtomicOrdering::Release);
         self.relaunches.store(0, AtomicOrdering::Release);
         *self.transient.lock().expect("transient recovery poisoned") =
@@ -326,23 +282,20 @@ impl InteractiveConnection {
         connected: bool,
     ) -> Result<(), AcpError> {
         log.barrier().await.map_err(acp_error)?;
-        let input = self.current.lock().expect("worker input poisoned").take();
+        let input = {
+            let mut state = self.input.lock().expect("worker input poisoned");
+            let input = state.current.take();
+            if let Some(input) = &input {
+                state.settled_generation = input.generation;
+                state.cancelled.remove(&input.generation);
+                if let Some(scope) = state.scope.take() {
+                    scope.lifetime.cancel();
+                }
+            }
+            input
+        };
         self.release();
         if let Some(input) = input {
-            self.settled_generation
-                .store(input.generation, AtomicOrdering::Release);
-            self.cancelled_inputs
-                .lock()
-                .expect("worker cancellation poisoned")
-                .remove(&input.generation);
-            if let Some(scope) = self
-                .prompt_scope
-                .lock()
-                .expect("worker scope poisoned")
-                .take()
-            {
-                scope.lifetime.cancel();
-            }
             if let Some(error) = &failure {
                 log.emit(AgentRunEvent::Failure {
                     error: error.clone(),
@@ -381,6 +334,7 @@ impl InteractiveConnection {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn run(
         &self,
+        queue: &mut mpsc::UnboundedReceiver<WorkerInput>,
         connection: &ConnectionTo<Agent>,
         session_id: SessionId,
         log: &RunLog,
@@ -408,12 +362,11 @@ impl InteractiveConnection {
             .await
             .map_err(acp_error)?;
         loop {
-            let current = self.current.lock().expect("worker input poisoned").clone();
-            let input = if let Some(input) = current {
+            let input = if let Some(input) = self.current_input() {
                 input
             } else {
                 self.release();
-                let Some(input) = self.next(cancellation).await else {
+                let Some(input) = next_input(queue, cancellation).await else {
                     return Ok(WorkerEnd::LocalCancelled);
                 };
                 self.dispatch(input.clone(), log).await?;
@@ -429,10 +382,7 @@ impl InteractiveConnection {
                 lifetime: lifetime.child_token(),
                 accepting: Arc::new(AtomicBool::new(false)),
             };
-            if self.input_cancelled() {
-                scope.cancellation.cancel();
-            }
-            *self.prompt_scope.lock().expect("worker scope poisoned") = Some(scope.clone());
+            self.begin_prompt(scope.clone());
             if let Err(error) = self.acquire(&scope.cancellation).await {
                 if cancellation.is_cancelled() {
                     return Ok(WorkerEnd::LocalCancelled);
@@ -529,7 +479,9 @@ impl InteractiveConnection {
             let failure = match &end {
                 WorkerEnd::NativeHandoffCompleted => None,
                 WorkerEnd::NativeHandoffFailed(error) => Some(error.clone()),
-                WorkerEnd::PromptResponse { stop_reason } if stop_reason == "end_turn" => None,
+                WorkerEnd::PromptResponse {
+                    stop_reason: "end_turn",
+                } => None,
                 _ => Some(format!("worker interaction ended without success: {end:?}")),
             }
             .or_else(|| handoff.and_then(ClaudePlanHandoff::unresolved_violation));
@@ -570,14 +522,14 @@ impl EnsembleSupervisor {
             "review state must match every selected worker in descriptor order"
         );
         if preflight {
-            preflight_existing_logs(&self.agent_runs_root, &request.start)?;
+            preflight_existing_logs(&self.inner.agent_runs_root, &request.start)?;
         }
         let cancellation = turn.cancellation().child_token();
-        let permits = Arc::new(Semaphore::new(self.config.max_concurrent_agents));
+        let permits = Arc::new(Semaphore::new(self.inner.config.max_concurrent_agents));
         let (updates, receiver) = mpsc::channel(WORKER_CONTROL_CAPACITY);
         let mut commands = HashMap::new();
         for state in states {
-            if state.abandoned {
+            if state.is_abandoned() {
                 continue;
             }
             let (tx, rx) = mpsc::unbounded_channel();
@@ -639,7 +591,7 @@ impl EnsembleSupervisor {
     ) -> anyhow::Result<()> {
         let descriptor = state.descriptor.clone();
         let (log, previous) = RunLog::open(
-            agent_run_path(&self.agent_runs_root, &start.run_id, &descriptor.id),
+            agent_run_path(&self.inner.agent_runs_root, &start.run_id, &descriptor.id),
             &start,
             &descriptor,
             resume,
@@ -651,9 +603,9 @@ impl EnsembleSupervisor {
         if let Some(input) = previous
             .review
             .as_ref()
-            .and_then(|journal| journal.state.active.as_ref())
-            && state.active.is_none()
-            && state.settled_generation >= input.generation
+            .and_then(|journal| journal.state.inputs.active.as_ref())
+            && state.inputs.active.is_none()
+            && state.inputs.settled_generation >= input.generation
         {
             log.emit(AgentRunEvent::Review {
                 event: Box::new(WorkerReviewEvent::Interrupted {
@@ -662,7 +614,7 @@ impl EnsembleSupervisor {
             })
             .await?;
         }
-        for input in &state.pending {
+        for input in &state.inputs.pending {
             // Root acceptance is authoritative, even if its old worker mirror
             // was interrupted. Review records carry stable request identities.
             log.emit(AgentRunEvent::Review {
@@ -676,45 +628,45 @@ impl EnsembleSupervisor {
         let publication = ReviewPublication {
             worker_id: descriptor.id.clone(),
             updates,
-            generation: Arc::new(AtomicU64::new(0)),
-            replay: Arc::new(AtomicBool::new(resume)),
-            publishing: Arc::new(AtomicBool::new(false)),
+            observer: Arc::new(Mutex::new(WorkerEventObserver::new(resume))),
         };
         *log.review_publication
             .lock()
             .expect("review publication poisoned") = Some(publication.clone());
         let agent = self
+            .inner
             .config
             .agents
             .get(&descriptor.agent)
             .context("configured worker is unavailable")?;
         let native =
             agent.plan_handoff_transport == Some(PlanHandoffTransport::ClaudeCodeExitPlanMode);
-        let interactive = InteractiveConnection {
-            queue: Arc::new(tokio::sync::Mutex::new(queue_rx)),
-            current: Arc::new(Mutex::new(None)),
+        let interactive = Arc::new(InteractiveController {
+            input: Mutex::new(InteractiveInputState {
+                current: None,
+                scope: None,
+                cancelled: state.inputs.cancel_requested.into_iter().collect(),
+                settled_generation: state.inputs.settled_generation,
+            }),
             publication,
             descriptor: descriptor.clone(),
             permits,
-            permit: Arc::new(Mutex::new(None)),
-            attempt: Arc::new(AtomicU64::new(state.attempt)),
+            permit: Mutex::new(None),
+            attempt: AtomicU64::new(state.connection.attempt),
             native,
-            continuing: Arc::new(AtomicBool::new(false)),
-            relaunches: Arc::new(AtomicU64::new(0)),
-            transient: Arc::new(Mutex::new(TransientRecoveryState::default())),
-            prompt_scope: Arc::new(Mutex::new(None)),
-            cancelled_inputs: Arc::new(Mutex::new(state.cancel_requested.into_iter().collect())),
-            settled_generation: Arc::new(AtomicU64::new(state.settled_generation)),
-        };
+            continuing: AtomicBool::new(false),
+            relaunches: AtomicU64::new(0),
+            transient: Mutex::new(TransientRecoveryState::default()),
+        });
         let attempt_cancel = Arc::new(Mutex::new(cancellation.child_token()));
         let native_recovery_safe = !resume
             || !native
             || previous.acp_session_id.is_none()
             || (state.quiescent()
-                && state.retained.as_ref().is_some_and(|snapshot| {
-                    snapshot.revision.generation == state.settled_generation
+                && state.proposals.retained.as_ref().is_some_and(|snapshot| {
+                    snapshot.revision.generation == state.inputs.settled_generation
                 })
-                && state.diagnostic.is_none());
+                && state.diagnostic().is_none());
         // IO must keep polling while the command pump awaits a durable mirror.
         // Co-polling both in one select branch can deadlock on event_order when
         // a prompt publication holds it across a journal acknowledgement.
@@ -734,6 +686,7 @@ impl EnsembleSupervisor {
                 supervisor
                     .drive_interactive(
                         &driving,
+                        queue_rx,
                         &driving_log,
                         &driving_agent,
                         &driving_turn,
@@ -750,7 +703,7 @@ impl EnsembleSupervisor {
                 biased;
                 () = cancellation.cancelled() => {
                     interactive.close_prompt();
-                    driver.stop(Duration::from_secs(self.config.cancel_grace_seconds)).await;
+                    driver.stop(Duration::from_secs(self.inner.config.cancel_grace_seconds)).await;
                     interactive.release();
                     if turn.is_cancelled() {
                         let context = interactive.transient.lock().expect("transient recovery poisoned").failure_context(&agent.login_hint).into_iter().collect::<Vec<_>>();
@@ -770,7 +723,7 @@ impl EnsembleSupervisor {
                         commands.close();
                         drop(queue_tx);
                         interactive.close_prompt();
-                        let grace = Duration::from_secs(self.config.cancel_grace_seconds);
+                        let grace = Duration::from_secs(self.inner.config.cancel_grace_seconds);
                         driver.stop(grace).await;
                         interactive.release();
                         // Never mirror terminal abandonment ahead of concurrent
@@ -796,7 +749,7 @@ impl EnsembleSupervisor {
                             log.emit(AgentRunEvent::Review { event: Box::new(WorkerReviewEvent::Sealed) }).await?;
                             log.append_outcome(*outcome).await
                         }.await.map_err(|error: anyhow::Error| error.to_string());
-                        driver.stop(Duration::from_secs(self.config.cancel_grace_seconds)).await;
+                        driver.stop(Duration::from_secs(self.inner.config.cancel_grace_seconds)).await;
                         let _ = acknowledgement.send(result);
                         return Ok(());
                     }
@@ -810,7 +763,8 @@ impl EnsembleSupervisor {
     #[allow(clippy::too_many_arguments)]
     async fn drive_interactive(
         &self,
-        interactive: &InteractiveConnection,
+        interactive: &Arc<InteractiveController>,
+        mut queue: mpsc::UnboundedReceiver<WorkerInput>,
         log: &RunLog,
         agent: &EnsembleAgentConfig,
         turn: &TurnContext,
@@ -828,7 +782,7 @@ impl EnsembleSupervisor {
                     diagnostic: Some(diagnostic.clone()),
                 })
                 .await?;
-            while let Some(input) = interactive.next(root).await {
+            while let Some(input) = next_input(&mut queue, root).await {
                 interactive
                     .dispatch(input, log)
                     .await
@@ -841,7 +795,7 @@ impl EnsembleSupervisor {
             return Ok(());
         }
         let handoff = if interactive.native {
-            Some(ClaudePlanHandoff::new(agent, &self.workspace)?)
+            Some(ClaudePlanHandoff::new(agent, &self.inner.workspace)?)
         } else {
             None
         };
@@ -853,11 +807,7 @@ impl EnsembleSupervisor {
                 let cancellation = root.child_token();
                 *cancel_slot.lock().expect("worker cancellation poisoned") = cancellation.clone();
                 let attempt = interactive.attempt.fetch_add(1, AtomicOrdering::AcqRel) + 1;
-                let continuing = interactive
-                    .current
-                    .lock()
-                    .expect("worker input poisoned")
-                    .clone();
+                let continuing = interactive.current_input();
                 if let Some(input) = continuing {
                     let event = WorkerReviewEvent::Recovering {
                         generation: input.generation,
@@ -870,7 +820,7 @@ impl EnsembleSupervisor {
                 } else {
                     recovery_context = None;
                     let queued = if first {
-                        interactive.queue.lock().await.try_recv().ok()
+                        queue.try_recv().ok()
                     } else {
                         None
                     };
@@ -880,7 +830,7 @@ impl EnsembleSupervisor {
                             .await
                             .map_err(anyhow::Error::msg)?;
                     } else if !first || session_id.is_none() {
-                        let Some(input) = interactive.next(root).await else {
+                        let Some(input) = next_input(&mut queue, root).await else {
                             return Ok(());
                         };
                         interactive
@@ -928,7 +878,10 @@ impl EnsembleSupervisor {
                         transient_recovery: &interactive.transient,
                         turn,
                         diagnostics: diagnostics.sender(),
-                        interactive: Some(interactive.clone()),
+                        interactive: Some(InteractiveAttempt {
+                            controller: interactive.clone(),
+                            queue: &mut queue,
+                        }),
                     })
                     .await;
                 interactive.release();
@@ -942,11 +895,7 @@ impl EnsembleSupervisor {
                 }
                 if !cancellation.is_cancelled()
                     && !interactive.input_cancelled()
-                    && interactive
-                        .current
-                        .lock()
-                        .expect("worker input poisoned")
-                        .is_some()
+                    && interactive.input.lock().expect("worker input poisoned").current.is_some()
                     && interactive.relaunches.load(AtomicOrdering::Acquire)
                         < MAX_LIVE_PROCESS_RECOVERY_ATTEMPTS as u64
                     && let Some(error) = result.recoverable_process_error()

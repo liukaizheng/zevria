@@ -14,6 +14,7 @@ use zevria_host::{
     Config,
     test_support::{load_config as load, model_revision as revision},
 };
+use zevria_session_api::{ManagementEvent, TurnEvent};
 
 fn source() -> String {
     r#"# preserved comment
@@ -277,18 +278,18 @@ async fn completed(
     let mut completed = false;
     loop {
         match event(receiver).await {
-            SessionEvent::UsageUpdated {
+            SessionEvent::Turn(TurnEvent::UsageUpdated {
                 profile: actual,
                 model_role,
                 input_token_limit,
                 ..
-            } => {
+            }) => {
                 assert_eq!(actual, *profile);
                 assert_eq!(model_role, zevria_model::models::mode_role(mode));
                 assert_eq!(input_token_limit, limit);
                 usage = true;
             }
-            SessionEvent::TurnCompleted { .. } => {
+            SessionEvent::Turn(TurnEvent::Completed { .. }) => {
                 assert!(usage);
                 completed = true;
             }
@@ -299,7 +300,7 @@ async fn completed(
                 );
                 return;
             }
-            SessionEvent::TurnFailed { error, .. } => panic!("turn failed: {error}"),
+            SessionEvent::Turn(TurnEvent::Failed { error, .. }) => panic!("turn failed: {error}"),
             _ => {}
         }
     }
@@ -347,9 +348,11 @@ async fn select_scoped(
         ))
         .unwrap();
     loop {
-        if let SessionEvent::ModelsResult { request_id, result } = event(events).await {
+        if let SessionEvent::Manage(ManagementEvent::ModelsResult { request_id, result }) =
+            event(events).await
+        {
             assert_eq!(request_id, "selection");
-            return result;
+            return *result;
         }
     }
 }
@@ -759,9 +762,11 @@ async fn immediate_model_change_resume_and_global_session_divergence_are_durable
         ))
         .unwrap();
     loop {
-        if let SessionEvent::ModelsResult { result, .. } = event(&mut events).await {
+        if let SessionEvent::Manage(ManagementEvent::ModelsResult { result, .. }) =
+            event(&mut events).await
+        {
             assert!(
-                matches!(result, Result::Catalog { current, revision, .. } if current.profile == ModelProfileRef::new("p", "new/with:separators") && revision == next_revision)
+                matches!(*result, Result::Catalog { current, revision, .. } if current.profile == ModelProfileRef::new("p", "new/with:separators") && revision == next_revision)
             );
             break;
         }

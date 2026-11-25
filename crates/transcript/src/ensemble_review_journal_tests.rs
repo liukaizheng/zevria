@@ -82,7 +82,7 @@ fn settle(journal: &mut WorkerReviewJournal, failure: Option<String>) {
     review(
         journal,
         WorkerReviewEvent::Settled {
-            generation: journal.state.active.as_ref().unwrap().generation,
+            generation: journal.state.inputs.active.as_ref().unwrap().generation,
             failure,
             connected: true,
             evidence: Box::new(journal.state.evidence.clone()),
@@ -129,7 +129,7 @@ fn ensemble_abandoned_root_does_not_promote_a_valid_late_execution_suffix() {
         request_id: WorkerControlId::new(),
     }];
     assert!(journal.reconcile(&root).unwrap().is_empty());
-    assert!(journal.state.retained.is_some());
+    assert!(journal.state.proposals.retained.is_some());
 }
 
 #[test]
@@ -154,11 +154,14 @@ fn ensemble_cross_log_dispatch_publication_and_settlement_crash_boundaries() {
         }
         assert_eq!(state, journal.state);
         assert!(
-            state.pending.is_empty(),
+            state.inputs.pending.is_empty(),
             "durably dispatched text must not be sent again"
         );
         assert!(state.eligible_snapshot().is_some());
-        assert!(state.confirmation.is_none(), "recovery is not approval");
+        assert!(
+            state.proposals.confirmation.is_none(),
+            "recovery is not approval"
+        );
     }
 }
 
@@ -181,19 +184,19 @@ fn ensemble_cross_log_dispatched_but_unsettled_feedback_uses_failed_fallback() {
     for event in root.iter().chain(journal.reconcile(&root).unwrap().iter()) {
         state.apply(event).unwrap();
     }
-    assert_eq!(state.active.as_ref().unwrap().generation, 2);
+    assert_eq!(state.inputs.active.as_ref().unwrap().generation, 2);
     state
         .apply(&WorkerReviewEvent::Interrupted { generation: 2 })
         .unwrap();
-    assert!(state.pending.is_empty());
+    assert!(state.inputs.pending.is_empty());
     assert_eq!(
         state.eligible_snapshot().unwrap().plan.markdown.as_deref(),
         Some("# Retained")
     );
-    assert!(state.confirmation.is_none());
+    assert!(state.proposals.confirmation.is_none());
     assert!(
         state
-            .diagnostic
+            .diagnostic()
             .as_deref()
             .unwrap()
             .contains("not incorporated")
@@ -284,7 +287,7 @@ fn ensemble_recovery_preserves_host_decisions_captured_before_interrupted_settle
         .unwrap();
     assert_eq!(state.evidence.user_decisions, vec![batch]);
     assert_eq!(state.evidence.decision_ids.len(), 1);
-    assert!(state.confirmation.is_none());
+    assert!(state.proposals.confirmation.is_none());
 }
 
 #[test]
@@ -356,7 +359,14 @@ fn ensemble_worker_replay_is_not_fresh_but_identical_explicit_republication_is()
     prompt(&mut journal, &input(1));
     publish(&mut journal, "# Same bytes");
     settle(&mut journal, None);
-    let revision = journal.state.retained.as_ref().unwrap().revision.clone();
+    let revision = journal
+        .state
+        .proposals
+        .retained
+        .as_ref()
+        .unwrap()
+        .revision
+        .clone();
     record(&mut journal, AgentRunEvent::ReplayBoundary);
     publish(&mut journal, "# Same bytes");
     record(

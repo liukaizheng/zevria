@@ -1,5 +1,7 @@
 //! Keys behavior and presentation tests.
 use super::*;
+use zevria_session_api::SessionStreamState;
+use zevria_session_api::{EnsembleEvent, PlanEvent, QuestionEvent, TurnEvent};
 
 #[test]
 fn typing_then_ctrl_enter_returns_to_normal_without_changing_the_workflow() {
@@ -12,11 +14,13 @@ fn typing_then_ctrl_enter_returns_to_normal_without_changing_the_workflow() {
         }
         assert_eq!(
             app.handle_event(ctrl_enter()),
-            Some(UiAction::Submit {
-                behavior: zevria_foundation::RequestBehavior::Standard,
-                text: "hi there".into(),
-                mode,
-            })
+            Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                zevria_session_api::TurnCommand::Submit {
+                    behavior: zevria_foundation::RequestBehavior::Standard,
+                    text: "hi there".into(),
+                    mode,
+                }
+            )))
         );
         assert!(app.is_busy());
         assert_eq!(app.active_turn_id(), None);
@@ -32,11 +36,11 @@ fn typing_then_ctrl_enter_returns_to_normal_without_changing_the_workflow() {
 
         apply_turn_event(
             &mut app,
-            SessionEvent::TurnStarted {
+            SessionEvent::Turn(TurnEvent::Started {
                 turn_id: TEST_TURN_ID,
                 message: Message::user("hi there"),
                 mode,
-            },
+            }),
         );
         assert!(app.interaction().is_normal());
         assert!(
@@ -87,11 +91,13 @@ fn plain_enter_inserts_a_newline_and_ctrl_enter_submits_all_lines() {
     }
     assert_eq!(
         app.handle_event(ctrl_enter()),
-        Some(UiAction::Submit {
-            behavior: zevria_foundation::RequestBehavior::Standard,
-            text: "first line\nsecond line".into(),
-            mode: SessionMode::Build,
-        })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Submit {
+                behavior: zevria_foundation::RequestBehavior::Standard,
+                text: "first line\nsecond line".into(),
+                mode: SessionMode::Build,
+            }
+        )))
     );
 }
 
@@ -620,20 +626,20 @@ fn control_paging_handles_stream_growth_and_repins_only_after_render() {
     let mut app = App::new();
     app.seed_history_entry(history_message(Message::user("row\n".repeat(60))));
     start_empty_turn(&mut app, TEST_TURN_ID, SessionMode::Build);
-    app.reduce_without_effects(SessionEvent::AssistantStreamUpdated {
-        turn_id: TEST_TURN_ID,
-        snapshot: (Message::assistant("stream\n".repeat(10))).into(),
-    });
+    app.reduce_without_effects(SessionStreamState::new(
+        TEST_TURN_ID,
+        (Message::assistant("stream\n".repeat(10))).into(),
+    ));
     rendered_text(&mut app, 80, 14);
     let bottom = app.view_scroll();
     app.handle_event(ctrl('u'));
     app.handle_event(ctrl('d'));
     assert_eq!(app.view_scroll(), bottom);
     assert!(!app.view_follow());
-    app.reduce_without_effects(SessionEvent::AssistantStreamUpdated {
-        turn_id: TEST_TURN_ID,
-        snapshot: (Message::assistant("stream\n".repeat(15))).into(),
-    });
+    app.reduce_without_effects(SessionStreamState::new(
+        TEST_TURN_ID,
+        (Message::assistant("stream\n".repeat(15))).into(),
+    ));
     rendered_text(&mut app, 80, 14);
     assert_eq!(app.view_scroll(), bottom);
     assert!(!app.view_follow(), "old bottom is not the rendered bottom");
@@ -643,10 +649,10 @@ fn control_paging_handles_stream_growth_and_repins_only_after_render() {
     assert!(app.view_follow());
     assert!(app.view_scroll() > bottom);
     let bottom = app.view_scroll();
-    app.reduce_without_effects(SessionEvent::AssistantStreamUpdated {
-        turn_id: TEST_TURN_ID,
-        snapshot: (Message::assistant("stream\n".repeat(25))).into(),
-    });
+    app.reduce_without_effects(SessionStreamState::new(
+        TEST_TURN_ID,
+        (Message::assistant("stream\n".repeat(25))).into(),
+    ));
     rendered_text(&mut app, 80, 14);
     assert!(app.view_follow());
     assert!(app.view_scroll() > bottom);
@@ -688,11 +694,11 @@ fn insert_and_approval_keep_fixed_page_steps_and_ignore_control_paging() {
         let mut app = App::new();
         app.seed_history_entry(history_message(Message::user("row\n".repeat(200))));
         if approval {
-            app.reduce_without_effects(SessionEvent::PlanStateChanged {
-                state: PlanWorkflowState::Ready {
+            app.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
+                state: Box::new(PlanWorkflowState::Ready {
                     artifact: test_plan_artifact(),
-                },
-            });
+                }),
+            }));
         } else {
             enter_insert(&mut app);
         }
@@ -740,10 +746,10 @@ fn control_paging_does_not_escape_picker_or_question_input_ownership() {
         root.set_view_for_test(20, false);
         let mut views = test_session_views(root);
         if question {
-            views.apply(SessionEvent::QuestionAsked {
+            views.apply(SessionEvent::Question(QuestionEvent::Asked {
                 turn_id: TEST_TURN_ID,
                 request: question_request("paging-question"),
-            });
+            }));
         } else {
             views.open_session_picker(vec![session_summary("paging-session", None)]);
         }
@@ -848,12 +854,9 @@ fn downward_scroll_repins_only_at_rendered_bottom_and_tracks_streaming_growth() 
 
     apply_turn_event(
         &mut app,
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: (Message::assistant(
+        SessionStreamState::new(TEST_TURN_ID, (Message::assistant(
                 "stream row 0\nstream row 1\nstream row 2\nstream row 3\nstream row 4\nlatest streamed tail",
-            )).into(),
-},
+            )).into()),
     );
     let streamed = rendered_text(&mut app, 30, 10);
     assert!(app.view_follow());
@@ -949,11 +952,13 @@ fn submission_returns_to_transcript_navigation_before_acknowledgement_and_while_
     }
     assert_eq!(
         app.handle_event(ctrl_enter()),
-        Some(UiAction::Submit {
-            behavior: zevria_foundation::RequestBehavior::Standard,
-            text: "go".into(),
-            mode: SessionMode::Build,
-        })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Submit {
+                behavior: zevria_foundation::RequestBehavior::Standard,
+                text: "go".into(),
+                mode: SessionMode::Build,
+            }
+        )))
     );
     assert!(app.is_busy());
     assert!(app.interaction().is_normal());
@@ -965,17 +970,14 @@ fn submission_returns_to_transcript_navigation_before_acknowledgement_and_while_
     assert!(app.input().is_empty());
     app.handle_event(key(KeyCode::Char('G')));
 
-    app.reduce_without_effects(SessionEvent::TurnStarted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
         turn_id: TEST_TURN_ID,
         message: Message::user("go"),
         mode: SessionMode::Build,
-    });
-    app.reduce_without_effects(SessionEvent::AssistantStreamUpdated {
-        turn_id: TEST_TURN_ID,
-        snapshot: (Message::assistant(
+    }));
+    app.reduce_without_effects(SessionStreamState::new(TEST_TURN_ID, (Message::assistant(
             "stream row 0\nstream row 1\nstream row 2\nstream row 3\nstream row 4\nlatest streamed tail",
-        )).into(),
-});
+        )).into()));
     let streamed = rendered_text(&mut app, 30, 10);
     assert!(streamed.contains("latest streamed tail"));
     assert!(app.view_follow());
@@ -1043,18 +1045,18 @@ fn an_in_flight_turn_preserves_insert_focus_and_new_drafts() {
     assert_eq!(local.input(), "x");
     assert!(cursor_visible_after_render(&mut local, 80, 20));
 
-    local.reduce_without_effects(SessionEvent::TurnStarted {
+    local.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
         turn_id: TEST_TURN_ID,
         message: Message::user("go"),
         mode: SessionMode::Build,
-    });
+    }));
     assert!(local.interaction().is_insert());
     assert_eq!(local.input(), "x");
-    local.reduce_without_effects(SessionEvent::TurnCompleted {
+    local.reduce_without_effects(SessionEvent::Turn(TurnEvent::Completed {
         attempt_id: None,
         turn_id: TEST_TURN_ID,
         message: Message::assistant("done"),
-    });
+    }));
     assert!(!local.is_busy());
     assert!(local.interaction().is_insert());
     assert_eq!(local.input(), "x");
@@ -1073,21 +1075,21 @@ fn an_in_flight_turn_preserves_insert_focus_and_new_drafts() {
     let authoritative_turn_id = TurnId::new(2);
     let mut authoritative = App::new();
     enter_insert(&mut authoritative);
-    authoritative.reduce_without_effects(SessionEvent::TurnStarted {
+    authoritative.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
         turn_id: authoritative_turn_id,
         message: Message::user("engine-started"),
         mode: SessionMode::Build,
-    });
+    }));
     assert!(authoritative.is_busy());
     assert!(authoritative.interaction().is_insert());
     assert_eq!(authoritative.handle_event(key(KeyCode::Char('i'))), None);
     assert!(authoritative.interaction().is_insert());
 
-    authoritative.reduce_without_effects(SessionEvent::TurnCompleted {
+    authoritative.reduce_without_effects(SessionEvent::Turn(TurnEvent::Completed {
         attempt_id: None,
         turn_id: authoritative_turn_id,
         message: Message::assistant("done"),
-    });
+    }));
     assert!(!authoritative.is_busy());
     assert!(authoritative.interaction().is_insert());
     assert_eq!(authoritative.input(), "i");
@@ -1357,11 +1359,11 @@ fn live_and_restored_ensemble_entries_display_prompts_but_copy_full_commands() {
                         EnsembleRecord::Started { start },
                     ))]);
                 } else {
-                    app.reduce_without_effects(SessionEvent::EnsembleStarted {
+                    app.reduce_without_effects(SessionEvent::Ensemble(EnsembleEvent::Started {
                         turn_id: TEST_TURN_ID,
-                        start,
+                        start: Box::new(start),
                         resumed: false,
-                    });
+                    }));
                 }
                 app.select_for_test(cursor(0, 0));
                 let _ = rendered_buffer(&mut app, 100, 20);
@@ -1443,21 +1445,21 @@ fn ensemble_multiline_selection_tracks_wrapping_and_worker_navigation() {
             })
             .collect();
         let mut app = App::new();
-        app.reduce_without_effects(SessionEvent::EnsembleStarted {
+        app.reduce_without_effects(SessionEvent::Ensemble(EnsembleEvent::Started {
             turn_id: TEST_TURN_ID,
-            start: start.clone(),
+            start: Box::new(start.clone()),
             resumed: false,
-        });
+        }));
         for (descriptor, status) in start.agents.iter().zip(statuses) {
-            app.reduce_without_effects(SessionEvent::AgentRunUpdated {
+            app.reduce_without_effects(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
                 turn_id: TEST_TURN_ID,
                 ensemble_run_id: start.run_id.clone(),
                 agent_run_id: descriptor.id.clone(),
-                event: AgentRunEvent::Status {
+                event: Box::new(AgentRunEvent::Status {
                     status,
                     detail: (status == AgentRunStatus::Failed).then(|| failure.to_string()),
-                },
-            });
+                }),
+            }));
         }
 
         // Resize the same entry so both wrapping and cache invalidation are exercised.
@@ -1606,13 +1608,15 @@ fn ensemble_row_edits_reclassify_exact_plan_and_review_commands() {
 
             assert_eq!(
                 app.handle_event(ctrl_enter()),
-                Some(UiAction::EditTranscript(TranscriptEdit {
-                    target: TranscriptEditTarget::EnsembleRun(start.run_id),
-                    replacement: TranscriptEditReplacement::Ensemble {
-                        workflow: replacement_workflow,
-                        prompt: "replacement prompt".into(),
-                    },
-                }))
+                Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                    zevria_session_api::TurnCommand::EditTranscript(TranscriptEdit {
+                        target: TranscriptEditTarget::EnsembleRun(start.run_id),
+                        replacement: TranscriptEditReplacement::Ensemble {
+                            workflow: replacement_workflow,
+                            prompt: "replacement prompt".into(),
+                        },
+                    })
+                )))
             );
             assert!(app.interaction().is_normal());
             assert!(app.is_awaiting_edit_acceptance());
@@ -1652,14 +1656,16 @@ fn ensemble_row_plain_and_leading_space_edits_become_messages() {
 
         assert_eq!(
             app.handle_event(ctrl_enter()),
-            Some(UiAction::EditTranscript(TranscriptEdit {
-                target: TranscriptEditTarget::EnsembleRun(start.run_id),
-                replacement: TranscriptEditReplacement::Message {
-                    behavior: zevria_foundation::RequestBehavior::Standard,
-                    text: expected.into(),
-                    mode: SessionMode::Plan,
-                },
-            }))
+            Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                zevria_session_api::TurnCommand::EditTranscript(TranscriptEdit {
+                    target: TranscriptEditTarget::EnsembleRun(start.run_id),
+                    replacement: TranscriptEditReplacement::Message {
+                        behavior: zevria_foundation::RequestBehavior::Standard,
+                        text: expected.into(),
+                        mode: SessionMode::Plan,
+                    },
+                })
+            )))
         );
         assert_eq!(app.in_flight_mode(), Some(SessionMode::Plan));
     }
@@ -1681,14 +1687,16 @@ fn ensemble_row_exact_skill_edits_remain_typed_skills() {
 
     assert_eq!(
         app.handle_event(ctrl_enter()),
-        Some(UiAction::EditTranscript(TranscriptEdit {
-            target: TranscriptEditTarget::EnsembleRun(start.run_id),
-            replacement: TranscriptEditReplacement::Skill {
-                name: "review".parse().unwrap(),
-                args: "inspect this \n carefully".into(),
-                mode: SessionMode::Plan,
-            },
-        }))
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::EditTranscript(TranscriptEdit {
+                target: TranscriptEditTarget::EnsembleRun(start.run_id),
+                replacement: TranscriptEditReplacement::Skill {
+                    name: "review".parse().unwrap(),
+                    args: "inspect this \n carefully".into(),
+                    mode: SessionMode::Plan,
+                },
+            })
+        )))
     );
     assert_eq!(app.in_flight_mode(), Some(SessionMode::Plan));
 }
@@ -1763,13 +1771,15 @@ fn ordinary_message_recalls_can_become_plan_or_review_ensembles() {
 
         assert_eq!(
             app.handle_event(ctrl_enter()),
-            Some(UiAction::EditTranscript(TranscriptEdit {
-                target: TranscriptEditTarget::PromptOrdinal(0),
-                replacement: TranscriptEditReplacement::Ensemble {
-                    workflow,
-                    prompt: "replacement prompt".into(),
-                },
-            }))
+            Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                zevria_session_api::TurnCommand::EditTranscript(TranscriptEdit {
+                    target: TranscriptEditTarget::PromptOrdinal(0),
+                    replacement: TranscriptEditReplacement::Ensemble {
+                        workflow,
+                        prompt: "replacement prompt".into(),
+                    },
+                })
+            )))
         );
         assert_eq!(
             app.in_flight_mode(),
@@ -1792,7 +1802,9 @@ fn ensemble_tail_rewrites_commit_only_on_the_matching_acceptance_event() {
     ensemble.set_input_for_test("/ensemble-plan fresh", "/ensemble-plan fresh".len());
     assert!(matches!(
         ensemble.handle_event(ctrl_enter()),
-        Some(UiAction::EditTranscript(_))
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::EditTranscript(_)
+        )))
     ));
     assert_eq!(
         ensemble.history().len(),
@@ -1800,11 +1812,11 @@ fn ensemble_tail_rewrites_commit_only_on_the_matching_acceptance_event() {
         "pending edits retain the old tail"
     );
 
-    let effects = ensemble.reduce(SessionEvent::EnsembleStarted {
+    let effects = ensemble.reduce(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TurnId::new(2),
-        start: fresh.clone(),
+        start: Box::new(fresh.clone()),
         resumed: false,
-    });
+    }));
     assert_eq!(ensemble.history().len(), 1);
     assert!(matches!(
         ensemble.history().first(),
@@ -1822,11 +1834,11 @@ fn ensemble_tail_rewrites_commit_only_on_the_matching_acceptance_event() {
     message.set_input_for_test("ordinary replacement", "ordinary replacement".len());
     message.handle_event(ctrl_enter());
     assert_eq!(message.history().len(), 2);
-    let effects = message.reduce(SessionEvent::TurnStarted {
+    let effects = message.reduce(SessionEvent::Turn(TurnEvent::Started {
         turn_id: TurnId::new(3),
         message: Message::user("ordinary replacement"),
         mode: SessionMode::Build,
-    });
+    }));
     assert_eq!(
         effects,
         vec![AppEffect::PruneEnsembleRuns(vec![old.run_id.clone()])]
@@ -1849,14 +1861,14 @@ fn ensemble_tail_rewrites_commit_only_on_the_matching_acceptance_event() {
         rejected.set_input_for_test("replacement", "replacement".len());
         rejected.handle_event(ctrl_enter());
         if cancelled {
-            rejected.reduce_without_effects(SessionEvent::TurnCancelled {
+            rejected.reduce_without_effects(SessionEvent::Turn(TurnEvent::Cancelled {
                 turn_id: TurnId::new(4),
-            });
+            }));
         } else {
-            rejected.reduce_without_effects(SessionEvent::TurnRejected {
+            rejected.reduce_without_effects(SessionEvent::Turn(TurnEvent::Rejected {
                 turn_id: TurnId::new(4),
                 error: "pre-acceptance failure".to_string(),
-            });
+            }));
         }
         assert!(matches!(
             rejected.history().first(),
@@ -1927,7 +1939,7 @@ fn ctrl_e_requires_all_turns_finished_and_an_idle_pane() {
     executing.select_for_test(cursor(0, 0));
     apply_turn_event(
         &mut executing,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![tool_call(
@@ -1936,7 +1948,7 @@ fn ctrl_e_requires_all_turns_finished_and_an_idle_pane() {
                 "command",
                 json!({}),
             )]),
-        },
+        }),
     );
     assert!(executing.has_executing_tool_calls());
     assert_eq!(ctrl_e(&mut executing), None);
@@ -1966,15 +1978,17 @@ fn ctrl_enter_submits_the_revision_and_keeps_the_pane_until_the_engine_confirms(
     let action = app.handle_event(ctrl_enter());
     assert_eq!(
         action,
-        Some(UiAction::EditTranscript(TranscriptEdit {
-            // "second" is the pane's second user row, so prompt #1.
-            target: TranscriptEditTarget::PromptOrdinal(1),
-            replacement: TranscriptEditReplacement::Message {
-                behavior: zevria_foundation::RequestBehavior::Standard,
-                text: "second revised".into(),
-                mode: SessionMode::Build,
-            },
-        }))
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::EditTranscript(TranscriptEdit {
+                // "second" is the pane's second user row, so prompt #1.
+                target: TranscriptEditTarget::PromptOrdinal(1),
+                replacement: TranscriptEditReplacement::Message {
+                    behavior: zevria_foundation::RequestBehavior::Standard,
+                    text: "second revised".into(),
+                    mode: SessionMode::Build,
+                },
+            })
+        )))
     );
     // Nothing leaves the pane yet: the engine may still reject the edit.
     assert_eq!(app.history().len(), 4);
@@ -1992,11 +2006,11 @@ fn ctrl_enter_submits_the_revision_and_keeps_the_pane_until_the_engine_confirms(
     // it go, and the revision lands as the newest turn.
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnStarted {
+        SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("second revised"),
             mode: SessionMode::Build,
-        },
+        }),
     );
     assert!(!app.is_awaiting_edit_acceptance());
     assert!(app.interaction().is_normal());
@@ -2020,24 +2034,26 @@ fn edited_pre_turn_compaction_moves_its_marker_before_the_revised_prompt() {
     app.handle_event(key(KeyCode::Char('!')));
     assert!(matches!(
         app.handle_event(ctrl_enter()),
-        Some(UiAction::EditTranscript(_))
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::EditTranscript(_)
+        )))
     ));
 
     let turn_id = TurnId::new(77);
-    app.reduce_without_effects(SessionEvent::CompactionStarted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::CompactionStarted {
         turn_id,
         trigger: CompactionTrigger::AutomaticPreTurn,
-    });
-    app.reduce_without_effects(SessionEvent::CompactionCompleted {
+    }));
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::CompactionCompleted {
         turn_id,
         trigger: CompactionTrigger::AutomaticPreTurn,
         backend: CompactionBackend::LocalSummary,
-    });
-    app.reduce_without_effects(SessionEvent::TurnStarted {
+    }));
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
         turn_id,
         message: Message::user("second!"),
         mode: SessionMode::Build,
-    });
+    }));
 
     assert_eq!(app.history().len(), 4);
     assert!(matches!(&app.history()[2], HistoryEntry::CompactionDivider));
@@ -2061,15 +2077,17 @@ fn prompt_ordinals_skip_rows_that_are_not_user_prompts() {
 
     assert_eq!(
         app.handle_event(ctrl_enter()),
-        Some(UiAction::EditTranscript(TranscriptEdit {
-            // The assistant reply and the error notice are not prompts.
-            target: TranscriptEditTarget::PromptOrdinal(1),
-            replacement: TranscriptEditReplacement::Message {
-                behavior: zevria_foundation::RequestBehavior::Standard,
-                text: "second".into(),
-                mode: SessionMode::Build,
-            },
-        }))
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::EditTranscript(TranscriptEdit {
+                // The assistant reply and the error notice are not prompts.
+                target: TranscriptEditTarget::PromptOrdinal(1),
+                replacement: TranscriptEditReplacement::Message {
+                    behavior: zevria_foundation::RequestBehavior::Standard,
+                    text: "second".into(),
+                    mode: SessionMode::Build,
+                },
+            })
+        )))
     );
 }
 
@@ -2086,10 +2104,10 @@ fn a_rejected_edit_leaves_the_pane_intact() {
 
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnRejected {
+        SessionEvent::Turn(TurnEvent::Rejected {
             turn_id: TEST_TURN_ID,
             error: "the edited prompt #0 is not in the session history".to_string(),
-        },
+        }),
     );
 
     assert!(!app.is_awaiting_edit_acceptance());
@@ -2120,11 +2138,11 @@ fn a_confirmed_edit_rerenders_the_replaced_prompt() {
     app.handle_event(ctrl_enter());
     apply_turn_event(
         &mut app,
-        SessionEvent::TurnStarted {
+        SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("original question revised"),
             mode: SessionMode::Build,
-        },
+        }),
     );
 
     // The revision occupies the row the replaced prompt held, so the cached
@@ -2324,22 +2342,22 @@ fn non_y_keys_cancel_a_pending_tool_output_yank() {
     let mut app = App::new();
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: assistant_message(vec![
                 tool_call("call_1", None, "command", arguments.clone()),
                 AssistantContent::text("after tool"),
             ]),
-        },
+        }),
     );
     apply_turn_event(
         &mut app,
-        SessionEvent::Intermediate {
+        SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: tool_result_message("call_1", None, "command", "tool output"),
-        },
+        }),
     );
     app.select_for_test(cursor(0, 0));
 

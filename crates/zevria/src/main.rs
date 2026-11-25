@@ -359,11 +359,7 @@ async fn run_session(
     });
     let root_app = App::new()
         .with_mcp_prompts(&restoration.mcp_prompts)
-        .with_skill_context(&zevria_instructions::skill::SkillContext {
-            catalog: restoration.skill_catalog.clone(),
-            pins: restoration.active_skills,
-            mode_enabled: true,
-        });
+        .with_skill_context(&restoration.skill_context);
     let mut views = SessionViews::new_restored(
         root_app,
         workspace.to_path_buf(),

@@ -1,5 +1,6 @@
 use super::*;
 use zevria_model::models::ModelSelection;
+use zevria_session_api::{ManagementEvent, TurnEvent};
 
 #[tokio::test]
 async fn invalid_eager_tool_json_retries_and_exhaustion_keeps_the_actionable_flag() {
@@ -279,7 +280,7 @@ async fn engine_tool_loop_effort_selection_preserves_signed_thinking_and_reopene
     let address = listener.local_addr().unwrap();
     let mut profile = profile(format!("http://{address}/v1/messages"));
     if let ProfileProtocol::Anthropic { endpoint, .. } = &mut profile.protocol {
-        endpoint.input_token_count.enabled = false;
+        std::sync::Arc::make_mut(endpoint).input_token_count.enabled = false;
     }
     let (sent, received) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
@@ -381,7 +382,7 @@ async fn engine_tool_loop_effort_selection_preserves_signed_thinking_and_reopene
     while let Ok(update) = receiver.try_recv() {
         if matches!(
             update,
-            SessionUpdate::Lifecycle(SessionEvent::ToolResults { .. })
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::ToolResults { .. }))
         ) {
             saw_tool = true;
         }
@@ -411,11 +412,11 @@ async fn engine_tool_loop_effort_selection_preserves_signed_thinking_and_reopene
         .unwrap();
     assert!(matches!(
         receiver.try_recv().unwrap(),
-        SessionUpdate::Lifecycle(SessionEvent::ModelsResult {
-            result: zevria_model::models::ModelManagementResult::Changed { snapshot: None, .. },
+        SessionUpdate::Lifecycle(SessionEvent::Manage(ManagementEvent::ModelsResult {
+            result,
             ..
-        })
-    ));
+        }))
+     if matches!(result.as_ref(), zevria_model::models::ModelManagementResult::Changed { snapshot: None, .. })));
     assert!(receiver.try_recv().is_err());
     assert_eq!(
         &engine.conversation().items()[1..1 + records.len()],

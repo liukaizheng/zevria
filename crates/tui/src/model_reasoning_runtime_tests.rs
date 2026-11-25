@@ -5,6 +5,7 @@ use zevria_model::models::{
     ModelSelection,
 };
 use zevria_session_api::ManagementCommand;
+use zevria_session_api::ManagementEvent;
 
 #[test]
 fn reasoning_updates_only_matching_role_without_touching_profiles_history_or_context() {
@@ -25,11 +26,11 @@ fn reasoning_updates_only_matching_role_without_touching_profiles_history_or_con
         ]); // startup restoration must retain the seeded levels
         root.set_mode_for_test(SessionMode::Plan);
         let mut views = SessionViews::new(root, PathBuf::from("."));
-        let before = views.root.status_for_test();
-        let history = format!("{:?}", views.root.history());
+        let before = views.workspace.root.status_for_test();
+        let history = format!("{:?}", views.workspace.root.history());
         let profiles = views.model_profiles.clone();
         views.open_model_picker(scope);
-        assert!(views.root.is_busy());
+        assert!(views.workspace.root.is_busy());
         let Some(SessionCommand::Manage(ManagementCommand::Models {
             request_id,
             request:
@@ -37,7 +38,7 @@ fn reasoning_updates_only_matching_role_without_touching_profiles_history_or_con
                     mode: SessionMode::Plan,
                     ..
                 },
-        })) = views.overlays.models.commands.pop_front()
+        })) = views.workspace.controls.models.commands.pop_front()
         else {
             panic!("list")
         };
@@ -48,9 +49,9 @@ fn reasoning_updates_only_matching_role_without_touching_profiles_history_or_con
             input_token_limit: 9000,
             retained_user_tokens: 100,
         };
-        views.apply(SessionEvent::ModelsResult {
+        views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
             request_id: request_id.clone(),
-            result: Result::Catalog {
+            result: Box::new(Result::Catalog {
                 mode: SessionMode::Plan,
                 scope,
                 current: ModelSelection::new(profile.clone(), Level::Medium),
@@ -59,13 +60,16 @@ fn reasoning_updates_only_matching_role_without_touching_profiles_history_or_con
                     reasoning_levels: vec![Level::Medium, Level::High],
                 }],
                 revision: "r".into(),
-            },
-        });
-        views.overlays.models.handle_key(KeyCode::Enter);
-        assert!(views.overlays.models.commands.is_empty());
-        views.overlays.models.handle_key(KeyCode::End);
-        views.overlays.models.handle_key(KeyCode::Enter);
-        assert_eq!(views.root.status_for_test().reasoning, Some(Level::Medium));
+            }),
+        }));
+        views.workspace.controls.models.handle_key(KeyCode::Enter);
+        assert!(views.workspace.controls.models.commands.is_empty());
+        views.workspace.controls.models.handle_key(KeyCode::End);
+        views.workspace.controls.models.handle_key(KeyCode::Enter);
+        assert_eq!(
+            views.workspace.root.status_for_test().reasoning,
+            Some(Level::Medium)
+        );
         let changed = Result::Changed {
             role: ModelRole::Plan,
             scope,
@@ -75,26 +79,32 @@ fn reasoning_updates_only_matching_role_without_touching_profiles_history_or_con
             revision: "r".into(),
             unchanged: false,
         };
-        views.apply(SessionEvent::ModelsResult {
+        views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
             request_id: "old".into(),
-            result: changed.clone(),
-        });
-        assert_eq!(views.root.status_for_test().reasoning, Some(Level::Medium));
-        assert!(views.root.is_busy());
-        views.apply(SessionEvent::ModelsResult {
+            result: Box::new(changed.clone()),
+        }));
+        assert_eq!(
+            views.workspace.root.status_for_test().reasoning,
+            Some(Level::Medium)
+        );
+        assert!(views.workspace.root.is_busy());
+        views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
             request_id,
-            result: changed,
-        });
-        assert!(!views.overlays.models.is_open() && !views.root.is_busy());
-        let after = views.root.status_for_test();
+            result: Box::new(changed),
+        }));
+        assert!(!views.workspace.controls.models.is_open() && !views.workspace.root.is_busy());
+        let after = views.workspace.root.status_for_test();
         assert_eq!(after.reasoning, Some(Level::High));
         assert_eq!(after.profile, before.profile);
         assert_eq!(after.context, before.context);
         assert_eq!(after.response, before.response);
-        assert_eq!(format!("{:?}", views.root.history()), history);
+        assert_eq!(format!("{:?}", views.workspace.root.history()), history);
         assert!(std::sync::Arc::ptr_eq(&profiles, &views.model_profiles));
-        views.root.set_mode_for_test(SessionMode::Build);
-        assert_eq!(views.root.status_for_test().reasoning, Some(Level::Medium));
+        views.workspace.root.set_mode_for_test(SessionMode::Build);
+        assert_eq!(
+            views.workspace.root.status_for_test().reasoning,
+            Some(Level::Medium)
+        );
     }
 }
 
@@ -110,9 +120,14 @@ fn child_status_uses_its_configured_reasoning_not_the_root_override() {
     let mut views = SessionViews::new(root, PathBuf::from("."));
     let index = views.ensure_child(&SubtaskId::new("reasoning-child"));
     for role in [ModelRole::Explore, ModelRole::Builder] {
-        views.children[index].app.set_inspect_model_role(role);
+        views.workspace.children[index]
+            .app
+            .set_inspect_model_role(role);
         assert_eq!(
-            views.children[index].app.status_for_test().reasoning,
+            views.workspace.children[index]
+                .app
+                .status_for_test()
+                .reasoning,
             Some(Level::Medium)
         );
     }
@@ -126,14 +141,14 @@ fn inspect_panes_are_blocked_and_ctrl_c_cancels_only_the_reasoning_picker() {
     );
     views.ensure_child(&SubtaskId::new("inspect-test"));
     views.visible = Some(VisiblePane::Subtask(
-        views.children[0].app.surface().id.pane,
+        views.workspace.children[0].app.surface().id.pane,
     ));
     views.open_model_picker(ModelSelectionScope::SessionOnly);
-    assert!(!views.overlays.models.is_open() && !views.root.is_busy());
+    assert!(!views.workspace.controls.models.is_open() && !views.workspace.root.is_busy());
     views.visible = None;
     views.open_model_picker(ModelSelectionScope::SessionOnly);
     let Some(SessionCommand::Manage(ManagementCommand::Models { request_id, .. })) =
-        views.overlays.models.commands.pop_front()
+        views.workspace.controls.models.commands.pop_front()
     else {
         panic!("list")
     };
@@ -143,16 +158,19 @@ fn inspect_panes_are_blocked_and_ctrl_c_cancels_only_the_reasoning_picker() {
     ));
     assert!(views.handle_event(event).is_none());
     assert!(matches!(
-        views.overlays.models.commands.pop_front(),
+        views.workspace.controls.models.commands.pop_front(),
         Some(SessionCommand::Manage(ManagementCommand::Models {
             request: Request::Cancel,
             ..
         }))
     ));
-    views.apply(SessionEvent::ModelsResult {
+    views.apply(SessionEvent::Manage(ManagementEvent::ModelsResult {
         request_id,
-        result: Result::Cancelled,
-    });
-    assert!(!views.overlays.models.is_open() && !views.root.is_busy());
-    assert_eq!(views.root.status_for_test().reasoning, Some(Level::Medium));
+        result: Box::new(Result::Cancelled),
+    }));
+    assert!(!views.workspace.controls.models.is_open() && !views.workspace.root.is_busy());
+    assert_eq!(
+        views.workspace.root.status_for_test().reasoning,
+        Some(Level::Medium)
+    );
 }

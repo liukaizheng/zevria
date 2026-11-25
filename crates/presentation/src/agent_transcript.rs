@@ -265,10 +265,6 @@ pub struct AgentTranscriptReducer {
     current_plan: Option<BlockLocation>,
     current_plan_markdown: Option<String>,
     plan_scope_start: usize,
-    prompt_echo: Option<PromptEcho>,
-    review_prompts: HashMap<u64, zevria_content::UserPrompt>,
-    image_echoes: std::collections::VecDeque<zevria_content::PromptImage>,
-    user_group: Option<(Option<String>, PresentationBlockId, usize)>,
     review: ReviewProjection,
     latest_usage: Option<AgentUsage>,
     replay: Option<Box<ReplayStage>>,
@@ -277,6 +273,20 @@ pub struct AgentTranscriptReducer {
     replaying_review: bool,
     review_sealed: bool,
     review_abandoned: bool,
+    echo: EchoFilter,
+    coverage: DisplayCoverageState,
+}
+
+#[derive(Default)]
+struct EchoFilter {
+    prompt_echo: Option<PromptEcho>,
+    review_prompts: HashMap<u64, zevria_content::UserPrompt>,
+    image_echoes: std::collections::VecDeque<zevria_content::PromptImage>,
+    user_group: Option<(Option<String>, PresentationBlockId, usize)>,
+}
+
+#[derive(Default)]
+struct DisplayCoverageState {
     projections: HashMap<(SegmentKind, String), (String, Vec<ProjectionPiece>)>,
     displays: HashMap<String, zevria_content::response::ResponseDisplay>,
     // Latest coverage per emitted segment/range, not a history of token
@@ -406,11 +416,11 @@ impl AgentTranscriptReducer {
             AgentRunEvent::Review { event } => self.apply_review_event(conversation, *event),
             AgentRunEvent::Prompt { mut text, .. } if !self.review_inputs.is_empty() => {
                 self.fence();
-                for (index, image) in self.image_echoes.iter().enumerate() {
+                for (index, image) in self.echo.image_echoes.iter().enumerate() {
                     text = text.replacen(&image.label(index + 1), "", 1);
                 }
                 self.enable_review_publication();
-                self.prompt_echo = Some(PromptEcho {
+                self.echo.prompt_echo = Some(PromptEcho {
                     prompt: text,
                     accumulated: String::new(),
                 });
@@ -433,11 +443,12 @@ impl AgentTranscriptReducer {
                 );
             }
             AgentRunEvent::UserImage { image, message_id } => {
-                if self.image_echoes.front() == Some(&image) {
-                    self.image_echoes.pop_front();
+                if self.echo.image_echoes.front() == Some(&image) {
+                    self.echo.image_echoes.pop_front();
                     return change;
                 }
                 let ordinal = self
+                    .echo
                     .user_group
                     .as_ref()
                     .filter(|(id, _, _)| id == &message_id)
@@ -660,9 +671,15 @@ impl AgentTranscriptReducer {
         // report would duplicate covered text and erase its source boundaries.
         // This also applies before terminal metadata arrives and to retained
         // failed/interrupted answers; a report cannot promote that evidence.
-        if self.applied_answers.iter().any(|(id, history_index)| {
-            Some(*history_index) == self.current_entry && self.displays.contains_key(id)
-        }) {
+        if self
+            .coverage
+            .applied_answers
+            .iter()
+            .any(|(id, history_index)| {
+                Some(*history_index) == self.current_entry
+                    && self.coverage.displays.contains_key(id)
+            })
+        {
             return ConversationChange::default();
         }
         let history_index = self
@@ -756,7 +773,7 @@ impl AgentTranscriptReducer {
         conversation.change_structure();
         self.rebuild_locations(conversation);
         self.fence();
-        self.user_group = None;
+        self.echo.user_group = None;
         ConversationChange::replaced_from(history_index)
     }
 
@@ -789,7 +806,7 @@ impl AgentTranscriptReducer {
         annotation: PromptAnnotation,
     ) -> Option<BlockLocation> {
         let prompt = text.into();
-        self.user_group = None;
+        self.echo.user_group = None;
         self.fence();
         let history_index =
             conversation.push_entry(HistoryEntry::Conversation(ConversationEntry {
@@ -806,11 +823,11 @@ impl AgentTranscriptReducer {
         // Review acceptance can queue ahead of the active input. Only dispatch
         // installs its echo queue; ordinary prompts have no separate dispatch.
         if annotation.generation.is_none() {
-            self.prompt_echo = Some(PromptEcho {
+            self.echo.prompt_echo = Some(PromptEcho {
                 prompt: prompt.text_projection(),
                 accumulated: String::new(),
             });
-            self.image_echoes = prompt.images().cloned().collect();
+            self.echo.image_echoes = prompt.images().cloned().collect();
         }
         let mut header: Option<BlockLocation> = None;
         let mut ordinal = 0;
@@ -850,7 +867,7 @@ impl AgentTranscriptReducer {
         // must not inherit its provenance or lifecycle. Ordinary Prompt events
         // can still acquire following image/text segments without a message ID.
         if annotation.generation.is_none() {
-            self.user_group = header.map(|location| (None, location.block_id, ordinal));
+            self.echo.user_group = header.map(|location| (None, location.block_id, ordinal));
         }
         header
     }
@@ -863,11 +880,12 @@ impl AgentTranscriptReducer {
         ordinal: usize,
     ) {
         let group = self
+            .echo
             .user_group
             .as_ref()
             .filter(|(id, _, _)| id == &message_id)
             .map_or(location.block_id, |(_, group, _)| *group);
-        self.user_group = Some((message_id, group, ordinal));
+        self.echo.user_group = Some((message_id, group, ordinal));
         if let Some(block) = block_mut(conversation, location) {
             block.prompt_group = Some(group);
             if group == block.id {
@@ -883,11 +901,11 @@ impl AgentTranscriptReducer {
         text: String,
         message_id: Option<String>,
     ) {
-        if let Some(echo) = &mut self.prompt_echo {
+        if let Some(echo) = &mut self.echo.prompt_echo {
             echo.accumulated.push_str(&text);
             if echo.prompt.starts_with(&echo.accumulated) {
                 if echo.prompt == echo.accumulated {
-                    self.prompt_echo = None;
+                    self.echo.prompt_echo = None;
                 }
                 return;
             }
@@ -896,7 +914,7 @@ impl AgentTranscriptReducer {
                 .strip_prefix(&echo.prompt)
                 .unwrap_or(&echo.accumulated)
                 .to_string();
-            self.prompt_echo = None;
+            self.echo.prompt_echo = None;
             if divergent.is_empty() {
                 return;
             }
@@ -943,7 +961,7 @@ impl AgentTranscriptReducer {
             && let Some(target) = &self.segment
             && target.kind == kind
             && target.message_id.as_ref() == Some(id)
-            && let Some((buffer, pieces)) = self.projections.get(&(kind, id.clone()))
+            && let Some((buffer, pieces)) = self.coverage.projections.get(&(kind, id.clone()))
             && let Some(piece) = pieces
                 .last()
                 .filter(|piece| piece.location == target.location)
@@ -951,8 +969,8 @@ impl AgentTranscriptReducer {
             // Coverage may have left only a suffix in the ordinary block.
             // The complete source slice is authoritative for Replace.
             if buffer[piece.start..piece.end] == text {
-                self.prompt_echo = None;
-                self.user_group = None;
+                self.echo.prompt_echo = None;
+                self.echo.user_group = None;
                 return;
             }
             true
@@ -983,10 +1001,10 @@ impl AgentTranscriptReducer {
                 block.touch();
                 conversation.touch_entry(target.location.history_index);
             }
-            if let Some(ids) = self.display_segments.get(&key) {
-                self.displays_dirty.extend(ids.iter().cloned());
+            if let Some(ids) = self.coverage.display_segments.get(&key) {
+                self.coverage.displays_dirty.extend(ids.iter().cloned());
             }
-            let (buffer, pieces) = self.projections.entry(key).or_default();
+            let (buffer, pieces) = self.coverage.projections.entry(key).or_default();
             if let Some(piece) = pieces
                 .last_mut()
                 .filter(|piece| piece.location == target.location)
@@ -1010,7 +1028,7 @@ impl AgentTranscriptReducer {
 
     fn install_display(&mut self, display: zevria_content::response::ResponseDisplay) {
         let id = &display.attempt.id;
-        if self.displays.get(id).is_some_and(|old| {
+        if self.coverage.displays.get(id).is_some_and(|old| {
             old.attempt.revision > display.attempt.revision
                 || (old.attempt.revision == display.attempt.revision
                     && (old.attempt != display.attempt || old.bindings == display.bindings))
@@ -1020,7 +1038,11 @@ impl AgentTranscriptReducer {
         let Ok(parts) = display.validate_and_parts() else {
             return;
         };
-        let coverage = self.display_text_coverage.entry(id.clone()).or_default();
+        let coverage = self
+            .coverage
+            .display_text_coverage
+            .entry(id.clone())
+            .or_default();
         for binding in &display.bindings {
             match binding {
                 Binding::Text {
@@ -1031,7 +1053,8 @@ impl AgentTranscriptReducer {
                     ..
                 } => {
                     let kind = segment_kind(*kind);
-                    self.display_segments
+                    self.coverage
+                        .display_segments
                         .entry((kind, message_id.clone()))
                         .or_default()
                         .insert(id.clone());
@@ -1046,31 +1069,36 @@ impl AgentTranscriptReducer {
                     }
                 }
                 Binding::Tool { tool_call_id, .. } => {
-                    self.display_tools
+                    self.coverage
+                        .display_tools
                         .entry(tool_call_id.clone())
                         .or_default()
                         .insert(id.clone());
                 }
             }
         }
-        self.displays_dirty.insert(id.clone());
-        self.displays.insert(id.clone(), display);
+        self.coverage.displays_dirty.insert(id.clone());
+        self.coverage.displays.insert(id.clone(), display);
     }
 
     fn tool_changed(&mut self, id: &str, location: BlockLocation, hosted: bool) {
-        if let Some(attempts) = self.display_tools.get(id) {
-            self.displays_dirty.extend(attempts.iter().cloned());
+        if let Some(attempts) = self.coverage.display_tools.get(id) {
+            self.coverage
+                .displays_dirty
+                .extend(attempts.iter().cloned());
         }
         if hosted {
-            self.hosted_actions_dirty.insert(location.history_index);
+            self.coverage
+                .hosted_actions_dirty
+                .insert(location.history_index);
         }
     }
 
     fn flush_projection_changes(&mut self, conversation: &mut ConversationState) {
-        if !self.displays_dirty.is_empty() {
+        if !self.coverage.displays_dirty.is_empty() {
             self.refresh_displays(conversation);
         }
-        for index in std::mem::take(&mut self.hosted_actions_dirty) {
+        for index in std::mem::take(&mut self.coverage.hosted_actions_dirty) {
             self.regroup_hosted_actions(conversation, index);
         }
     }
@@ -1094,7 +1122,7 @@ impl AgentTranscriptReducer {
         let mut old_groups = HashMap::new();
         let mut ordinary = Vec::new();
         for block in original {
-            if self.fallback_group_ids.contains(&block.id) {
+            if self.coverage.fallback_group_ids.contains(&block.id) {
                 old_groups.insert(block.id, block);
             } else {
                 ordinary.push(block);
@@ -1209,10 +1237,11 @@ impl AgentTranscriptReducer {
             }
         }
         let id = *self
+            .coverage
             .fallback_groups
             .entry(key)
             .or_insert_with(|| conversation.allocate_block_id());
-        self.fallback_group_ids.insert(id);
+        self.coverage.fallback_group_ids.insert(id);
         let kind = PresentationBlockKind::WebActivity(activity);
         let mut block = PresentationBlock {
             id,
@@ -1237,8 +1266,8 @@ impl AgentTranscriptReducer {
     }
 
     fn refresh_displays(&mut self, conversation: &mut ConversationState) {
-        for id in std::mem::take(&mut self.displays_dirty) {
-            let Some(display) = self.displays.get(&id) else {
+        for id in std::mem::take(&mut self.coverage.displays_dirty) {
+            let Some(display) = self.coverage.displays.get(&id) else {
                 continue;
             };
             let parts = display.parts();
@@ -1271,12 +1300,13 @@ impl AgentTranscriptReducer {
                     } => {
                         let kind = segment_kind(*kind);
                         let Some((buffer, pieces)) =
-                            self.projections.get(&(kind, message_id.clone()))
+                            self.coverage.projections.get(&(kind, message_id.clone()))
                         else {
                             valid = false;
                             break;
                         };
                         let expected = self
+                            .coverage
                             .display_text_coverage
                             .get(&id)
                             .and_then(|coverage| coverage.get(&(kind, message_id.clone(), *start)));
@@ -1331,10 +1361,15 @@ impl AgentTranscriptReducer {
             // Only exact, previously advertised coverage can retire an older
             // append-only segment. Never blanket-hide a message ID or guess a
             // binding by proximity, and preserve any unrelated suffix.
-            for ((kind, message_id, start), evidence) in
-                self.display_text_coverage.get(&id).into_iter().flatten()
+            for ((kind, message_id, start), evidence) in self
+                .coverage
+                .display_text_coverage
+                .get(&id)
+                .into_iter()
+                .flatten()
             {
-                let Some((buffer, pieces)) = self.projections.get(&(*kind, message_id.clone()))
+                let Some((buffer, pieces)) =
+                    self.coverage.projections.get(&(*kind, message_id.clone()))
                 else {
                     continue;
                 };
@@ -1397,7 +1432,9 @@ impl AgentTranscriptReducer {
                         changed = true;
                         block.visibility = BlockVisibility::Covered;
                         if matches!(block.kind, PresentationBlockKind::Tool(_)) {
-                            self.hosted_actions_dirty.insert(location.history_index);
+                            self.coverage
+                                .hosted_actions_dirty
+                                .insert(location.history_index);
                         }
                     }
                     if changed {
@@ -1415,7 +1452,8 @@ impl AgentTranscriptReducer {
                         )
                 })
             {
-                self.applied_answers
+                self.coverage
+                    .applied_answers
                     .insert(display.attempt.id.clone(), history_index);
             }
             let mut attempt = display.attempt.clone();
@@ -1440,7 +1478,7 @@ impl AgentTranscriptReducer {
                                 &display.attempt.id,
                                 *output_index,
                             );
-                            if let Some(group) = self.fallback_groups.get(tool_call_id) {
+                            if let Some(group) = self.coverage.fallback_groups.get(tool_call_id) {
                                 conversation.alias_attempt_action(
                                     (location.history_index, *group),
                                     &display.attempt.id,
@@ -1472,6 +1510,7 @@ impl AgentTranscriptReducer {
                         end,
                     } => {
                         if let Some((_, pieces)) = self
+                            .coverage
                             .projections
                             .get(&(segment_kind(*kind), message_id.clone()))
                         {
@@ -1510,8 +1549,8 @@ impl AgentTranscriptReducer {
         update: SegmentUpdate,
     ) -> bool {
         if kind != SegmentKind::User {
-            self.prompt_echo = None;
-            self.user_group = None;
+            self.echo.prompt_echo = None;
+            self.echo.user_group = None;
         }
         if let Some(target) = &self.segment
             && target.kind == kind
@@ -1568,6 +1607,7 @@ impl AgentTranscriptReducer {
         let location = self.append_block(conversation, role, BlockVisibility::Always, block_kind);
         if kind == SegmentKind::User {
             let ordinal = self
+                .echo
                 .user_group
                 .as_ref()
                 .filter(|(id, _, _)| id == &message_id)
@@ -1587,7 +1627,7 @@ impl AgentTranscriptReducer {
         conversation: &mut ConversationState,
         incoming: AcpToolPresentation,
     ) {
-        self.prompt_echo = None;
+        self.echo.prompt_echo = None;
         if !self.tools.contains_key(&incoming.id) {
             self.fence();
         }
@@ -1631,7 +1671,7 @@ impl AgentTranscriptReducer {
         raw_input: Option<serde_json::Value>,
         raw_output: Option<serde_json::Value>,
     ) {
-        self.prompt_echo = None;
+        self.echo.prompt_echo = None;
         if !self.tools.contains_key(&id) {
             self.fence();
         }
@@ -1676,7 +1716,7 @@ impl AgentTranscriptReducer {
     }
 
     fn apply_plan(&mut self, conversation: &mut ConversationState, plan: AgentStructuredPlan) {
-        self.prompt_echo = None;
+        self.echo.prompt_echo = None;
         self.fence();
         let plan = presented_plan(plan);
         let next_markdown = match &plan.content {
@@ -1714,7 +1754,7 @@ impl AgentTranscriptReducer {
     }
 
     fn remove_plan(&mut self, conversation: &mut ConversationState, plan_id: &str) {
-        self.prompt_echo = None;
+        self.echo.prompt_echo = None;
         self.fence();
         let Some(location) = self.current_plan else {
             return;
@@ -1725,7 +1765,7 @@ impl AgentTranscriptReducer {
         {
             self.current_plan = None;
             self.current_plan_markdown = None;
-            self.hosted_actions_dirty.insert(location.history_index);
+            self.coverage.hosted_actions_dirty.insert(location.history_index);
             self.rebuild_locations(conversation);
         }
     }
@@ -1812,7 +1852,7 @@ impl AgentTranscriptReducer {
         kind: PresentationBlockKind,
     ) -> BlockLocation {
         if role != Some(PresentationRole::User) && visibility == BlockVisibility::Always {
-            self.user_group = None;
+            self.echo.user_group = None;
         }
         let history_index = self.ensure_entry(conversation);
         let block = Self::new_block(conversation, role, visibility, kind);
@@ -2185,7 +2225,7 @@ mod projection_tests {
         );
 
         replace(&mut reducer, &mut conversation, " tail");
-        let (buffer, pieces) = reducer.projections.get(&key).unwrap();
+        let (buffer, pieces) = reducer.coverage.projections.get(&key).unwrap();
         assert_eq!(buffer, " tail");
         assert_eq!(pieces[0].end, buffer.len());
     }

@@ -14,9 +14,9 @@ pub(crate) mod prepare;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
+use crate::fold::{BlockFold, FoldMode, SpanSummary};
 use ratatui::text::Line;
 use rig_core::message::Message;
-use zevria_presentation::fold::{BlockFold, FoldMode, SpanSummary};
 
 use crate::app::{
     ActiveSelection, EntryFolds, FoldState, HeaderTimings, HistoryEntry, Selection, SelectionScope,

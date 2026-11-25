@@ -5,6 +5,7 @@ use ratatui::{Terminal, backend::TestBackend};
 use zevria_content::PromptBlock;
 use zevria_content::PromptImage;
 use zevria_content::UserPrompt;
+use zevria_session_api::{ManagementEvent, TurnEvent};
 
 fn image() -> PromptImage {
     PromptImage::from_rgba(1, 1, &[1, 2, 3, 255]).unwrap()
@@ -474,10 +475,13 @@ fn app_backspace_updates_image_count_and_submits_only_surviving_attachments() {
         let rendered = rendered_text(&mut app);
         assert!(rendered.contains("1 images"));
         assert!(!rendered.contains("2 images"));
-        let Some(UiAction::Submit { text, .. }) = app.handle_event(Event::Key(KeyEvent::new(
+        let Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            zevria_session_api::TurnCommand::Submit { text, .. },
+        ))) = app.handle_event(Event::Key(KeyEvent::new(
             KeyCode::Enter,
             KeyModifiers::CONTROL,
-        ))) else {
+        )))
+        else {
             panic!("remaining text and image must submit");
         };
         assert_eq!(
@@ -595,10 +599,13 @@ fn image_only_submit_rejection_restores_complete_attempt_and_acceptance_discards
     app.interaction.enter_insert();
     app.composer.attach_image(image()).unwrap();
     let attempted = app.composer.prompt();
-    let Some(UiAction::Submit { text, .. }) = app.handle_event(Event::Key(KeyEvent::new(
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+        zevria_session_api::TurnCommand::Submit { text, .. },
+    ))) = app.handle_event(Event::Key(KeyEvent::new(
         KeyCode::Enter,
         KeyModifiers::CONTROL,
-    ))) else {
+    )))
+    else {
         panic!("image-only submission");
     };
     assert_eq!(text, attempted);
@@ -608,10 +615,10 @@ fn image_only_submit_rejection_restores_complete_attempt_and_acceptance_discards
     let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
     terminal.draw(|frame| app.render(frame)).unwrap();
     assert!(!terminal.backend().cursor_visible());
-    app.reduce(SessionEvent::TurnRejected {
+    app.reduce(SessionEvent::Turn(TurnEvent::Rejected {
         turn_id: TurnId::new(1),
         error: "capacity".into(),
-    });
+    }));
     assert_eq!(app.composer.prompt(), attempted);
     assert!(app.interaction.is_normal());
     app.handle_event(Event::Key(KeyEvent::new(
@@ -619,11 +626,13 @@ fn image_only_submit_rejection_restores_complete_attempt_and_acceptance_discards
         KeyModifiers::NONE,
     )));
     assert!(app.composer_editable());
-    let Some(UiAction::Submit {
-        behavior: _,
-        text,
-        mode,
-    }) = app.handle_event(Event::Key(KeyEvent::new(
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+        zevria_session_api::TurnCommand::Submit {
+            behavior: _,
+            text,
+            mode,
+        },
+    ))) = app.handle_event(Event::Key(KeyEvent::new(
         KeyCode::Enter,
         KeyModifiers::CONTROL,
     )))
@@ -632,15 +641,15 @@ fn image_only_submit_rejection_restores_complete_attempt_and_acceptance_discards
     };
     assert!(app.interaction.is_normal());
     assert_eq!(text, attempted);
-    app.reduce(SessionEvent::TurnStarted {
+    app.reduce(SessionEvent::Turn(TurnEvent::Started {
         turn_id: TurnId::new(2),
         message: text.to_message(),
         mode,
-    });
-    app.reduce(SessionEvent::TurnFailed {
+    }));
+    app.reduce(SessionEvent::Turn(TurnEvent::Failed {
         turn_id: TurnId::new(2),
         error: "provider".into(),
-    });
+    }));
     assert!(
         app.composer.is_empty(),
         "accepted provider failure is not an unsubmitted draft"
@@ -854,10 +863,14 @@ fn pending_clipboard_blocks_completion_enter_until_delivery() {
     assert!(app.command_menu_active());
     assert!(matches!(
         app.handle_event(enter),
-        Some(UiAction::SetMode {
-            mode: SessionMode::Build,
-            ..
-        })
+        Some(UiAction::Session(
+            zevria_session_api::SessionCommand::Manage(
+                zevria_session_api::ManagementCommand::SetMode {
+                    mode: SessionMode::Build,
+                    ..
+                }
+            )
+        ))
     ));
 }
 
@@ -876,19 +889,22 @@ fn mode_shortcut_preserves_exact_image_draft_and_blocks_during_clipboard_read() 
     assert!(app.handle_event(shortcut()).is_none());
     app.clipboard_completed(generation, cursor, ClipboardResult::Empty);
     assert!(app.composer.matches_draft(&draft));
-    let Some(UiAction::SetMode { request_id, mode }) = app.handle_event(shortcut()) else {
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Manage(
+        zevria_session_api::ManagementCommand::SetMode { request_id, mode },
+    ))) = app.handle_event(shortcut())
+    else {
         panic!("mode shortcut should request selection");
     };
     assert_eq!(mode, SessionMode::Plan);
     assert!(app.composer.matches_draft(&draft));
     assert!(
-        app.reduce(SessionEvent::ModeResult {
+        app.reduce(SessionEvent::Manage(ManagementEvent::ModeResult {
             request_id,
             result: zevria_session_api::ModeSelectionResult::Accepted {
                 mode,
                 changed: true
             },
-        })
+        }))
         .is_empty()
     );
     assert!(app.composer.matches_draft(&draft));

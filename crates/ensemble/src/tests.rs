@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicUsize, Ordering},
 };
+use zevria_session_api::{EnsembleEvent, QuestionEvent};
 
 use agent_client_protocol::schema::v1::{
     PermissionOption, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
@@ -145,7 +146,7 @@ fn test_publication(events: SessionEventSender) -> RunLogPublication {
 }
 
 fn permission(kind: PermissionOptionKind) -> PermissionOption {
-    PermissionOption::new(wire_name(&kind), wire_name(&kind), kind)
+    PermissionOption::new(permission_name(&kind), permission_name(&kind), kind)
 }
 
 fn mode_option(current: &str) -> SessionConfigOption {
@@ -294,7 +295,7 @@ impl EnsembleSupervisor {
             .iter()
             .map(|state| {
                 assert!(
-                    state.confirmation.is_none(),
+                    state.proposals.confirmation.is_none(),
                     "protocol evidence is never consent"
                 );
                 let mut outcome = state.evidence.clone();
@@ -314,7 +315,7 @@ impl EnsembleSupervisor {
         if turn.is_cancelled() {
             for outcome in &mut outcomes {
                 let projection = load_agent_run_projection(&agent_run_path(
-                    &self.agent_runs_root,
+                    &self.inner.agent_runs_root,
                     &start.run_id,
                     &outcome.descriptor.id,
                 ))?;
@@ -387,10 +388,9 @@ async fn receive_question(
     receiver: &mut zevria_session_api::SessionEventReceiver,
 ) -> QuestionRequest {
     loop {
-        if let Some(zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::QuestionAsked {
-            request,
-            ..
-        })) = receiver.recv().await
+        if let Some(zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::Question(
+            QuestionEvent::Asked { request, .. },
+        ))) = receiver.recv().await
         {
             return request;
         }
@@ -432,12 +432,11 @@ async fn run_log_publishes_only_after_the_record_is_synced() {
     assert!(matches!(
         receiver.recv().await,
         Some(zevria_session_api::SessionUpdate::Lifecycle(
-            SessionEvent::AgentRunUpdated {
-                event: AgentRunEvent::Stderr { text },
+            SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
+                event,
                 ..
-            }
-        )) if text == "durable diagnostic"
-    ));
+            })
+        ))  if matches!(event.as_ref(), AgentRunEvent::Stderr { text } if text == "durable diagnostic")));
 }
 
 #[tokio::test]
@@ -3889,7 +3888,7 @@ fn live_retry_gate_requires_durable_in_progress_continuation_work() {
 
     for end in [
         WorkerEnd::PromptResponse {
-            stop_reason: "end_turn".to_string(),
+            stop_reason: "end_turn",
         },
         WorkerEnd::TimedOut,
         WorkerEnd::LocalCancelled,
@@ -4918,9 +4917,9 @@ while True:
         let observe = tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
                 if scenario == "root"
-                    && matches!(event, zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::AgentRunUpdated {
-                        event: AgentRunEvent::ToolCall { id, .. }, ..
-                    }) if id == "queue-ready")
+                    && matches!(event, zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
+                        event, ..
+                    }))  if matches!(event.as_ref(), AgentRunEvent::ToolCall { id, .. } if id == "queue-ready"))
                 {
                     root_cancel.cancel();
                 }
@@ -6930,8 +6929,12 @@ for line in sys.stdin:
                     receiver.recv().await
                 {
                     match event {
-                        SessionEvent::QuestionAsked { request, .. } => break request,
-                        SessionEvent::AgentRunFinished { outcome, .. } => {
+                        SessionEvent::Question(QuestionEvent::Asked { request, .. }) => {
+                            break request;
+                        }
+                        SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished {
+                            outcome, ..
+                        }) => {
                             panic!("worker finished before asking: {outcome:?}")
                         }
                         _ => {}
@@ -7518,10 +7521,9 @@ for line in sys.stdin:
             .is_some_and(|failure| failure.contains("switched away"))
     );
     while let Ok(update) = receiver.try_recv() {
-        if let zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::QuestionAsked {
-            request,
-            ..
-        }) = update
+        if let zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::Question(
+            QuestionEvent::Asked { request, .. },
+        )) = update
         {
             assert_ne!(request.source_label.as_deref(), Some("Queued ACP"));
         }
@@ -7630,8 +7632,12 @@ for line in sys.stdin:
     while let Ok(update) = receiver.try_recv() {
         if let zevria_session_api::SessionUpdate::Lifecycle(event) = update {
             match event {
-                SessionEvent::QuestionAsked { request, .. } => asked.push(request.id),
-                SessionEvent::QuestionClosed { request_id, .. } => closed.push(request_id),
+                SessionEvent::Question(QuestionEvent::Asked { request, .. }) => {
+                    asked.push(request.id)
+                }
+                SessionEvent::Question(QuestionEvent::Closed { request_id, .. }) => {
+                    closed.push(request_id)
+                }
                 _ => {}
             }
         }
@@ -7807,9 +7813,9 @@ for line in sys.stdin:
     cancellation.cancel();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(zevria_session_api::SessionUpdate::Lifecycle(
-                SessionEvent::QuestionClosed { request_id, .. },
-            )) = receiver.recv().await
+            if let Some(zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::Question(
+                QuestionEvent::Closed { request_id, .. },
+            ))) = receiver.recv().await
                 && request_id == request.id
             {
                 break;

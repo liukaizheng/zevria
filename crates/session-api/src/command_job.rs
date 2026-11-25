@@ -1,8 +1,10 @@
 //! Session-owned bounded shell jobs. No live state here enters model instructions.
+use crate::JobEvent;
 use crate::{
     CommandControl, CommandControlAction, CommandControlResult, SessionEvent, SessionEventSender,
     TurnId,
 };
+use futures_util::future::{BoxFuture, FutureExt, Shared};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt,
@@ -246,7 +248,12 @@ struct Record {
     preserve_unread: bool,
     output_detached: bool,
     pending_mode: Option<CommandJobSnapshot>,
-    supervisor: Option<AbortHandle>,
+    supervisor: Option<Supervisor>,
+}
+#[derive(Clone)]
+struct Supervisor {
+    abort: AbortHandle,
+    finished: Shared<BoxFuture<'static, ()>>,
 }
 impl Job {
     fn changed(&self) {
@@ -255,6 +262,14 @@ impl Job {
     }
     fn snapshot(&self) -> CommandJobSnapshot {
         self.record.lock().unwrap().snapshot.clone()
+    }
+    async fn wait_terminal(&self) {
+        let mut changed = self.changed.subscribe();
+        while !self.record.lock().unwrap().snapshot.status.is_terminal() {
+            if changed.changed().await.is_err() {
+                break;
+            }
+        }
     }
     fn unread(&self) -> (StreamText, StreamText) {
         let mut r = self.record.lock().unwrap();
@@ -283,7 +298,7 @@ impl Drop for Inner {
     fn drop(&mut self) {
         for job in self.state.get_mut().unwrap().jobs.values() {
             if let Some(supervisor) = &job.record.lock().unwrap().supervisor {
-                supervisor.abort();
+                supervisor.abort.abort();
             }
         }
     }
@@ -637,21 +652,22 @@ impl CommandJobs {
             .filter_map(|job| job.record.lock().unwrap().supervisor.clone())
             .collect();
         let wait = async {
-            while jobs.iter().any(|job| !job.snapshot().status.is_terminal())
-                || tasks.iter().any(|task| !task.is_finished())
-            {
-                tokio::time::sleep(Duration::from_millis(2)).await;
+            for job in &jobs {
+                job.wait_terminal().await;
+            }
+            for task in &tasks {
+                task.finished.clone().await;
             }
         };
-        let _ = tokio::time::timeout(grace, wait).await;
-        for task in &tasks {
-            if !task.is_finished() {
-                task.abort();
+        if tokio::time::timeout(grace, wait).await.is_err() {
+            for task in &tasks {
+                task.abort.abort();
             }
-        }
-        // Abort completion, not just its request, guarantees drop guards ran.
-        while tasks.iter().any(|task| !task.is_finished()) {
-            tokio::task::yield_now().await;
+            // Joining, not merely requesting abort, guarantees that the process
+            // tree's drop guards ran before we publish forced termination.
+            for task in tasks {
+                task.finished.await;
+            }
         }
         for job in jobs {
             let snapshot = {
@@ -667,7 +683,9 @@ impl CommandJobs {
             };
             job.changed();
             if let Some(events) = &self.0.events {
-                let _ = events.try_send(SessionEvent::CommandJobUpdated { job: snapshot });
+                let _ = events.try_send(SessionEvent::Job(JobEvent::Updated {
+                    job: Box::new(snapshot),
+                }));
             }
         }
     }
@@ -733,18 +751,12 @@ pub struct JobHandle {
 }
 impl JobHandle {
     pub async fn wait_terminal(&self, timeout: Duration, cancellation: &CancellationToken) -> bool {
-        let mut changed = self.changes();
-        let wait = async {
-            loop {
-                if self.snapshot().status.is_terminal() {
-                    return;
-                }
-                if changed.changed().await.is_err() {
-                    return;
-                }
-            }
-        };
-        tokio::select! { biased; () = cancellation.cancelled() => false, () = wait => true, () = tokio::time::sleep(timeout) => false }
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => false,
+            () = self.job.wait_terminal() => true,
+            () = tokio::time::sleep(timeout) => false,
+        }
     }
     pub fn snapshot(&self) -> CommandJobSnapshot {
         self.job.snapshot()
@@ -775,8 +787,33 @@ impl JobHandle {
             }
         }
     }
-    pub fn set_supervisor(&self, supervisor: AbortHandle) {
-        self.job.record.lock().unwrap().supervisor = Some(supervisor);
+    /// Install the join capability before shutdown can take its job snapshot.
+    pub fn spawn_supervisor(
+        &self,
+        work: impl Future<Output = ()> + Send + 'static,
+    ) -> std::io::Result<()> {
+        let closed = || std::io::Error::other("command job registry is closed");
+        let registry = self.registry.upgrade().ok_or_else(closed)?;
+        let state = registry.state.lock().unwrap();
+        if state.closed {
+            return Err(closed());
+        }
+        let mut record = self.job.record.lock().unwrap();
+        if record.supervisor.is_some() || record.snapshot.status.is_terminal() {
+            return Err(std::io::Error::other(
+                "command job already has a supervisor or is terminal",
+            ));
+        }
+        let task = tokio::spawn(work);
+        record.supervisor = Some(Supervisor {
+            abort: task.abort_handle(),
+            finished: async move {
+                let _ = task.await;
+            }
+            .boxed()
+            .shared(),
+        });
+        Ok(())
     }
     pub fn termination_requested(&self) -> watch::Receiver<Option<TerminationOrigin>> {
         self.job.termination.subscribe()
@@ -809,7 +846,9 @@ impl JobHandle {
     async fn publish(&self, job: CommandJobSnapshot) {
         let events = self.registry.upgrade().and_then(|r| r.events.clone());
         if let Some(events) = events {
-            let _ = events.send(SessionEvent::CommandJobUpdated { job }).await;
+            let _ = events
+                .send(SessionEvent::Job(JobEvent::Updated { job: Box::new(job) }))
+                .await;
         }
     }
     /// Launch failure rollback. The terminal event lets a frontend remove its running row.
@@ -1000,8 +1039,9 @@ mod tests {
             .await;
         let mut states = Vec::new();
         for _ in 0..3 {
-            if let Some(crate::SessionUpdate::Lifecycle(SessionEvent::CommandJobUpdated { job })) =
-                receiver.recv().await
+            if let Some(crate::SessionUpdate::Lifecycle(SessionEvent::Job(JobEvent::Updated {
+                job,
+            }))) = receiver.recv().await
             {
                 states.push((job.mode, job.status.is_terminal()));
             }

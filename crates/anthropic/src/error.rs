@@ -1,10 +1,11 @@
 //! Structured API error classification, shared by HTTP and SSE error events.
 use serde_json::Value;
 use std::{fmt, time::Duration};
+use zevria_model::RetryCategory;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
-    Retryable(&'static str),
+    Retryable(RetryCategory),
     InputTooLarge,
     RequestBodyTooLarge,
     ThinkingBindingMismatch,
@@ -84,17 +85,17 @@ pub fn classify(
     } else if status == 400 && lower.contains("bound to a different conversation") {
         ErrorKind::ThinkingBindingMismatch
     } else if status == 408 {
-        ErrorKind::Retryable("request_timeout_status")
+        ErrorKind::Retryable(RetryCategory::RequestTimeoutStatus)
     } else if status == 429 || category == "rate_limit_error" || code == "rate_limit_exceeded" {
-        ErrorKind::Retryable("rate_limit")
+        ErrorKind::Retryable(RetryCategory::RateLimit)
     } else if status == 529 || category == "overloaded_error" {
-        ErrorKind::Retryable("overloaded")
+        ErrorKind::Retryable(RetryCategory::Overloaded)
     } else if status >= 500
         || matches!(category, "api_error" | "timeout_error")
         || code == "server_error"
         || should_retry == Some(true)
     {
-        ErrorKind::Retryable("server_error")
+        ErrorKind::Retryable(RetryCategory::ServerError)
     } else {
         ErrorKind::Terminal
     };
@@ -168,11 +169,11 @@ mod tests {
         }
         assert_eq!(
             classify(408, "slow", None, None, None).kind,
-            ErrorKind::Retryable("request_timeout_status")
+            ErrorKind::Retryable(RetryCategory::RequestTimeoutStatus)
         );
         assert_eq!(
             classify(400, "bad", None, None, Some(true)).kind,
-            ErrorKind::Retryable("server_error")
+            ErrorKind::Retryable(RetryCategory::ServerError)
         );
         for (status, body) in [(413, "size"), (400, "prompt is too long")] {
             for retry in [Some(true), Some(false)] {

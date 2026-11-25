@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{SubtaskEvent, TurnEvent};
 
 fn image_result_content() -> Vec<ToolResultContent> {
     vec![
@@ -72,14 +73,14 @@ async fn image_tool_results_persist_reload_and_reach_the_next_provider_request()
     assert!(
         updates
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
     );
     let (message, metadata) = updates
         .iter()
         .find_map(|event| match event {
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 message, metadata, ..
-            } => Some((message, metadata)),
+            }) => Some((message, metadata)),
             _ => None,
         })
         .expect("tool results event");
@@ -809,15 +810,15 @@ async fn mixed_batches_return_ordinary_and_subtask_results_together() {
     // The launcher announced the child row with the assistant call id.
     assert!(events.iter().any(|event| matches!(
         event,
-        SessionEvent::SubtaskLaunched { call_id, descriptor, .. }
+        SessionEvent::Subtask(SubtaskEvent::Launched { call_id, descriptor, .. })
             if call_id == "call-launch" && descriptor.title == "new explore task"
     )));
     let tool_results = events
         .iter()
         .find_map(|event| match event {
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 message, metadata, ..
-            } => Some((message, metadata)),
+            }) => Some((message, metadata)),
             _ => None,
         })
         .expect("tool results event");
@@ -845,7 +846,7 @@ async fn mixed_batches_return_ordinary_and_subtask_results_together() {
     assert!(!serialized.contains("parentSessionId"));
     assert!(events.iter().any(|event| matches!(
         event,
-        SessionEvent::TurnCompleted { message, .. }
+        SessionEvent::Turn(TurnEvent::Completed { message, .. })
             if format!("{message:?}").contains("all wrapped up")
     )));
 
@@ -925,7 +926,7 @@ async fn parallel_launches_in_one_batch_run_concurrently() {
         assert!(
             events.iter().any(|event| matches!(
                 event,
-                SessionEvent::SubtaskLaunched { call_id: id, descriptor, .. }
+                SessionEvent::Subtask(SubtaskEvent::Launched { call_id: id, descriptor, .. })
                     if id == call_id && descriptor.title == title
             )),
             "missing SubtaskLaunched for {call_id}"
@@ -934,7 +935,7 @@ async fn parallel_launches_in_one_batch_run_concurrently() {
     let tool_results = events
         .iter()
         .find_map(|event| match event {
-            SessionEvent::ToolResults { message, .. } => Some(message),
+            SessionEvent::Turn(TurnEvent::ToolResults { message, .. }) => Some(message),
             _ => None,
         })
         .expect("tool results event");
@@ -946,6 +947,6 @@ async fn parallel_launches_in_one_batch_run_concurrently() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
     );
 }

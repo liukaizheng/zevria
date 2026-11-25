@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::TurnEvent;
 use zevria_transcript::test_support::TranscriptRewriteBlocker;
 
 fn engine(responses: usize) -> (tempfile::TempDir, SessionEngine<ScriptedProvider>) {
@@ -301,7 +302,7 @@ async fn guidance_inheritance_discards_notices_and_combined_budget_rejects_befor
         .unwrap();
     assert_eq!(engine.conversation.items(), before);
     assert!(engine.provider.requests.lock().unwrap().is_empty());
-    assert!(collect_events(&mut receiver).await.iter().any(|event| matches!(event, SessionEvent::TurnRejected { error, .. } if error.contains("irreducible"))));
+    assert!(collect_events(&mut receiver).await.iter().any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Rejected { error, .. }) if error.contains("irreducible"))));
 }
 
 #[tokio::test]
@@ -640,7 +641,7 @@ async fn irreducible_handoff_guidance_is_rejected_before_the_atomic_transition()
         .unwrap();
     assert_eq!(engine.conversation.items(), before);
     assert!(engine.provider.requests.lock().unwrap().is_empty());
-    assert!(collect_events(&mut receiver).await.iter().any(|event| matches!(event, SessionEvent::TurnRejected { error, .. } if error.contains("irreducible"))));
+    assert!(collect_events(&mut receiver).await.iter().any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Rejected { error, .. }) if error.contains("irreducible"))));
 }
 
 #[tokio::test]

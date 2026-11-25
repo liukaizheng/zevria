@@ -3,6 +3,7 @@ use rig_core::message::{ToolResultContent, UserContent};
 use zevria_content::PromptBlock;
 use zevria_content::PromptImage;
 use zevria_content::UserPrompt;
+use zevria_session_api::TurnEvent;
 
 fn prompt() -> UserPrompt {
     static IMAGE: std::sync::OnceLock<PromptImage> = std::sync::OnceLock::new();
@@ -622,15 +623,14 @@ async fn retained_screenshots_404_counting_resume_and_same_mode_followup_use_rea
             let updates = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
             assert!(updates.iter().any(|event| matches!(
                 event,
-                SessionUpdate::Lifecycle(SessionEvent::TurnCompleted { .. })
+                SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Completed { .. }))
             )));
             let snapshot = updates
                 .iter()
                 .find_map(|event| match event {
-                    SessionUpdate::Lifecycle(SessionEvent::ContextUsageUpdated {
-                        snapshot,
-                        ..
-                    }) => Some(snapshot),
+                    SessionUpdate::Lifecycle(SessionEvent::Turn(
+                        TurnEvent::ContextUsageUpdated { snapshot, .. },
+                    )) => Some(snapshot),
                     _ => None,
                 })
                 .unwrap();

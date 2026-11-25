@@ -3,6 +3,7 @@ use super::*;
 use crate::connection::HttpFallback;
 use std::{io, time::Duration};
 use zevria_model::ModelInputTooLarge;
+use zevria_session_api::TurnEvent;
 use zevria_session_api::event::NetworkStatus;
 
 fn parts() -> RequestParts {
@@ -19,13 +20,13 @@ fn parts() -> RequestParts {
 fn retries(events: &mut SessionEventReceiver) -> Vec<(usize, Duration, Duration, String)> {
     std::iter::from_fn(|| events.try_recv().ok())
         .filter_map(|update| match update {
-            SessionUpdate::Lifecycle(SessionEvent::TurnRetrying {
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Retrying {
                 attempt,
                 retry_after,
                 retrying_for,
                 error,
                 ..
-            }) => Some((attempt, retry_after, retrying_for, error)),
+            })) => Some((attempt, retry_after, retrying_for, error)),
             _ => None,
         })
         .collect()
@@ -140,7 +141,11 @@ async fn slow_headers_succeed_after_deadline_escalation_and_warn_while_waiting()
     let attempts = updates
         .iter()
         .filter_map(|u| match u {
-            SessionUpdate::Lifecycle(SessionEvent::TurnRetrying { attempt, error, .. }) => {
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Retrying {
+                attempt,
+                error,
+                ..
+            })) => {
                 assert!(error.starts_with("request_timeout:"));
                 Some(*attempt)
             }
@@ -150,14 +155,14 @@ async fn slow_headers_succeed_after_deadline_escalation_and_warn_while_waiting()
     assert_eq!(attempts, vec![2, 3]);
     assert!(updates.iter().any(|u| matches!(
         u,
-        SessionUpdate::Lifecycle(SessionEvent::NetworkStatus {
+        SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::NetworkStatus {
             attempt: 3,
             status: NetworkStatus::Quiet {
                 will_retry: true,
                 ..
             },
             ..
-        })
+        }))
     )));
     server.await.unwrap();
 }
@@ -476,19 +481,25 @@ async fn provisional_fallback_reprobes_once_then_can_commit_sticky_http() {
     recovery_followup("first", &mut provider, &mut state, &discard_updates())
         .await
         .unwrap();
-    assert_eq!(provider.http_fallback, Some(HttpFallback::Provisional));
-    let generation = provider.ws.socket_generation;
+    assert_eq!(
+        provider.responses_transport.fallback(),
+        Some(HttpFallback::Provisional)
+    );
+    let generation = provider.responses_transport.ws.socket_generation;
     recovery_followup("second", &mut provider, &mut state, &discard_updates())
         .await
         .unwrap();
-    assert_eq!(provider.ws.socket_generation, generation + 1);
+    assert_eq!(
+        provider.responses_transport.ws.socket_generation,
+        generation + 1
+    );
     assert!(matches!(
-        provider.http_fallback,
+        provider.responses_transport.fallback(),
         Some(HttpFallback::Sticky(_))
     ));
     recovery_followup("third", &mut provider, &mut state, &discard_updates())
         .await
         .unwrap();
-    assert_eq!(provider.transport, OpenAiTransport::Http);
+    assert_eq!(provider.transport(), OpenAiTransport::Http);
     server.await.unwrap();
 }

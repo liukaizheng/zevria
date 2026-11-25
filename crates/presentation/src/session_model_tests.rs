@@ -6,10 +6,12 @@ use rig_core::message::{
 };
 use std::time::Instant;
 use zevria_foundation::{RequestBehavior, SessionMode, TurnId};
+use zevria_session_api::SessionStreamState;
 use zevria_session_api::{
     ControlCommand, ManagementCommand, ModeSelectionResult, SessionEvent as E, TranscriptEdit,
     TranscriptEditReplacement, TranscriptEditTarget,
 };
+use zevria_session_api::{JobEvent, ManagementEvent, PlanEvent, TurnEvent};
 use zevria_workflow::{PlanArtifact, PlanDecision, PlanId, PlanVersion, PlanWorkflowState};
 const TURN: TurnId = TurnId::new(7);
 
@@ -44,13 +46,13 @@ fn job_continuation_admission_is_mode_tagged_quiescent_and_never_binds_to_submit
     use zevria_foundation::CommandJobNoticeKind::Continuation;
     let mut model = SessionModel::default();
     assert!(model.continue_after_jobs().is_none());
-    model.reduce(E::JobContinuationChanged {
+    model.reduce(E::Job(JobEvent::ContinuationChanged {
         mode: Some(SessionMode::Plan),
-    });
+    }));
     assert!(model.continue_after_jobs().is_none());
-    model.reduce(E::JobContinuationChanged {
+    model.reduce(E::Job(JobEvent::ContinuationChanged {
         mode: Some(SessionMode::Build),
-    });
+    }));
     assert!(matches!(
         model.continue_after_jobs(),
         Some(zevria_session_api::TurnCommand::ContinueAfterJobs {
@@ -58,27 +60,27 @@ fn job_continuation_admission_is_mode_tagged_quiescent_and_never_binds_to_submit
         })
     ));
     assert!(model.continue_after_jobs().is_none());
-    let accepted = model.reduce(E::JobContinuationStarted {
+    let accepted = model.reduce(E::Job(JobEvent::ContinuationStarted {
         turn_id: TURN,
         mode: SessionMode::Build,
-        notice: job_notice(Continuation),
-    });
+        notice: Box::new(job_notice(Continuation)),
+    }));
     assert_eq!(accepted.accepted, Some(OperationKind::JobContinuation));
-    model.reduce(E::TurnCompleted {
+    model.reduce(E::Turn(TurnEvent::Completed {
         turn_id: TURN,
         message: Message::assistant("done"),
         attempt_id: None,
-    });
-    model.reduce(E::JobContinuationChanged {
+    }));
+    model.reduce(E::Job(JobEvent::ContinuationChanged {
         mode: Some(SessionMode::Build),
-    });
+    }));
     assert!(model.continue_after_jobs().is_none());
     model.reduce(E::EngineIdle);
     assert!(model.continue_after_jobs().is_some());
-    let rejected = model.reduce(E::TurnRejected {
+    let rejected = model.reduce(E::Turn(TurnEvent::Rejected {
         turn_id: TurnId::new(8),
         error: "stale".into(),
-    });
+    }));
     assert!(matches!(
         rejected.settled,
         Some((OperationKind::JobContinuation, Settlement::Rejected(_)))
@@ -92,27 +94,23 @@ fn job_continuation_admission_is_mode_tagged_quiescent_and_never_binds_to_submit
     );
 
     let mut submit = pending();
-    let result = submit.reduce(E::JobContinuationStarted {
+    let result = submit.reduce(E::Job(JobEvent::ContinuationStarted {
         turn_id: TURN,
         mode: SessionMode::Build,
-        notice: job_notice(Continuation),
-    });
+        notice: Box::new(job_notice(Continuation)),
+    }));
     assert_eq!(result.accepted, None);
     assert_eq!(submit.session.operation_kind(), Some(OperationKind::Submit));
     assert!(submit.conversation.history().is_empty());
-    submit.reduce(E::JobContinuationChanged {
+    submit.reduce(E::Job(JobEvent::ContinuationChanged {
         mode: Some(SessionMode::Build),
-    });
+    }));
     assert!(submit.continue_after_jobs().is_none());
     let mut management = SessionModel::default();
-    management.reduce(E::JobContinuationChanged {
+    management.reduce(E::Job(JobEvent::ContinuationChanged {
         mode: Some(SessionMode::Build),
-    });
-    assert!(management.begin_operation(
-        OperationKind::ModeManagement,
-        SessionMode::Build,
-        zevria_foundation::ModelRole::Build
-    ));
+    }));
+    assert!(management.select_mode(SessionMode::Build).is_some());
     management.session.finish_mode_management();
     assert!(
         management.continue_after_jobs().is_some(),
@@ -122,9 +120,9 @@ fn job_continuation_admission_is_mode_tagged_quiescent_and_never_binds_to_submit
     ready.apply_plan_snapshot(PlanWorkflowState::Ready {
         artifact: artifact(),
     });
-    ready.reduce(E::JobContinuationChanged {
+    ready.reduce(E::Job(JobEvent::ContinuationChanged {
         mode: Some(SessionMode::Plan),
-    });
+    }));
     assert!(ready.continue_after_jobs().is_none());
 }
 
@@ -162,9 +160,9 @@ fn job_notice_rows_restore_copy_full_text_and_do_not_enter_recall_or_prompt_ordi
     ));
     model.conversation.commit_edit(0, false);
     assert!(model.conversation.history().is_empty());
-    model.reduce(E::JobContinuationChanged {
+    model.reduce(E::Job(JobEvent::ContinuationChanged {
         mode: Some(SessionMode::Build),
-    });
+    }));
     model.restore_transcript(vec![]);
     assert!(model.continue_after_jobs().is_none());
 }
@@ -172,15 +170,10 @@ fn job_notice_rows_restore_copy_full_text_and_do_not_enter_recall_or_prompt_ordi
 #[test]
 fn quiescence_requires_a_post_terminal_barrier_and_restore_resets_it() {
     use crate::session::SessionActivity;
-    use zevria_foundation::ModelRole;
     let mut model = SessionModel::default();
     assert!(model.session.is_quiescent());
     assert!(!model.session.has_turn_work());
-    assert!(model.begin_operation(
-        OperationKind::ModeManagement,
-        SessionMode::Build,
-        ModelRole::Build
-    ));
+    assert!(model.select_mode(SessionMode::Build).is_some());
     assert!(model.session.is_quiescent());
     assert!(!model.session.has_turn_work());
     model.session.finish_mode_management();
@@ -194,11 +187,11 @@ fn quiescence_requires_a_post_terminal_barrier_and_restore_resets_it() {
     start(&mut model);
     model.reduce(E::EngineIdle);
     assert!(!model.session.is_quiescent());
-    model.reduce(E::TurnCompleted {
+    model.reduce(E::Turn(TurnEvent::Completed {
         turn_id: TURN,
         message: Message::assistant("done"),
         attempt_id: None,
-    });
+    }));
     assert!(!model.session.has_turn_work());
     assert!(!model.session.is_quiescent());
     model.reduce(E::EngineIdle);
@@ -207,14 +200,14 @@ fn quiescence_requires_a_post_terminal_barrier_and_restore_resets_it() {
     assert!(!model.session.is_quiescent());
     assert!(matches!(
         model.session.activity(),
-        SessionActivity::Active(_)
+        SessionActivity::ActiveTurn(_)
     ));
     model.session.reset_for_restore();
     assert!(model.session.is_quiescent());
-    model.reduce(E::CompactionStarted {
+    model.reduce(E::Turn(TurnEvent::CompactionStarted {
         turn_id: TURN,
         trigger: zevria_model::CompactionTrigger::Manual,
-    });
+    }));
     assert!(!model.session.is_quiescent());
     model.session.reset_for_restore();
     assert!(model.session.is_quiescent());
@@ -252,7 +245,7 @@ fn explicit_mode_admission_captures_mode_and_role_without_changing_selection() {
                 ..
             }
         ));
-        let SessionActivity::Pending(pending) = model.session.activity() else {
+        let SessionActivity::PendingTurn(pending) = model.session.activity() else {
             panic!("pending")
         };
         assert_eq!(
@@ -281,11 +274,11 @@ fn pending() -> SessionModel {
     model
 }
 fn start(model: &mut SessionModel) -> crate::Reduction {
-    model.reduce(E::TurnStarted {
+    model.reduce(E::Turn(TurnEvent::Started {
         turn_id: TURN,
         message: Message::user("hello"),
         mode: SessionMode::Build,
-    })
+    }))
 }
 fn artifact() -> PlanArtifact {
     PlanArtifact {
@@ -303,23 +296,23 @@ fn full_lifecycle_reports_hooks_once_and_freezes_headers() {
     let mut model = pending();
     assert_eq!(start(&mut model).accepted, Some(OperationKind::Submit));
     assert_eq!(start(&mut model).accepted, None);
-    model.reduce(E::ModelCallStarted {
+    model.reduce(E::Turn(TurnEvent::ModelCallStarted {
         turn_id: TURN,
         call: 1,
-    });
-    model.reduce(E::AssistantStreamUpdated {
-        turn_id: TURN,
-        snapshot: (Message::assistant("partial")).into(),
-    });
+    }));
+    model.apply_stream(SessionStreamState::new(
+        TURN,
+        (Message::assistant("partial")).into(),
+    ));
     assert!(matches!(
         model.tail(Instant::now()),
         ConversationTail::Streaming { .. }
     ));
-    let reduced = model.reduce(E::TurnCompleted {
+    let reduced = model.reduce(E::Turn(TurnEvent::Completed {
         turn_id: TURN,
         message: Message::assistant("done"),
         attempt_id: None,
-    });
+    }));
     assert_eq!(
         reduced.settled,
         Some((OperationKind::Submit, Settlement::Completed))
@@ -328,7 +321,7 @@ fn full_lifecycle_reports_hooks_once_and_freezes_headers() {
     assert_eq!(model.conversation.history().len(), 2);
     assert!(
         model
-            .reduce(E::TurnCancelled { turn_id: TURN })
+            .reduce(E::Turn(TurnEvent::Cancelled { turn_id: TURN }))
             .settled
             .is_none()
     );
@@ -340,18 +333,18 @@ fn stale_and_foreign_ids_are_inert() {
     let foreign = TurnId::new(99);
     assert!(
         model
-            .reduce(E::TurnFailed {
+            .reduce(E::Turn(TurnEvent::Failed {
                 turn_id: foreign,
                 error: "foreign".into()
-            })
+            }))
             .settled
             .is_none()
     );
-    model.reduce(E::Intermediate {
+    model.reduce(E::Turn(TurnEvent::Intermediate {
         turn_id: foreign,
         message: Message::assistant("foreign"),
         attempt_id: None,
-    });
+    }));
     assert_eq!(model.conversation.history().len(), 1);
     assert!(model.is_busy());
 }
@@ -368,10 +361,10 @@ fn early_rejection_unlocks_and_restores_plan_dialog() {
     model.workflow.hide();
     // A hidden dialog is intentionally not reopened; a visible pending review is.
     model.workflow.open_review();
-    let reduced = model.reduce(E::TurnRejected {
+    let reduced = model.reduce(E::Turn(TurnEvent::Rejected {
         turn_id: TURN,
         error: "not admitted".into(),
-    });
+    }));
     assert!(matches!(
         reduced.settled,
         Some((_, Settlement::Rejected(_)))
@@ -382,11 +375,11 @@ fn early_rejection_unlocks_and_restores_plan_dialog() {
 #[test]
 fn ready_forces_plan_mode_even_if_restore_metadata_disagrees() {
     let mut model = SessionModel::default();
-    let reduced = model.reduce(E::PlanStateChanged {
-        state: PlanWorkflowState::Ready {
+    let reduced = model.reduce(E::Plan(PlanEvent::StateChanged {
+        state: Box::new(PlanWorkflowState::Ready {
             artifact: artifact(),
-        },
-    });
+        }),
+    }));
     assert!(reduced.plan_ready);
     model.apply_selected_mode(SessionMode::Build);
     assert_eq!(model.next_mode(), SessionMode::Plan);
@@ -461,9 +454,9 @@ fn hidden_ready_admits_only_direct_versioned_revision_feedback() {
             )
             .is_none()
     );
-    model.reduce(E::JobContinuationChanged {
+    model.reduce(E::Job(JobEvent::ContinuationChanged {
         mode: Some(SessionMode::Plan),
-    });
+    }));
     assert!(model.continue_after_jobs().is_none());
     model.set_scope(PaneScope::Inspect { role: None });
     assert_eq!(model.ready_revision_target(), None);
@@ -537,7 +530,7 @@ fn hidden_ready_revision_uses_prompt_operations_without_restoring_review() {
             }
             assert_eq!(model.session.operation_kind(), Some(kind));
             assert_eq!(model.pending_prompt().is_some(), !skill);
-            let SessionActivity::Pending(pending) = model.session.activity() else {
+            let SessionActivity::PendingTurn(pending) = model.session.activity() else {
                 panic!("pending")
             };
             assert_eq!(
@@ -545,29 +538,29 @@ fn hidden_ready_revision_uses_prompt_operations_without_restoring_review() {
                 (SessionMode::Plan, ModelRole::Plan)
             );
             if rejected {
-                let reduction = model.reduce(E::TurnRejected {
+                let reduction = model.reduce(E::Turn(TurnEvent::Rejected {
                     turn_id: TURN,
                     error: "stale".into(),
-                });
+                }));
                 let (settled, settlement) = reduction.settled.unwrap();
                 assert_eq!(settled, kind);
                 assert!(settlement.restores_draft());
                 assert_eq!(model.workflow.snapshot(), &ready);
                 assert!(!model.is_busy());
             } else {
-                let reduction = model.reduce(E::TurnStarted {
+                let reduction = model.reduce(E::Turn(TurnEvent::Started {
                     turn_id: TURN,
                     message: Message::user("feedback"),
                     mode: SessionMode::Plan,
-                });
+                }));
                 assert_eq!(reduction.accepted, Some(kind));
-                model.reduce(E::PlanStateChanged {
-                    state: PlanWorkflowState::Planning {
+                model.reduce(E::Plan(PlanEvent::StateChanged {
+                    state: Box::new(PlanWorkflowState::Planning {
                         id: artifact.version.id,
                         previous: Some(artifact),
                         draft: None,
-                    },
-                });
+                    }),
+                }));
                 assert!(model.is_busy());
                 assert_eq!(model.next_mode(), SessionMode::Plan);
                 assert!(matches!(
@@ -597,18 +590,18 @@ fn pending_append_survives_preturn_compaction_until_the_matching_turn_starts() {
     assert!(model.conversation.history().is_empty());
     assert!(model.conversation.turn_starts(false).is_empty());
     model.reduce(E::EngineIdle);
-    model.reduce(E::ModeChanged {
+    model.reduce(E::Turn(TurnEvent::ModeChanged {
         mode: SessionMode::Build,
-    });
-    model.reduce(E::CompactionStarted {
+    }));
+    model.reduce(E::Turn(TurnEvent::CompactionStarted {
         turn_id: TURN,
         trigger,
-    });
-    model.reduce(E::CompactionCompleted {
+    }));
+    model.reduce(E::Turn(TurnEvent::CompactionCompleted {
         turn_id: TURN,
         trigger,
         backend: CompactionBackend::LocalSummary,
-    });
+    }));
     assert_eq!(model.pending_prompt().unwrap().id(), pending_id);
     assert!(matches!(
         model.conversation.history(),
@@ -617,31 +610,31 @@ fn pending_append_survives_preturn_compaction_until_the_matching_turn_starts() {
     let stale = TurnId::new(TURN.get() - 1);
     assert!(
         model
-            .reduce(E::TurnCancelled { turn_id: stale })
+            .reduce(E::Turn(TurnEvent::Cancelled { turn_id: stale }))
             .settled
             .is_none()
     );
     assert!(
         model
-            .reduce(E::TurnStarted {
+            .reduce(E::Turn(TurnEvent::Started {
                 turn_id: stale,
                 message: Message::user("wrong"),
                 mode: SessionMode::Build
-            })
+            }))
             .accepted
             .is_none()
     );
-    model.reduce(E::TurnStarted {
+    model.reduce(E::Turn(TurnEvent::Started {
         turn_id: TURN,
         message: Message::user("canonical"),
         mode: SessionMode::Build,
-    });
+    }));
     assert!(model.pending_prompt().is_none());
     assert_eq!(model.conversation.turn_starts(false).len(), 1);
-    model.reduce(E::TurnFailed {
+    model.reduce(E::Turn(TurnEvent::Failed {
         turn_id: TURN,
         error: "after acceptance".into(),
-    });
+    }));
     let [
         HistoryEntry::CompactionDivider,
         HistoryEntry::Conversation(committed),
@@ -681,11 +674,11 @@ fn identical_submits_have_distinct_previews_and_commit_once_each() {
         assert_eq!(model.conversation.history().len(), id - 1);
         let turn_id = TurnId::new(id as u64);
         for _ in 0..2 {
-            model.reduce(E::TurnStarted {
+            model.reduce(E::Turn(TurnEvent::Started {
                 turn_id,
                 message: prompt.to_message(),
                 mode: SessionMode::Build,
-            });
+            }));
         }
         assert!(model.pending_prompt().is_none());
         assert_eq!(model.conversation.history().len(), id);
@@ -696,7 +689,7 @@ fn identical_submits_have_distinct_previews_and_commit_once_each() {
             &committed.blocks[1].kind,
             PresentationBlockKind::Image { ordinal: 1, .. }
         ));
-        model.reduce(E::TurnRecovered { turn_id });
+        model.reduce(E::Turn(TurnEvent::Recovered { turn_id }));
     }
 }
 
@@ -743,13 +736,13 @@ fn mode_selection_requires_both_request_id_and_requested_mode() {
     ] {
         assert!(
             model
-                .reduce(E::ModeResult {
+                .reduce(E::Manage(ManagementEvent::ModeResult {
                     request_id: id,
                     result: ModeSelectionResult::Accepted {
                         mode,
                         changed: true
                     }
-                })
+                }))
                 .mode_selection
                 .is_none()
         );
@@ -757,13 +750,13 @@ fn mode_selection_requires_both_request_id_and_requested_mode() {
     }
     assert!(
         model
-            .reduce(E::ModeResult {
+            .reduce(E::Manage(ManagementEvent::ModeResult {
                 request_id,
                 result: ModeSelectionResult::Accepted {
                     mode: SessionMode::Plan,
                     changed: true
                 }
-            })
+            }))
             .mode_selection
             .is_some()
     );
@@ -777,11 +770,11 @@ fn unread_stream_is_fenced_after_intermediate_without_blocking_future_previews()
     let (sender, mut receiver) = zevria_session_api::session_event_channel(8);
     sender.stream_updated(TURN, Message::assistant("stale"));
     sender
-        .try_send(E::Intermediate {
+        .try_send(E::Turn(TurnEvent::Intermediate {
             turn_id: TURN,
             message: Message::assistant("committed"),
             attempt_id: None,
-        })
+        }))
         .unwrap();
     let zevria_session_api::SessionUpdate::Lifecycle(event) = receiver.try_recv().unwrap() else {
         panic!("lifecycle first")
@@ -807,7 +800,7 @@ fn cancel_learns_the_turn_id_only_after_promotion() {
             turn_id: Some(TURN)
         })
     );
-    model.reduce(E::TurnCancelled { turn_id: TURN });
+    model.reduce(E::Turn(TurnEvent::Cancelled { turn_id: TURN }));
     assert_eq!(model.cancel(), None);
 }
 #[test]
@@ -821,18 +814,18 @@ fn tool_completion_bumps_the_same_block_revision() {
             serde_json::json!({"command":"echo hi"}),
         ),
     );
-    model.reduce(E::Intermediate {
+    model.reduce(E::Turn(TurnEvent::Intermediate {
         turn_id: TURN,
         message: Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
             call,
         )])),
         attempt_id: None,
-    });
+    }));
     let HistoryEntry::Conversation(entry) = &model.conversation.history()[1] else {
         panic!("conversation")
     };
     let before = (entry.blocks[0].id, entry.blocks[0].revision);
-    model.reduce(E::ToolResults {
+    model.reduce(E::Turn(TurnEvent::ToolResults {
         turn_id: TURN,
         message: Message::tool_result(
             CallId::from_wire("c"),
@@ -840,7 +833,7 @@ fn tool_completion_bumps_the_same_block_revision() {
             "hi",
         ),
         metadata: Vec::new(),
-    });
+    }));
     let HistoryEntry::Conversation(entry) = &model.conversation.history()[1] else {
         panic!("conversation")
     };
@@ -891,9 +884,11 @@ fn tool_results_attach_only_the_batchs_live_command_snapshots() {
             ..older.clone()
         };
         for job in [&older, &current] {
-            model.reduce(E::CommandJobUpdated { job: job.clone() });
+            model.reduce(E::Job(JobEvent::Updated {
+                job: Box::new(job.clone()),
+            }));
         }
-        model.reduce(E::Intermediate {
+        model.reduce(E::Turn(TurnEvent::Intermediate {
             turn_id: TURN,
             attempt_id: None,
             message: Message::Assistant(AssistantMessage::new(
@@ -910,14 +905,14 @@ fn tool_results_attach_only_the_batchs_live_command_snapshots() {
                     })
                     .collect(),
             )),
-        });
+        }));
         // A deliberately distinct cached snapshot proves an unrelated block is
         // not revisited by this batch's attachment pass.
         let mut cached = older;
         cached.stdout_bytes = 42;
         model.conversation.update_command_job(&cached);
         let old_revision = block(&model, "older").revision;
-        model.reduce(E::ToolResults {
+        model.reduce(E::Turn(TurnEvent::ToolResults {
             turn_id: TURN,
             message: Message::tool_result(
                 CallId::from_wire("batch"),
@@ -937,7 +932,7 @@ fn tool_results_attach_only_the_batchs_live_command_snapshots() {
                     })
                 }),
             }],
-        });
+        }));
         assert_eq!(
             block(&model, "batch")
                 .native_tool()

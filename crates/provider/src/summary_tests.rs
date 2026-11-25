@@ -5,6 +5,7 @@ use zevria_model::ModelInputTooLarge;
 use zevria_model::OwnedModelRequestItem;
 use zevria_model::compaction::replay::replay_safe_prefixes;
 use zevria_model::compaction::summary_tail_history;
+use zevria_session_api::TurnEvent;
 
 fn size_event_cases() -> Vec<(Value, bool)> {
     let mut cases = Vec::new();
@@ -102,7 +103,7 @@ async fn structured_size_events_are_typed_and_never_reconnect_websocket() {
         );
         assert!(!is_websocket_disconnect(&error), "{label}: {error:#}");
         assert!(state.result.is_empty());
-        assert!(openai.ws.continuation.is_none());
+        assert!(openai.responses_transport.ws.continuation.is_none());
         server.await.unwrap();
     }
 }
@@ -398,11 +399,11 @@ async fn non_success_terminal_size_body_does_not_start_core_compaction_or_replay
         assert!(
             !updates.iter().any(|update| matches!(
                 update,
-                SessionUpdate::Lifecycle(SessionEvent::CompactionStarted { .. })
+                SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::CompactionStarted { .. }))
             )),
             "{status}: accepted upstream work must not trigger compaction/replay"
         );
-        assert!(updates.iter().any(|update| matches!(update,SessionUpdate::Lifecycle(SessionEvent::TurnFailed {error,..}) if error.contains("not confirmed pre-execution"))),"{status}");
+        assert!(updates.iter().any(|update| matches!(update,SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Failed {error,..})) if error.contains("not confirmed pre-execution"))),"{status}");
         assert!(!engine.conversation().items().iter().any(|item| matches!(item,zevria_transcript::transcript::TranscriptItem::IncompleteResponse(record) if record.input_rejection.is_some())),"terminal evidence must not become a pre-execution rejection record");
         assert_eq!(
             server.await.unwrap(),

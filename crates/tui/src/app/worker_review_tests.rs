@@ -92,10 +92,14 @@ fn worker_insert_redo_never_confirms_even_when_empty_or_in_completion() {
     assert!(app.interaction.is_normal());
     assert!(matches!(
         app.handle_event(key(KeyCode::Char('y'), KeyModifiers::CONTROL)),
-        Some(UiAction::WorkerControl(WorkerControl {
-            action: WorkerControlAction::Confirm { .. },
-            ..
-        }))
+        Some(UiAction::Session(
+            zevria_session_api::SessionCommand::Control(
+                zevria_session_api::ControlCommand::Worker(WorkerControl {
+                    action: WorkerControlAction::Confirm { .. },
+                    ..
+                })
+            )
+        ))
     ));
 }
 
@@ -104,7 +108,10 @@ fn worker_clear_undo_invalidates_an_ack_even_when_visible_content_matches() {
     let mut app = worker();
     app.handle_event(Event::Paste("/confirm".into()));
     let draft = app.composer.snapshot();
-    let Some(UiAction::WorkerControl(control)) = app.submit_worker() else {
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(control),
+    ))) = app.submit_worker()
+    else {
         panic!("confirmation command")
     };
     assert!(app.composer_editable());
@@ -127,7 +134,10 @@ fn worker_draft_history_survives_rejection_but_not_acceptance_and_freeze_blocks_
     for accepted in [false, true] {
         let mut app = worker();
         app.handle_event(Event::Paste("feedback".into()));
-        let Some(UiAction::WorkerControl(control)) = app.submit_worker() else {
+        let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+            zevria_session_api::ControlCommand::Worker(control),
+        ))) = app.submit_worker()
+        else {
             panic!("feedback")
         };
         assert!(app.interaction.is_normal());
@@ -171,8 +181,9 @@ fn worker_composers_are_independent_multiline_and_scoped() {
     first.handle_event(Event::Paste("more".into()));
     assert_eq!(first.composer.text(), "feedback\nmore");
     assert!(second.composer.text().is_empty());
-    let Some(UiAction::WorkerControl(control)) =
-        first.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(control),
+    ))) = first.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
     else {
         panic!("worker control")
     };
@@ -274,8 +285,9 @@ fn worker_image_only_feedback_returns_to_normal_and_clears_only_on_acknowledgeme
         .unwrap();
     let draft = app.composer.snapshot();
     let prompt = app.composer.prompt();
-    let Some(UiAction::WorkerControl(control)) =
-        app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(control),
+    ))) = app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
     else {
         panic!("image-only feedback")
     };
@@ -299,8 +311,9 @@ fn worker_acknowledgement_distinguishes_cursor_motion_from_pending_paste() {
     for paste_pending in [false, true] {
         let mut app = worker();
         app.handle_event(Event::Paste("submitted".into()));
-        let Some(UiAction::WorkerControl(control)) =
-            app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
+        let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+            zevria_session_api::ControlCommand::Worker(control),
+        ))) = app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
         else {
             panic!("feedback")
         };
@@ -370,8 +383,9 @@ fn worker_rejection_preserves_draft_and_shortcuts_never_discard_it() {
             .is_none()
     );
     assert_eq!(app.composer.text(), "draft");
-    let Some(UiAction::WorkerControl(control)) =
-        app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(control),
+    ))) = app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
     else {
         panic!("feedback")
     };
@@ -411,18 +425,21 @@ fn worker_confirmation_binds_revision_and_normal_c_does_not_intercept_inserted_p
         .revision
         .clone();
     assert!(
-        matches!(app.handle_event(key(KeyCode::Char('c'), KeyModifiers::NONE)), Some(UiAction::WorkerControl(WorkerControl { action: WorkerControlAction::Confirm { expected_revision }, .. })) if expected_revision == revision)
+        matches!(app.handle_event(key(KeyCode::Char('c'), KeyModifiers::NONE)), Some(UiAction::Session(zevria_session_api::SessionCommand::Control(zevria_session_api::ControlCommand::Worker(WorkerControl { action: WorkerControlAction::Confirm { expected_revision }, .. })))) if expected_revision == revision)
     );
 }
 #[test]
 fn prepared_feedback_receipt_settles_the_original_draft_without_accepting_changed_text() {
     let mut app = worker();
-    app.worker.bound.as_mut().unwrap().1.image_capability = Some(true);
+    app.worker.bound.as_mut().unwrap().1.images.image_capability = Some(true);
     app.composer.insert_text("feedback ");
     app.composer
         .attach_image(zevria_content::test_support::oversized_image())
         .unwrap();
-    let Some(UiAction::WorkerControl(mut control)) = app.submit_worker() else {
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(mut control),
+    ))) = app.submit_worker()
+    else {
         panic!("image feedback")
     };
     let WorkerControlAction::SendFeedback { text } = &mut control.action else {
@@ -463,24 +480,29 @@ fn worker_root_commands_are_rejected_and_literal_escape_is_available() {
     app.composer
         .replace("//implement is syntax to discuss".into(), 31);
     assert!(
-        matches!(app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL)), Some(UiAction::WorkerControl(WorkerControl { action: WorkerControlAction::SendFeedback { text }, .. })) if text == zevria_content::UserPrompt::from_text("/implement is syntax to discuss"))
+        matches!(app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL)), Some(UiAction::Session(zevria_session_api::SessionCommand::Control(zevria_session_api::ControlCommand::Worker(WorkerControl { action: WorkerControlAction::SendFeedback { text }, .. })))) if text == zevria_content::UserPrompt::from_text("/implement is syntax to discuss"))
     );
 }
 #[test]
 fn worker_cancel_remains_available_before_feedback_ack_and_freezing_preserves_draft() {
     let mut app = worker();
     app.handle_event(Event::Paste("retained draft".into()));
-    let Some(UiAction::WorkerControl(feedback)) =
-        app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(feedback),
+    ))) = app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
     else {
         panic!("feedback")
     };
     assert!(matches!(
         app.worker_action(WorkerControlAction::CancelPrompt),
-        Some(UiAction::WorkerControl(WorkerControl {
-            action: WorkerControlAction::CancelPrompt,
-            ..
-        }))
+        Some(UiAction::Session(
+            zevria_session_api::SessionCommand::Control(
+                zevria_session_api::ControlCommand::Worker(WorkerControl {
+                    action: WorkerControlAction::CancelPrompt,
+                    ..
+                })
+            )
+        ))
     ));
     let mut stale = feedback.clone();
     stale.target.turn_id = TurnId::new(99);
@@ -491,7 +513,9 @@ fn worker_cancel_remains_available_before_feedback_ack_and_freezing_preserves_dr
     });
     assert_eq!(app.composer.text(), "retained draft");
     assert!(app.worker.pending.is_some());
-    let Some(UiAction::WorkerControl(abandon)) = app.worker_action(WorkerControlAction::Abandon)
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(abandon),
+    ))) = app.worker_action(WorkerControlAction::Abandon)
     else {
         panic!("urgent abandonment")
     };
@@ -519,8 +543,9 @@ fn worker_abandon_is_urgent_and_only_clears_its_matching_unchanged_draft() {
     for changed in [false, true] {
         let mut app = worker();
         app.handle_event(Event::Paste("feedback".into()));
-        let Some(UiAction::WorkerControl(feedback)) =
-            app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
+        let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+            zevria_session_api::ControlCommand::Worker(feedback),
+        ))) = app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
         else {
             panic!("feedback")
         };
@@ -528,8 +553,9 @@ fn worker_abandon_is_urgent_and_only_clears_its_matching_unchanged_draft() {
         app.handle_event(key(KeyCode::Char('i'), KeyModifiers::NONE));
         app.composer.replace("/ab".into(), 3);
         // Enter activation retains the urgent control's independent eligibility.
-        let Some(UiAction::WorkerControl(abandon)) =
-            app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE))
+        let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+            zevria_session_api::ControlCommand::Worker(abandon),
+        ))) = app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE))
         else {
             panic!("urgent abandonment")
         };
@@ -570,7 +596,10 @@ fn worker_abandon_is_urgent_and_only_clears_its_matching_unchanged_draft() {
 fn worker_abandon_rejection_and_late_acceptance_after_freeze_preserve_drafts() {
     let mut app = worker();
     app.composer.replace("/abandon".into(), 8);
-    let Some(UiAction::WorkerControl(control)) = app.submit_worker() else {
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(control),
+    ))) = app.submit_worker()
+    else {
         panic!("abandon")
     };
     app.worker_control_result(&WorkerControlResult::rejected(control.clone(), "sealed"));
@@ -600,7 +629,16 @@ fn worker_oversize_proposal_is_not_confirmable() {
         app.handle_event(key(KeyCode::Char('y'), KeyModifiers::CONTROL))
             .is_none()
     );
-    assert!(app.worker.bound.as_ref().unwrap().1.retained.is_some());
+    assert!(
+        app.worker
+            .bound
+            .as_ref()
+            .unwrap()
+            .1
+            .proposals
+            .retained
+            .is_some()
+    );
 }
 
 fn bind_event(app: &mut App, event: WorkerReviewEvent) {
@@ -611,8 +649,9 @@ fn bind_event(app: &mut App, event: WorkerReviewEvent) {
 
 fn feedback(app: &mut App, draft: &str) -> WorkerControl {
     app.handle_event(Event::Paste(draft.into()));
-    let Some(UiAction::WorkerControl(control)) =
-        app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(control),
+    ))) = app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
     else {
         panic!("feedback submission")
     };
@@ -630,7 +669,7 @@ fn accepted_input(state: &mut WorkerReviewState, control: &WorkerControl) {
     state
         .apply(&WorkerReviewEvent::InputAccepted {
             input: WorkerInput {
-                generation: state.accepted_generation + 1,
+                generation: state.inputs.accepted_generation + 1,
                 request_id: control.request_id.clone(),
                 kind,
                 text,
@@ -640,8 +679,8 @@ fn accepted_input(state: &mut WorkerReviewState, control: &WorkerControl) {
 }
 
 fn settle(state: &mut WorkerReviewState) {
-    let generation = state.accepted_generation;
-    if state.active.is_none() && !state.pending.is_empty() {
+    let generation = state.inputs.accepted_generation;
+    if state.inputs.active.is_none() && !state.inputs.pending.is_empty() {
         state
             .apply(&WorkerReviewEvent::Dispatched {
                 generation,
@@ -709,7 +748,7 @@ fn worker_busy_snapshots_allow_editing_but_block_duplicate_work() {
         if phase == "unsettled" {
             // Even an empty active/queued projection is not idle until its
             // accepted generation has settled.
-            state.active = None;
+            state.inputs.active = None;
         }
         app.bind_worker_review(target.clone(), state);
         assert!(app.worker_busy(), "{phase}");
@@ -1026,10 +1065,19 @@ fn worker_terminal_bindings_retire_handoff_but_only_freeze_retires_pending_ack()
 fn baseline_on_confirmed_worker_is_nonurgent_and_rejection_retains_draft() {
     let mut app = worker();
     let revision = confirm_fixture(&mut app);
-    let original = app.worker.bound.as_ref().unwrap().1.confirmation.clone();
+    let original = app
+        .worker
+        .bound
+        .as_ref()
+        .unwrap()
+        .1
+        .proposals
+        .confirmation
+        .clone();
     app.composer.replace("/baseline".into(), 9);
-    let Some(UiAction::WorkerControl(control)) =
-        app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+        zevria_session_api::ControlCommand::Worker(control),
+    ))) = app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
     else {
         panic!("mark confirmed worker");
     };
@@ -1050,7 +1098,10 @@ fn baseline_on_confirmed_worker_is_nonurgent_and_rejection_retains_draft() {
         "displayed revision is stale",
     ));
     assert_eq!(app.composer.text(), "/baseline");
-    assert_eq!(app.worker.bound.as_ref().unwrap().1.confirmation, original);
+    assert_eq!(
+        app.worker.bound.as_ref().unwrap().1.proposals.confirmation,
+        original
+    );
 }
 
 #[test]
@@ -1081,7 +1132,7 @@ fn worker_all_seven_popup_commands_run_highlighted_entries_with_exact_targets() 
             };
             if name == "unbaseline" {
                 let (target, state) = app.worker.bound.as_ref().unwrap();
-                let receipt = state.confirmation.as_ref().unwrap().clone();
+                let receipt = state.proposals.confirmation.as_ref().unwrap().clone();
                 let _ = target;
                 bind_event(&mut app, WorkerReviewEvent::BaselineMarked { receipt });
             }
@@ -1113,8 +1164,9 @@ fn worker_all_seven_popup_commands_run_highlighted_entries_with_exact_targets() 
                 app.worker.pending.is_none() && app.worker.urgent.is_empty(),
                 "highlighting cannot execute a control"
             );
-            let Some(UiAction::WorkerControl(control)) =
-                app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE))
+            let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+                zevria_session_api::ControlCommand::Worker(control),
+            ))) = app.handle_event(key(KeyCode::Enter, KeyModifiers::NONE))
             else {
                 panic!("popup {name}")
             };
@@ -1227,7 +1279,7 @@ fn worker_completion_preserves_suffixes_tab_only_completes_and_no_match_enter_is
         assert_eq!(app.composer.text(), draft);
         if draft == "//x" {
             assert!(
-                matches!(app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL)), Some(UiAction::WorkerControl(WorkerControl { action: WorkerControlAction::SendFeedback { text }, .. })) if text == zevria_content::UserPrompt::from_text("/x"))
+                matches!(app.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL)), Some(UiAction::Session(zevria_session_api::SessionCommand::Control(zevria_session_api::ControlCommand::Worker(WorkerControl { action: WorkerControlAction::SendFeedback { text }, .. })))) if text == zevria_content::UserPrompt::from_text("/x"))
             );
         }
     }
@@ -1281,8 +1333,9 @@ fn worker_busy_ctrl_c_clears_first_then_cancels_locally_but_slash_submission_is_
                 .is_none()
         );
         assert!(app.composer.text().is_empty());
-        let Some(UiAction::WorkerControl(cancel)) =
-            app.handle_event(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        let Some(UiAction::Session(zevria_session_api::SessionCommand::Control(
+            zevria_session_api::ControlCommand::Worker(cancel),
+        ))) = app.handle_event(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
         else {
             panic!("worker-local cancellation")
         };
@@ -1349,8 +1402,8 @@ fn worker_quiescent_statuses_allow_i_but_inspect_and_root_capabilities_stay_rest
         }
         let (target, mut state) = app.worker.bound.clone().unwrap();
         if status == "feedback" || status == "blocked" {
-            state.retained = None;
-            state.connected = status == "feedback";
+            state.proposals.retained = None;
+            state.connection.connected = status == "feedback";
         }
         app.bind_worker_review(target, state);
         app.handle_event(key(KeyCode::Esc, KeyModifiers::NONE));

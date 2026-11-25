@@ -89,21 +89,7 @@ impl ModelPicker {
         true
     }
     fn filtered(&self) -> Vec<usize> {
-        let query = self.filter.text().to_lowercase();
-        self.state
-            .profiles
-            .iter()
-            .enumerate()
-            .filter(|(_, profile)| {
-                profile
-                    .context
-                    .profile
-                    .to_string()
-                    .to_lowercase()
-                    .contains(&query)
-            })
-            .map(|(index, _)| index)
-            .collect()
+        self.state.filter_indices(self.filter.text())
     }
     pub(crate) fn context(&self) -> KeyContext {
         if self.filtering {

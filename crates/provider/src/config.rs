@@ -1,6 +1,6 @@
 //! Strict provider-owned Responses and Anthropic Messages configuration.
 
-use std::{collections::BTreeMap, fmt, path::Path};
+use std::{collections::BTreeMap, fmt, path::Path, sync::Arc};
 
 use crate::credential::ApiKeySource;
 
@@ -222,31 +222,38 @@ impl ProviderConfig {
     }
     fn resolved_profiles(&self, provider: &str) -> Vec<ResolvedModelProfile> {
         match self {
-            Self::Responses(config) => config
-                .models
-                .iter()
-                .map(|(key, model)| ResolvedModelProfile {
-                    profile: ModelProfileRef::new(provider, key),
-                    protocol: ProfileProtocol::Responses {
-                        endpoint: config.resolved_endpoint(model.service_tier),
-                        reasoning_summary_level: model.reasoning_summary_level,
-                    },
-                    context_window_tokens: model.context_window_tokens,
-                    input_token_limit: model
-                        .input_token_limit
-                        .unwrap_or(model.context_window_tokens),
-                    retained_user_tokens: model.retained_user_tokens,
-                    image_accounting: model
-                        .image_accounting
-                        .resolve(
-                            key,
-                            official_image_endpoint(&config.base_url, "api.openai.com"),
-                            false,
-                        )
-                        .expect("validated accounting policy"),
-                    reasoning_levels: model.reasoning_levels.clone(),
-                })
-                .collect(),
+            Self::Responses(config) => {
+                let mut endpoints = std::collections::HashMap::new();
+                config
+                    .models
+                    .iter()
+                    .map(|(key, model)| ResolvedModelProfile {
+                        profile: ModelProfileRef::new(provider, key),
+                        protocol: ProfileProtocol::Responses {
+                            endpoint: Arc::clone(
+                                endpoints.entry(model.service_tier).or_insert_with(|| {
+                                    Arc::new(config.resolved_endpoint(model.service_tier))
+                                }),
+                            ),
+                            reasoning_summary_level: model.reasoning_summary_level,
+                        },
+                        context_window_tokens: model.context_window_tokens,
+                        input_token_limit: model
+                            .input_token_limit
+                            .unwrap_or(model.context_window_tokens),
+                        retained_user_tokens: model.retained_user_tokens,
+                        image_accounting: model
+                            .image_accounting
+                            .resolve(
+                                key,
+                                official_image_endpoint(&config.base_url, "api.openai.com"),
+                                false,
+                            )
+                            .expect("validated accounting policy"),
+                        reasoning_levels: model.reasoning_levels.clone(),
+                    })
+                    .collect()
+            }
             Self::Anthropic(config) => config.resolved_profiles(provider),
         }
     }
@@ -271,11 +278,11 @@ pub fn deserialize_provider_catalog<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone)]
 pub enum ProfileProtocol {
     Responses {
-        endpoint: ProviderEndpoint,
+        endpoint: Arc<ProviderEndpoint>,
         reasoning_summary_level: ReasoningSummaryLevel,
     },
     Anthropic {
-        endpoint: AnthropicEndpoint,
+        endpoint: Arc<AnthropicEndpoint>,
         model: AnthropicModelConfig,
     },
 }
@@ -302,7 +309,7 @@ impl ResolvedModelProfile {
     }
     pub fn responses_endpoint_mut(&mut self) -> &mut ProviderEndpoint {
         match &mut self.protocol {
-            ProfileProtocol::Responses { endpoint, .. } => endpoint,
+            ProfileProtocol::Responses { endpoint, .. } => Arc::make_mut(endpoint),
             _ => panic!("expected a Responses profile"),
         }
     }
@@ -398,7 +405,7 @@ impl NetworkConfig {
 }
 
 /// A service tier for Responses creation. The spelling is kept on the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ServiceTier {
     Auto,
     Default,
@@ -434,7 +441,7 @@ impl ServiceTier {
 }
 
 /// Omission inherits the provider setting; an explicit null suppresses it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum ModelServiceTier {
     #[default]
     Inherit,
@@ -614,6 +621,26 @@ pub struct ResponsesCompatibilityConfig {
     pub send_store: bool,
     /// Request native multi-call responses; additional_params may override it.
     pub parallel_tool_calls: bool,
+}
+
+impl ResponsesCompatibilityConfig {
+    pub(crate) fn preflight_options<'a>(
+        &self,
+        target: &'a ModelProfileRef,
+        policy: &'a zevria_foundation::image_accounting::ImageAccountingPolicy,
+    ) -> zevria_responses::replay::PreflightOptions<'a> {
+        zevria_responses::replay::PreflightOptions {
+            projection: zevria_responses::replay::ProjectionOptions {
+                target,
+                developer_messages: self.developer_messages,
+                tool_options: zevria_responses::tools::ToolRendererOptions {
+                    strict_tools: self.strict_tools,
+                },
+                additional_tools: self.additional_tools,
+            },
+            policy,
+        }
+    }
 }
 
 impl Default for ResponsesCompatibilityConfig {

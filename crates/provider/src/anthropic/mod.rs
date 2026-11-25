@@ -9,8 +9,8 @@ use crate::{
     },
     http::{bounded_http_error_body, retry_hint},
     recovery::{
-        AttemptFailure, AttemptProgress, Decision, ProgressClock, Recovery, RecoveryPolicy,
-        failure_class,
+        AttemptError, AttemptFailure, AttemptPlan, AttemptProgress, ProgressClock, Recovery,
+        RecoveryDriver, RecoveryPolicy, run_recovery_loop,
     },
 };
 use bytes::Bytes;
@@ -19,6 +19,7 @@ use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
+use zevria_model::RetryCategory;
 
 mod history;
 pub(crate) use history::HistoryCache;
@@ -39,7 +40,7 @@ use zevria_session_api::{
 
 pub struct AnthropicProvider {
     profile: ModelProfileRef,
-    endpoint: AnthropicEndpoint,
+    endpoint: Arc<AnthropicEndpoint>,
     model: AnthropicModelConfig,
     reasoning_level: ReasoningLevel,
     preamble: String,
@@ -191,7 +192,7 @@ impl AnthropicProvider {
                     .map_err(|error| {
                         (
                             ApiError::with_source(
-                                ErrorKind::Retryable("request_start_timeout"),
+                                ErrorKind::Retryable(RetryCategory::RequestStartTimeout),
                                 "Anthropic request-start deadline expired before response headers",
                                 error,
                             ),
@@ -201,7 +202,7 @@ impl AnthropicProvider {
                     .map_err(|error| {
                         (
                             ApiError::with_source(
-                                ErrorKind::Retryable("transport"),
+                                ErrorKind::Retryable(RetryCategory::Transport),
                                 "Anthropic HTTP request failed",
                                 error.without_url(),
                             ),
@@ -214,7 +215,7 @@ impl AnthropicProvider {
             .await
             .map_err(|error| {
                 let kind = if error.is_transient() {
-                    ErrorKind::Retryable("credential_helper")
+                    ErrorKind::Retryable(RetryCategory::CredentialHelper)
                 } else {
                     ErrorKind::Terminal
                 };
@@ -275,7 +276,7 @@ impl AnthropicProvider {
                     .map_err(|e| {
                         (
                             ApiError::new(
-                                ErrorKind::Retryable("response_idle_timeout"),
+                                ErrorKind::Retryable(RetryCategory::ResponseIdleTimeout),
                                 e.to_string(),
                             ),
                             request_id.clone(),
@@ -289,13 +290,13 @@ impl AnthropicProvider {
                         match e {
                             eventsource_stream::EventStreamError::Transport(error) => {
                                 ApiError::with_source(
-                                    ErrorKind::Retryable("stream"),
+                                    ErrorKind::Retryable(RetryCategory::Stream),
                                     "Anthropic HTTP event stream failed",
                                     error.without_url(),
                                 )
                             }
                             error => ApiError::with_source(
-                                ErrorKind::Retryable("stream"),
+                                ErrorKind::Retryable(RetryCategory::Stream),
                                 "Anthropic HTTP event stream failed",
                                 error,
                             ),
@@ -361,130 +362,24 @@ impl AnthropicProvider {
         progress: ProgressReporter,
         history: Option<Arc<ValidatedHistory>>,
     ) -> anyhow::Result<ModelResponse> {
-        let mut prepared = self.prepare(&request, history.as_deref())?;
+        let prepared = self.prepare(&request, history.as_deref())?;
         drop(history);
-        let mut encoded_body = Bytes::from(serde_json::to_vec(&prepared.body)?);
-        let recovery = Recovery::new(&self.recovery);
-        let mut refresh = CredentialRefresh::default();
-        let mut stripped_retry = false;
-        while let Some(plan) = recovery.start_attempt() {
-            let attempt_progress = AttemptProgress {
-                reporter: &progress,
-                recovery: &recovery,
-                attempt: plan.attempt,
-                transport: NetworkTransport::Http,
-            };
-            attempt_progress.status(NetworkStatus::AttemptStarted).await;
-            match self
-                .attempt(
-                    &prepared,
-                    &encoded_body,
-                    &mut refresh,
-                    attempt_progress,
-                    plan.request_start_deadline,
-                )
-                .await
-            {
-                Ok((finished, _request_id)) => {
-                    let usage = finished.usage.canonical();
-                    let response = ModelResponse::from_record(MessageRecord::from_trusted_replay(
-                        finished.replay,
-                    ))
-                    .with_usage(Some(usage));
-                    return Ok(response);
-                }
-                Err((mut error, request_id)) => {
-                    progress.stream_cleared();
-                    let kind = error.kind;
-                    let pre_execution = error.pre_execution;
-                    let delay = error.retry_after;
-                    if let Some(id) = &request_id {
-                        error.message.push_str(&format!(" (request-id: {id})"));
-                    }
-                    let error: anyhow::Error = error.into();
-                    if kind == ErrorKind::InputTooLarge {
-                        return Err(if plan.attempt == 1 && pre_execution {
-                            ModelInputTooLarge::pre_execution(error).into()
-                        } else {
-                            ModelInputTooLarge::new(error).into()
-                        });
-                    }
-                    if kind == ErrorKind::RequestBodyTooLarge {
-                        return Err(zevria_model::ModelRequestBodyTooLarge(error).into());
-                    }
-                    let strip_thinking =
-                        kind == ErrorKind::ThinkingBindingMismatch && !stripped_retry;
-                    let category = match kind {
-                        ErrorKind::Retryable(category) => category,
-                        _ if strip_thinking => "thinking_binding_mismatch",
-                        _ => return Err(error),
-                    };
-                    let last = AttemptFailure {
-                        category,
-                        class: failure_class(category),
-                        error,
-                        server_delay: if strip_thinking {
-                            Some(Duration::ZERO)
-                        } else {
-                            delay
-                        },
-                        upstream_request_id: request_id,
-                    };
-                    let decision = recovery.decide(&last);
-                    recovery.log_failure(&last, decision);
-                    let Decision::Retry {
-                        next_attempt,
-                        delay,
-                        retrying_for,
-                    } = decision
-                    else {
-                        let Decision::Exhausted(reason) = decision else {
-                            unreachable!()
-                        };
-                        return Err(recovery.exhausted_error(reason, last, &self.profile.provider));
-                    };
-                    if strip_thinking {
-                        stripped_retry = true;
-                        tracing::warn!(provider=%self.profile.provider, "Anthropic thinking binding mismatch; retrying once without historical thinking");
-                        // Existing one-time semantic repair, not transient recovery.
-                        prepared.stripped_thinking_turns += prepared.body["messages"]
-                            .as_array()
-                            .expect("prepared messages")
-                            .iter()
-                            .filter(|message| {
-                                message["content"]
-                                    .as_array()
-                                    .expect("content")
-                                    .iter()
-                                    .any(zevria_anthropic::project::is_thinking)
-                            })
-                            .count();
-                        prepared.prefix_binding =
-                            zevria_anthropic::project::strip_thinking(&mut prepared.body);
-                        body::place_cache_breakpoints(
-                            &mut prepared.body,
-                            self.endpoint.compatibility.prompt_caching,
-                        );
-                        zevria_anthropic::project::validate_messages(
-                            prepared.body["messages"]
-                                .as_array()
-                                .expect("prepared messages"),
-                        )?;
-                        encoded_body = Bytes::from(serde_json::to_vec(&prepared.body)?);
-                    }
-                    progress
-                        .retrying(
-                            next_attempt,
-                            delay,
-                            retrying_for,
-                            format!("{}: {:#}", last.category, last.error),
-                        )
-                        .await;
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-        anyhow::bail!("completion recovery requires a positive attempt cap")
+        let encoded_body = Bytes::from(serde_json::to_vec(&prepared.body)?);
+        let mut driver = MessagesRecovery {
+            provider: self,
+            progress: &progress,
+            prepared,
+            encoded_body,
+            refresh: CredentialRefresh::default(),
+            stripped_retry: false,
+        };
+        run_recovery_loop(
+            &self.recovery,
+            &progress,
+            &self.profile.provider,
+            &mut driver,
+        )
+        .await
     }
     pub(crate) fn count_with_history<'a>(
         &'a mut self,
@@ -598,4 +493,119 @@ impl ModelProvider for AnthropicProvider {
         self.count_with_history(request, None)
     }
     fn reset(&mut self) {}
+}
+
+struct MessagesRecovery<'a> {
+    provider: &'a AnthropicProvider,
+    progress: &'a ProgressReporter,
+    prepared: PreparedRequest,
+    encoded_body: Bytes,
+    refresh: CredentialRefresh,
+    stripped_retry: bool,
+}
+
+impl RecoveryDriver for MessagesRecovery<'_> {
+    type Output = ModelResponse;
+
+    async fn attempt<'a>(
+        &'a mut self,
+        plan: AttemptPlan,
+        recovery: &'a Recovery<'a>,
+    ) -> Result<ModelResponse, AttemptError> {
+        let attempt_progress = AttemptProgress {
+            reporter: self.progress,
+            recovery,
+            attempt: plan.attempt,
+            transport: NetworkTransport::Http,
+        };
+        attempt_progress.status(NetworkStatus::AttemptStarted).await;
+        match self
+            .provider
+            .attempt(
+                &self.prepared,
+                &self.encoded_body,
+                &mut self.refresh,
+                attempt_progress,
+                plan.request_start_deadline,
+            )
+            .await
+        {
+            Ok((finished, _)) => {
+                let usage = finished.usage.canonical();
+                Ok(
+                    ModelResponse::from_record(MessageRecord::from_trusted_replay(finished.replay))
+                        .with_usage(Some(usage)),
+                )
+            }
+            Err((mut error, request_id)) => {
+                self.progress.stream_cleared();
+                let kind = error.kind;
+                let pre_execution = error.pre_execution;
+                let delay = error.retry_after;
+                if let Some(id) = &request_id {
+                    error.message.push_str(&format!(" (request-id: {id})"));
+                }
+                let error: anyhow::Error = error.into();
+                let (category, server_delay) = match kind {
+                    ErrorKind::InputTooLarge if plan.attempt == 1 && pre_execution => {
+                        return Err(AttemptError::terminal(ModelInputTooLarge::pre_execution(
+                            error,
+                        )));
+                    }
+                    ErrorKind::InputTooLarge => {
+                        return Err(AttemptError::terminal(ModelInputTooLarge::new(error)));
+                    }
+                    ErrorKind::RequestBodyTooLarge => {
+                        return Err(AttemptError::terminal(
+                            zevria_model::ModelRequestBodyTooLarge(error),
+                        ));
+                    }
+                    ErrorKind::ThinkingBindingMismatch if !self.stripped_retry => {
+                        (RetryCategory::ThinkingBindingMismatch, Some(Duration::ZERO))
+                    }
+                    ErrorKind::Retryable(category) => (category, delay),
+                    _ => return Err(AttemptError::terminal(error)),
+                };
+                Err(AttemptError::Retryable {
+                    category,
+                    error,
+                    server_delay,
+                    upstream_request_id: request_id,
+                })
+            }
+        }
+    }
+
+    fn before_retry(&mut self, failure: &AttemptFailure) -> anyhow::Result<()> {
+        let prepared = &mut self.prepared;
+        if failure.category == RetryCategory::ThinkingBindingMismatch {
+            self.stripped_retry = true;
+            tracing::warn!(provider=%self.provider.profile.provider, "Anthropic thinking binding mismatch; retrying once without historical thinking");
+            // Existing one-time semantic repair, not transient recovery.
+            prepared.stripped_thinking_turns += prepared.body["messages"]
+                .as_array()
+                .expect("prepared messages")
+                .iter()
+                .filter(|message| {
+                    message["content"]
+                        .as_array()
+                        .expect("content")
+                        .iter()
+                        .any(zevria_anthropic::project::is_thinking)
+                })
+                .count();
+            prepared.prefix_binding = zevria_anthropic::project::strip_thinking(&mut prepared.body);
+            body::place_cache_breakpoints(
+                &mut prepared.body,
+                self.provider.endpoint.compatibility.prompt_caching,
+            );
+            zevria_anthropic::project::validate_messages(
+                prepared.body["messages"]
+                    .as_array()
+                    .expect("prepared messages"),
+            )?;
+            self.encoded_body = Bytes::from(serde_json::to_vec(&prepared.body)?);
+        }
+        Ok(())
+    }
 }

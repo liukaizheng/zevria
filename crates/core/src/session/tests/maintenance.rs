@@ -1,5 +1,6 @@
 //! The same command policy applies during model maintenance and active turns.
 use super::*;
+use zevria_session_api::{ManagementEvent, TurnEvent};
 
 struct MaintenanceSettings;
 impl zevria_model::models::ModelSettingsService for MaintenanceSettings {
@@ -151,11 +152,11 @@ async fn model_maintenance_does_not_emit_an_idle_barrier() {
     let (_directory, mut run, count, mut calls) =
         start_maintenance_with_idle_notifications(true).await;
     count.send(InputTokenCount::Exact(100)).unwrap();
-    run.until(|event| matches!(event, SessionEvent::ModelsResult { request_id, result: ModelManagementResult::Changed { .. } } if request_id == "maintenance")).await;
+    run.until(|event| matches!(event, SessionEvent::Manage(ManagementEvent::ModelsResult { request_id, result })  if matches!(result.as_ref(), ModelManagementResult::Changed { .. } if request_id == "maintenance"))).await;
     let lifecycle = run.shutdown().await;
     assert!(!lifecycle.iter().any(|event| matches!(
         event,
-        SessionEvent::EngineIdle | SessionEvent::TurnStarted { .. }
+        SessionEvent::EngineIdle | SessionEvent::Turn(TurnEvent::Started { .. })
     )));
     assert!(calls.try_recv().is_err());
 }
@@ -170,7 +171,7 @@ async fn turn_commands_queue_behind_model_maintenance_and_run_fifo() {
     assert!(calls.try_recv().is_err());
     assert!(!count.is_closed(), "queries must not cancel maintenance");
     count.send(InputTokenCount::Exact(100)).unwrap();
-    run.until(|event| matches!(event, SessionEvent::ModelsResult { request_id, result: ModelManagementResult::Changed { .. } } if request_id == "maintenance")).await;
+    run.until(|event| matches!(event, SessionEvent::Manage(ManagementEvent::ModelsResult { request_id, result })  if matches!(result.as_ref(), ModelManagementResult::Changed { .. } if request_id == "maintenance"))).await;
     for (id, prompt) in [(1, "first queued"), (2, "second queued")] {
         let call = run.call(&mut calls).await;
         assert_call(&call, id, prompt);
@@ -181,7 +182,8 @@ async fn turn_commands_queue_behind_model_maintenance_and_run_fifo() {
     assert_turns_do_not_overlap(&lifecycle, &[1, 2]);
     assert!(!lifecycle.iter().any(|event| matches!(
         event,
-        SessionEvent::TurnRejected { .. } | SessionEvent::TurnFailed { .. }
+        SessionEvent::Turn(TurnEvent::Rejected { .. })
+            | SessionEvent::Turn(TurnEvent::Failed { .. })
     )));
 }
 
@@ -215,15 +217,15 @@ async fn queued_cancellation_takes_effect_before_ready_maintenance_is_polled() {
         );
         let reply = run
             .until(|event| {
-                matches!(event, SessionEvent::ModelsResult { request_id, .. } if request_id == "maintenance")
+                matches!(event, SessionEvent::Manage(ManagementEvent::ModelsResult { request_id, .. }) if request_id == "maintenance")
             })
             .await;
         assert_eq!(
             reply,
-            SessionEvent::ModelsResult {
+            SessionEvent::Manage(ManagementEvent::ModelsResult {
                 request_id: "maintenance".into(),
-                result: ModelManagementResult::Cancelled,
-            }
+                result: Box::new(ModelManagementResult::Cancelled),
+            })
         );
         assert_eq!(run.shutdown().await, vec![reply]);
     }
@@ -241,7 +243,7 @@ async fn only_untargeted_turn_cancellation_cancels_maintenance() {
     run.send(SessionCommand::Control(ControlCommand::CancelTurn {
         turn_id: None,
     }));
-    run.until(|event| matches!(event, SessionEvent::ModelsResult { request_id, result: ModelManagementResult::Cancelled } if request_id == "maintenance")).await;
+    run.until(|event| matches!(event, SessionEvent::Manage(ManagementEvent::ModelsResult { request_id, result })  if matches!(result.as_ref(), ModelManagementResult::Cancelled if request_id == "maintenance"))).await;
     assert!(count.is_closed(), "maintenance count future was dropped");
     let call = run.call(&mut calls).await;
     assert_call(&call, 1, "after cancelled maintenance");

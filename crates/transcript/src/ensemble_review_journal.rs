@@ -2,6 +2,7 @@
 //! Root controls are authority; a worker journal can prove delivery/settlement,
 //! never manufacture acceptance or confirmation.
 use std::{borrow::Cow, collections::BTreeMap};
+use zevria_workflow::{WorkerEventObserver, WorkerObservation};
 
 use crate::{
     AgentRunEvent, AgentRunTranscriptHeader, AgentRunTranscriptRecord, WorkerInput,
@@ -16,8 +17,7 @@ pub struct WorkerReviewJournal {
     pub events: Vec<WorkerReviewEvent>,
     pub abandonment: Option<crate::WorkerControlId>,
     run_id: crate::EnsembleRunId,
-    publishing: bool,
-    replay: bool,
+    observer: WorkerEventObserver,
     collect_events: bool,
 }
 pub(crate) enum JournalChange<'a> {
@@ -25,12 +25,9 @@ pub(crate) enum JournalChange<'a> {
     StoreInput(&'a WorkerReviewEvent, &'a WorkerInput),
     Transition {
         event: Cow<'a, WorkerReviewEvent>,
-        stop_publishing: bool,
         log: bool,
     },
-    BeginReplay,
-    EndReplay,
-    BeginPrompt,
+    Observation(WorkerEventObserver, Option<WorkerReviewEvent>),
 }
 
 impl WorkerReviewJournal {
@@ -41,8 +38,7 @@ impl WorkerReviewJournal {
             events: Vec::new(),
             abandonment: None,
             run_id: header.ensemble_run_id.clone(),
-            publishing: false,
-            replay: false,
+            observer: WorkerEventObserver::default(),
             collect_events: true,
         }
     }
@@ -61,8 +57,7 @@ impl WorkerReviewJournal {
             events: Vec::new(),
             abandonment: self.abandonment.clone(),
             run_id: self.run_id.clone(),
-            publishing: self.publishing,
-            replay: self.replay,
+            observer: self.observer,
             collect_events: false,
         }
     }
@@ -94,7 +89,7 @@ impl WorkerReviewJournal {
         record: &'a AgentRunTranscriptRecord,
     ) -> Result<JournalChange<'a>, String> {
         use JournalChange::*;
-        if self.state.abandoned
+        if self.state.is_abandoned()
             && matches!(
                 record,
                 AgentRunTranscriptRecord::Event {
@@ -104,13 +99,9 @@ impl WorkerReviewJournal {
         {
             return Err("worker review transition follows terminal abandonment".into());
         }
-        let transition = |event: Cow<'a, WorkerReviewEvent>, stop_publishing, log| {
+        let transition = |event: Cow<'a, WorkerReviewEvent>, log| {
             self.state.validate_transition(&event)?;
-            Ok(Transition {
-                event,
-                stop_publishing,
-                log,
-            })
+            Ok(Transition { event, log })
         };
         match record {
             AgentRunTranscriptRecord::Event { event } => match event {
@@ -124,20 +115,20 @@ impl WorkerReviewJournal {
                         Ok(StoreInput(event, input))
                     }
                     WorkerReviewEvent::Dispatched { .. } | WorkerReviewEvent::Settled { .. } | WorkerReviewEvent::Recovering { .. } => {
-                        transition(Cow::Borrowed(event), true, true)
+                        transition(Cow::Borrowed(event), true)
                     }
                     WorkerReviewEvent::Interrupted { .. } | WorkerReviewEvent::Abandoned { .. } => {
-                        transition(Cow::Borrowed(event), true, false)
+                        transition(Cow::Borrowed(event), false)
                     }
-                    WorkerReviewEvent::Connection { .. } | WorkerReviewEvent::ImageCapability { .. } => transition(Cow::Borrowed(event), false, false),
+                    WorkerReviewEvent::Connection { .. } | WorkerReviewEvent::ImageCapability { .. } => transition(Cow::Borrowed(event), false),
                     WorkerReviewEvent::Confirmed { receipt } | WorkerReviewEvent::BaselineMarked { receipt } => {
-                        if receipt.target.run_id != self.run_id || !self.state.retained.as_ref().is_some_and(|snapshot| receipt.validates_snapshot(snapshot, &self.state.descriptor.id)) {
+                        if receipt.target.run_id != self.run_id || !self.state.proposals.retained.as_ref().is_some_and(|snapshot| receipt.validates_snapshot(snapshot, &self.state.descriptor.id)) {
                             return Err("worker confirmation mirror has no exact eligible snapshot".into());
                         }
                         Ok(None)
                     }
                     WorkerReviewEvent::CancelRequested { generation } => {
-                        if *generation == 0 || *generation > self.state.accepted_generation { return Err("worker cancellation mirror has no accepted input".into()); }
+                        if *generation == 0 || *generation > self.state.inputs.accepted_generation { return Err("worker cancellation mirror has no accepted input".into()); }
                         Ok(None)
                     }
                     WorkerReviewEvent::Withdrawn { .. } | WorkerReviewEvent::BaselineCleared { .. } | WorkerReviewEvent::Sealed | WorkerReviewEvent::PayloadChecked { .. } => Ok(None),
@@ -145,23 +136,19 @@ impl WorkerReviewJournal {
                         Err("worker journal uses raw durable Plan evidence, not synthetic publication mirrors".into())
                     }
                 },
-                AgentRunEvent::ReplayBoundary => Ok(BeginReplay),
-                AgentRunEvent::SessionEstablished { .. } => Ok(EndReplay),
-                AgentRunEvent::Prompt { .. } => Ok(BeginPrompt),
-                AgentRunEvent::NativePlanCaptured { capture, .. } if self.publishing && self.state.active.as_ref().is_none_or(|active| active.generation != capture.generation) => {
-                    Err("native capture generation does not match active review input".into())
+                event => {
+                    let mut observer = self.observer;
+                    let observed = observer.observe(event, WorkerObservation::Journal { has_inputs: !self.inputs.is_empty() })?;
+                    if let Some(transition) = &observed {
+                        self.state.validate_transition(transition)?;
+                    }
+                    if observer != self.observer || observed.is_some() {
+                        Ok(Observation(observer, observed))
+                    } else {
+                        Ok(None)
+                    }
                 }
-                AgentRunEvent::Plan { plan } | AgentRunEvent::NativePlanCaptured { plan, .. } if self.publishing => {
-                    let generation = self.state.active.as_ref().ok_or("publication without active worker input")?.generation;
-                    transition(Cow::Owned(WorkerReviewEvent::Published { generation, plan: plan.clone(), replay: false }), false, true)
-                }
-                AgentRunEvent::Elicitation { outcome: crate::AgentElicitationOutcome::Accepted, decision, decision_unavailable, .. } if !self.inputs.is_empty() => {
-                    transition(Cow::Owned(WorkerReviewEvent::Decisions { decision: decision.clone(), unavailable: decision_unavailable.clone() }), false, true)
-                }
-                AgentRunEvent::PlanRemoved { plan_id } if !self.replay && !self.inputs.is_empty() => {
-                    transition(Cow::Owned(WorkerReviewEvent::Removed { plan_id: plan_id.clone() }), false, true)
-                }
-                _ => Ok(None),
+
             },
             AgentRunTranscriptRecord::Outcome { outcome } if outcome.status == crate::AgentRunStatus::Abandoned => {
                 if self.abandonment.is_none() || !outcome.is_sanitized_abandonment() {
@@ -169,10 +156,10 @@ impl WorkerReviewJournal {
                 }
                 Ok(None)
             }
-            AgentRunTranscriptRecord::Outcome { outcome } if self.state.abandoned => Err(format!("non-abandoned outcome after abandonment: {}", outcome.status)),
+            AgentRunTranscriptRecord::Outcome { outcome } if self.state.is_abandoned() => Err(format!("non-abandoned outcome after abandonment: {}", outcome.status)),
             AgentRunTranscriptRecord::Outcome { outcome } if !self.inputs.is_empty() && outcome.confirmation.is_some() => {
                 let confirmed = outcome.confirmation.as_ref().expect("guarded confirmation");
-                if self.state.retained.as_ref() != Some(&confirmed.snapshot) {
+                if self.state.proposals.retained.as_ref() != Some(&confirmed.snapshot) {
                     return Err("terminal worker snapshot differs from its durable settled review evidence".into());
                 }
                 Ok(None)
@@ -188,29 +175,24 @@ impl WorkerReviewJournal {
                 self.state.apply_validated_transition(event);
                 self.inputs.insert(input.generation, input.clone());
             }
-            JournalChange::Transition {
-                event,
-                stop_publishing,
-                log,
-            } => {
+            JournalChange::Transition { event, log } => {
                 self.state.apply_validated_transition(&event);
                 if let WorkerReviewEvent::Abandoned { request_id } = event.as_ref() {
                     self.abandonment = Some(request_id.clone());
                 }
-                if stop_publishing {
-                    self.publishing = false;
-                }
+                self.observer.observe_review(&event);
                 if log && self.collect_events {
                     self.events.push(event.into_owned());
                 }
             }
-            JournalChange::BeginReplay => {
-                self.replay = true;
-                self.publishing = false;
-            }
-            JournalChange::EndReplay => self.replay = false,
-            JournalChange::BeginPrompt => {
-                self.publishing = self.state.active.is_some() && !self.replay
+            JournalChange::Observation(observer, event) => {
+                self.observer = observer;
+                if let Some(event) = event {
+                    self.state.apply_validated_transition(&event);
+                    if self.collect_events {
+                        self.events.push(event);
+                    }
+                }
             }
         }
     }

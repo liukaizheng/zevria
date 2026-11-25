@@ -1,5 +1,6 @@
 use super::*;
 use zevria_foundation::SubtaskLaunchMetadata;
+use zevria_session_api::TurnEvent;
 
 struct DetailTool {
     detail: Option<ToolResultDetail>,
@@ -315,7 +316,7 @@ async fn every_detail_variant_stays_out_of_provider_continuations() {
         let metadata = events
             .iter()
             .find_map(|event| match event {
-                SessionEvent::ToolResults { metadata, .. } => Some(metadata),
+                SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) => Some(metadata),
                 _ => None,
             })
             .expect("result event");

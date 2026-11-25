@@ -1,6 +1,7 @@
 //! MCP uses a session-local adapter and the same gate at declaration and dispatch.
 use tokio_util::sync::CancellationToken;
 use zevria_foundation::{McpManagementRequest, McpManagementResult, TurnPolicy, is_mcp_tool_name};
+use zevria_session_api::ManagementEvent;
 use zevria_session_api::{ModelProvider, SessionEvent, SessionEventSender, mcp::McpSessionService};
 
 use crate::session::SessionEngine;
@@ -32,12 +33,12 @@ impl<P: ModelProvider> SessionEngine<P> {
         {
             self.invalidate_mode_accounting();
             let _ = events
-                .send(SessionEvent::McpChanged {
+                .send(SessionEvent::Manage(ManagementEvent::McpChanged {
                     revision: summary.revision,
                     connected: summary.connected,
                     total: summary.total,
                     tool_count: summary.tool_count,
-                })
+                }))
                 .await;
         }
     }
@@ -78,16 +79,19 @@ impl<P: ModelProvider> SessionEngine<P> {
         {
             self.invalidate_mode_accounting();
             let _ = events
-                .send(SessionEvent::McpChanged {
+                .send(SessionEvent::Manage(ManagementEvent::McpChanged {
                     revision: revision.clone(),
                     connected: *connected,
                     total: *total,
                     tool_count: *tool_count,
-                })
+                }))
                 .await;
         }
         let _ = events
-            .send(SessionEvent::McpResult { request_id, result })
+            .send(SessionEvent::Manage(ManagementEvent::McpResult {
+                request_id,
+                result: Box::new(result),
+            }))
             .await;
     }
 }

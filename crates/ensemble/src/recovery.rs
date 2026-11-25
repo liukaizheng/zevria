@@ -1,6 +1,99 @@
 //! Session recovery, safe-mode setup, and prompt continuation.
 
-use super::*;
+use super::attempt::WorkerEnd;
+use super::bootstrap::{
+    SafeModeBootstrap, SafeModeExpectation, SessionBootstrapGate, SessionSetup, bind_session_gate,
+    load_session_request, resume_session_request,
+};
+use super::failure::{
+    acp_error, error_with_login_hint, is_unexpected_process_termination,
+    transient_prompt_error_kind,
+};
+use super::handoff::ClaudePlanHandoff;
+use super::logging::RunLog;
+use super::prompt::{live_continuation_prompt, semantic_repair_prompt};
+use super::wire::stop_reason_name;
+use agent_client_protocol::schema::v1::{
+    AgentCapabilities, CancelNotification, Error as AcpError, Meta, PromptRequest,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOptions, SessionId, SessionModeState, SetSessionConfigOptionRequest,
+    SetSessionModeRequest,
+};
+use agent_client_protocol::{Agent, ConnectionTo};
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::time::Duration;
+use zevria_workflow::{AgentRunEvent, AgentRunRepair, AgentRunStatus, EnsembleWorkflow};
+
+pub(super) const MAX_LIVE_TRANSIENT_CONTINUATIONS: usize = 1;
+pub(super) const TRANSIENT_CONTINUATION_BACKOFF: Duration = Duration::from_secs(2);
+
+#[derive(Default)]
+pub(super) struct TransientRecoveryState {
+    continuations: usize,
+    original: Option<TransientPromptFailure>,
+}
+
+struct TransientPromptFailure {
+    kind: &'static str,
+    error: AcpError,
+    dispatched: bool,
+}
+
+impl TransientRecoveryState {
+    pub(super) fn observe(&mut self, kind: &'static str, error: &AcpError) {
+        self.original.get_or_insert_with(|| TransientPromptFailure {
+            kind,
+            error: error.clone(),
+            dispatched: false,
+        });
+    }
+
+    pub(super) fn reserve(&mut self, kind: &'static str, error: &AcpError) -> bool {
+        if self.continuations >= MAX_LIVE_TRANSIENT_CONTINUATIONS {
+            return false;
+        }
+        self.observe(kind, error);
+        self.continuations += 1;
+        true
+    }
+
+    pub(super) fn failure_context(&self, login_hint: &str) -> Option<String> {
+        let original = self.original.as_ref()?;
+        if self.continuations == 0 {
+            return Some(format!(
+                "transient prompt failure ({}); continuation not scheduled: {}",
+                original.kind,
+                error_with_login_hint(&original.error, login_hint)
+            ));
+        }
+        let action = if original.dispatched {
+            "dispatched"
+        } else {
+            "scheduled but not dispatched"
+        };
+        Some(format!(
+            "automatic same-session transient continuation {} of {MAX_LIVE_TRANSIENT_CONTINUATIONS} {action} after {}: {}",
+            self.continuations,
+            original.kind,
+            error_with_login_hint(&original.error, login_hint)
+        ))
+    }
+}
+
+pub(super) struct PromptRunContext<'a> {
+    pub(super) cancellation: &'a tokio_util::sync::CancellationToken,
+    pub(super) elicitation_lifetime: &'a tokio_util::sync::CancellationToken,
+    pub(super) plan_handoff: Option<&'a ClaudePlanHandoff>,
+    pub(super) prompt_dispatched: &'a AtomicBool,
+    pub(super) semantic_end: &'a Mutex<Option<WorkerEnd>>,
+    pub(super) transient_recovery: &'a Mutex<TransientRecoveryState>,
+    pub(super) turn_timeout: Option<Duration>,
+    pub(super) cancel_grace: Duration,
+    pub(super) keep_alive: bool,
+}
 
 pub(super) async fn recover_session(
     connection: &ConnectionTo<Agent>,
@@ -8,7 +101,7 @@ pub(super) async fn recover_session(
     workspace: &Path,
     capabilities: &AgentCapabilities,
     log: &RunLog,
-    session_gate: &Arc<Mutex<SessionBootstrapGate>>,
+    session_gate: &Mutex<SessionBootstrapGate>,
     session_meta: &Option<Meta>,
 ) -> Result<SessionSetup, AcpError> {
     let Some(previous_session_id) = previous_session_id else {
@@ -606,7 +699,7 @@ pub(super) async fn run_prompt_once(
             }
             let response = response?;
             Ok(WorkerEnd::PromptResponse {
-                stop_reason: wire_name(&response.stop_reason),
+                stop_reason: stop_reason_name(&response.stop_reason),
             })
         }
         () = &mut timeout => {

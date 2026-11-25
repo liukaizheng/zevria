@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::TurnEvent;
 
 fn test_policies() -> SessionPolicies {
     super::test_policies_for_tools(&["echo", "skill"])
@@ -219,13 +220,13 @@ async fn skill_invocations_expand_history_but_display_the_compact_form() {
     let events = collect_events(&mut receiver).await;
     assert!(matches!(
         &events[0],
-        SessionEvent::TurnStarted { message, mode: SessionMode::Build, .. }
+        SessionEvent::Turn(TurnEvent::Started { message, mode: SessionMode::Build, .. })
             if message == &Message::user("$commit ship it")
     ));
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
     );
     // First use owns its hidden pin inside the bodyless visible invocation.
     drop(engine);
@@ -404,7 +405,10 @@ async fn skill_overhead_uses_the_authoritative_snapshot_for_compaction() {
         collect_events(&mut receiver)
             .await
             .iter()
-            .filter(|event| matches!(event, SessionEvent::CompactionStarted { .. }))
+            .filter(|event| matches!(
+                event,
+                SessionEvent::Turn(TurnEvent::CompactionStarted { .. })
+            ))
             .count(),
         1
     );
@@ -502,16 +506,16 @@ async fn edited_submission_atomically_compacts_its_retained_prefix_before_the_re
         .position(|event| {
             matches!(
                 event,
-                SessionEvent::CompactionCompleted {
+                SessionEvent::Turn(TurnEvent::CompactionCompleted {
                     trigger: CompactionTrigger::AutomaticPreTurn,
                     ..
-                }
+                })
             )
         })
         .expect("edit compaction completion");
     let revised = events
         .iter()
-        .rposition(|event| matches!(event, SessionEvent::TurnStarted { .. }))
+        .rposition(|event| matches!(event, SessionEvent::Turn(TurnEvent::Started { .. })))
         .expect("edited turn start");
     assert!(compacted < revised);
 }
@@ -615,10 +619,10 @@ async fn edited_skill_atomically_compacts_before_its_compact_turn_started_displa
         .position(|event| {
             matches!(
                 event,
-                SessionEvent::CompactionCompleted {
+                SessionEvent::Turn(TurnEvent::CompactionCompleted {
                     trigger: CompactionTrigger::AutomaticPreTurn,
                     ..
-                }
+                })
             )
         })
         .expect("edit compaction completion");
@@ -627,7 +631,7 @@ async fn edited_skill_atomically_compacts_before_its_compact_turn_started_displa
         .position(|event| {
             matches!(
                 event,
-                SessionEvent::TurnStarted { message, .. }
+                SessionEvent::Turn(TurnEvent::Started { message, .. })
                     if message == &Message::user("$review second revised")
             )
         })
@@ -697,21 +701,21 @@ async fn edited_overflow_reports_a_prepared_but_uninstalled_checkpoint() {
     let events = collect_events(&mut receiver).await;
     assert!(events.iter().any(|event| matches!(
         event,
-        SessionEvent::CompactionStarted {
+        SessionEvent::Turn(TurnEvent::CompactionStarted {
             trigger: CompactionTrigger::AutomaticPreTurn,
             ..
-        }
+        })
     )));
     assert!(events.iter().all(|event| !matches!(
         event,
-        SessionEvent::CompactionCompleted {
+        SessionEvent::Turn(TurnEvent::CompactionCompleted {
             trigger: CompactionTrigger::AutomaticPreTurn,
             ..
-        }
+        })
     )));
     assert!(events.iter().any(|event| matches!(
         event,
-        SessionEvent::TurnRejected { error, .. }
+        SessionEvent::Turn(TurnEvent::Rejected { error, .. })
             if error.contains("prepared for the edited prefix")
                 && error.contains("checkpoint was not installed")
                 && !error.contains("automatic compaction completed")
@@ -811,28 +815,30 @@ async fn manual_local_compaction_installs_checkpoint_and_replaces_next_request_h
     let events = collect_events(&mut receiver).await;
     assert!(events.iter().any(|event| matches!(
         event,
-        SessionEvent::CompactionStarted {
+        SessionEvent::Turn(TurnEvent::CompactionStarted {
             trigger: CompactionTrigger::Manual,
             ..
-        }
+        })
     )));
     let completed = events
         .iter()
         .position(|event| {
             matches!(
                 event,
-                SessionEvent::CompactionCompleted {
+                SessionEvent::Turn(TurnEvent::CompactionCompleted {
                     trigger: CompactionTrigger::Manual,
                     backend: CompactionBackend::LocalSummary,
                     ..
-                }
+                })
             )
         })
         .expect("manual compaction completion");
     let calls = events
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::ModelCallStarted { turn_id, call } => Some((*turn_id, *call)),
+            SessionEvent::Turn(TurnEvent::ModelCallStarted { turn_id, call }) => {
+                Some((*turn_id, *call))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -840,7 +846,7 @@ async fn manual_local_compaction_installs_checkpoint_and_replaces_next_request_h
     assert_eq!(calls, [(TurnId::new(1), 1), (TurnId::new(3), 1)]);
     assert!(matches!(
         events.get(completed.saturating_sub(1)),
-        Some(SessionEvent::ContextUsageUpdated { .. })
+        Some(SessionEvent::Turn(TurnEvent::ContextUsageUpdated { .. }))
     ));
 }
 
@@ -1033,7 +1039,7 @@ async fn manual_compaction_without_a_prompt_makes_no_model_request_or_checkpoint
             .iter()
             .any(|event| matches!(
                 event,
-                SessionEvent::TurnRejected { error, .. }
+                SessionEvent::Turn(TurnEvent::Rejected { error, .. })
                     if error.contains("before its first user prompt")
             ))
     );
@@ -1148,13 +1154,12 @@ async fn failed_local_compaction_installs_nothing_and_keeps_existing_history() {
     let events = collect_events(&mut receiver).await;
     assert!(events.iter().any(|event| matches!(
         event,
-        SessionEvent::TurnFailed { error, .. } if error.contains("summary failed")
+        SessionEvent::Turn(TurnEvent::Failed { error, .. }) if error.contains("summary failed")
     )));
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, SessionEvent::CompactionCompleted { .. }))
-    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        SessionEvent::Turn(TurnEvent::CompactionCompleted { .. })
+    )));
 }
 
 #[test]
@@ -1231,7 +1236,7 @@ async fn irreducible_small_plan_profile_rejects_without_compaction_or_prompt_com
     let events = collect_events(&mut receiver).await;
     assert!(events.iter().any(|event| matches!(
         event,
-        SessionEvent::TurnRejected { error, .. }
+        SessionEvent::Turn(TurnEvent::Rejected { error, .. })
             if error.contains("prepared plan request")
                 && error.contains("plan-small")
                 && error.contains("irreducible")
@@ -1293,7 +1298,7 @@ async fn prospective_overflow_compacts_then_rejects_without_committing_prompt_if
     let events = collect_events(&mut receiver).await;
     assert!(events.iter().any(|event| matches!(
         event,
-        SessionEvent::TurnRejected { error, .. }
+        SessionEvent::Turn(TurnEvent::Rejected { error, .. })
             if error.contains("is estimated at")
                 && error.contains("prompt was not committed")
     )));
@@ -1453,19 +1458,22 @@ async fn exact_count_compacts_once_rechecks_and_dispatches_when_it_fits() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, SessionEvent::CompactionStarted { .. }))
+            .filter(|event| matches!(
+                event,
+                SessionEvent::Turn(TurnEvent::CompactionStarted { .. })
+            ))
             .count(),
         1
     );
     assert!(events.iter().any(|event| matches!(
         event,
-        SessionEvent::ContextUsageUpdated { snapshot, .. }
+        SessionEvent::Turn(TurnEvent::ContextUsageUpdated { snapshot, .. })
             if snapshot.source == ContextTokenSource::Exact
                 && snapshot.projected_input_tokens == Some(400)
     )));
     assert!(matches!(
         events.last(),
-        Some(SessionEvent::TurnCompleted { .. })
+        Some(SessionEvent::Turn(TurnEvent::Completed { .. }))
     ));
 }
 
@@ -1513,13 +1521,16 @@ async fn exact_over_limit_after_one_compaction_rejects_truthfully_without_loopin
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, SessionEvent::CompactionStarted { .. }))
+            .filter(|event| matches!(
+                event,
+                SessionEvent::Turn(TurnEvent::CompactionStarted { .. })
+            ))
             .count(),
         1
     );
     assert!(events.iter().any(|event| matches!(
         event,
-        SessionEvent::TurnRejected { error, .. }
+        SessionEvent::Turn(TurnEvent::Rejected { error, .. })
             if error.contains("requires 1100 input tokens")
                 && error.contains("automatic compaction completed")
     )));
@@ -1580,14 +1591,17 @@ async fn repeated_oversized_prompt_installs_only_one_checkpoint() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, SessionEvent::CompactionStarted { .. }))
+            .filter(|event| matches!(
+                event,
+                SessionEvent::Turn(TurnEvent::CompactionStarted { .. })
+            ))
             .count(),
         1
     );
     let failures = events
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::TurnRejected { error, .. } => Some(error.as_str()),
+            SessionEvent::Turn(TurnEvent::Rejected { error, .. }) => Some(error.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1677,14 +1691,20 @@ async fn plan_handoff_pre_turn_compaction_remeasures_and_enforces_the_hard_limit
         assert_eq!(
             emitted
                 .iter()
-                .filter(|event| matches!(event, SessionEvent::CompactionStarted { .. }))
+                .filter(|event| matches!(
+                    event,
+                    SessionEvent::Turn(TurnEvent::CompactionStarted { .. })
+                ))
                 .count(),
             1
         );
         assert_eq!(
             emitted
                 .iter()
-                .filter(|event| matches!(event, SessionEvent::CompactionCompleted { .. }))
+                .filter(|event| matches!(
+                    event,
+                    SessionEvent::Turn(TurnEvent::CompactionCompleted { .. })
+                ))
                 .count(),
             1
         );
@@ -1692,7 +1712,9 @@ async fn plan_handoff_pre_turn_compaction_remeasures_and_enforces_the_hard_limit
             .iter()
             .rev()
             .find_map(|event| match event {
-                SessionEvent::ContextUsageUpdated { snapshot, .. } => Some(snapshot),
+                SessionEvent::Turn(TurnEvent::ContextUsageUpdated { snapshot, .. }) => {
+                    Some(snapshot)
+                }
                 _ => None,
             })
             .expect("rebuilt measurement");
@@ -1740,7 +1762,7 @@ async fn plan_handoff_pre_turn_compaction_remeasures_and_enforces_the_hard_limit
         if fits {
             assert!(matches!(
                 emitted.last(),
-                Some(SessionEvent::TurnCompleted { .. })
+                Some(SessionEvent::Turn(TurnEvent::Completed { .. }))
             ));
             assert!(requests[1].history.is_empty());
             assert_eq!(
@@ -1749,7 +1771,7 @@ async fn plan_handoff_pre_turn_compaction_remeasures_and_enforces_the_hard_limit
             );
         } else {
             assert!(
-                matches!(emitted.last(), Some(SessionEvent::TurnFailed { error, .. })
+                matches!(emitted.last(), Some(SessionEvent::Turn(TurnEvent::Failed { error, .. }))
                     if error.contains("automatic compaction completed")
                         && error.contains("1000-token input limit")
                         && !error.contains("unavailable")
@@ -1861,9 +1883,9 @@ async fn resumed_plan_handoff_history_compacts_manually_or_before_a_new_prompt()
         assert!(
             emitted
                 .iter()
-                .all(|event| !matches!(event, SessionEvent::TurnFailed { .. }))
+                .all(|event| !matches!(event, SessionEvent::Turn(TurnEvent::Failed { .. })))
         );
-        assert!(emitted.iter().any(|event| matches!(event, SessionEvent::CompactionCompleted { trigger: actual, .. } if *actual == trigger)));
+        assert!(emitted.iter().any(|event| matches!(event, SessionEvent::Turn(TurnEvent::CompactionCompleted { trigger: actual, .. }) if *actual == trigger)));
         let requests = requests.lock().expect("requests");
         assert_eq!(
             requests[0].history,
@@ -1880,7 +1902,7 @@ async fn resumed_plan_handoff_history_compacts_manually_or_before_a_new_prompt()
             assert_eq!(engine.conversation().prompt_position(0), None);
             assert!(matches!(
                 emitted.last(),
-                Some(SessionEvent::CompactionCompleted { .. })
+                Some(SessionEvent::Turn(TurnEvent::CompactionCompleted { .. }))
             ));
         } else {
             assert_eq!(requests.len(), 2);
@@ -1898,7 +1920,7 @@ async fn resumed_plan_handoff_history_compacts_manually_or_before_a_new_prompt()
             assert_eq!(requests[1].prompt, Message::user("continue"));
             assert!(matches!(
                 emitted.last(),
-                Some(SessionEvent::TurnCompleted { .. })
+                Some(SessionEvent::Turn(TurnEvent::Completed { .. }))
             ));
         }
     }
@@ -2005,14 +2027,14 @@ async fn plan_handoff_mid_turn_compaction_obeys_usage_threshold_and_complete_too
         let emitted = collect_events(&mut receiver).await;
         assert!(emitted.iter().any(|event| matches!(
             event,
-            SessionEvent::ContextUsageUpdated { snapshot, .. }
+            SessionEvent::Turn(TurnEvent::ContextUsageUpdated { snapshot, .. })
                 if snapshot.source == ContextTokenSource::UsagePlusDelta
                     && snapshot.projected_input_tokens == Some(projected_tokens)
                     && snapshot.automatic_trigger == 1_000
         )));
         assert!(matches!(
             emitted.last(),
-            Some(SessionEvent::TurnCompleted { .. })
+            Some(SessionEvent::Turn(TurnEvent::Completed { .. }))
         ));
         let requests = requests.lock().expect("requests");
         assert_eq!(requests[0].prompt, handoff.prompt);
@@ -2068,17 +2090,19 @@ async fn plan_handoff_mid_turn_compaction_obeys_usage_threshold_and_complete_too
             );
             let tool_event = emitted
                 .iter()
-                .position(|event| matches!(event, SessionEvent::ToolResults { .. }))
+                .position(|event| {
+                    matches!(event, SessionEvent::Turn(TurnEvent::ToolResults { .. }))
+                })
                 .expect("tool event");
             let compact_event = emitted
                 .iter()
                 .position(|event| {
                     matches!(
                         event,
-                        SessionEvent::CompactionStarted {
+                        SessionEvent::Turn(TurnEvent::CompactionStarted {
                             trigger: CompactionTrigger::AutomaticMidTurn,
                             ..
-                        }
+                        })
                     )
                 })
                 .expect("compaction event");
@@ -2086,13 +2110,16 @@ async fn plan_handoff_mid_turn_compaction_obeys_usage_threshold_and_complete_too
             assert_eq!(
                 emitted
                     .iter()
-                    .filter(|event| matches!(event, SessionEvent::CompactionStarted { .. }))
+                    .filter(|event| matches!(
+                        event,
+                        SessionEvent::Turn(TurnEvent::CompactionStarted { .. })
+                    ))
                     .count(),
                 1
             );
             assert!(emitted[compact_event..].iter().any(|event| matches!(
                 event,
-                SessionEvent::ContextUsageUpdated { snapshot, .. }
+                SessionEvent::Turn(TurnEvent::ContextUsageUpdated { snapshot, .. })
                     if snapshot.source == ContextTokenSource::LocalEstimate
                         && snapshot.projected_input_tokens.is_some_and(|tokens| tokens < snapshot.automatic_trigger)
             )));
@@ -2105,11 +2132,10 @@ async fn plan_handoff_mid_turn_compaction_obeys_usage_threshold_and_complete_too
                 0,
                 "the initial handoff stays below the exact-count threshold"
             );
-            assert!(
-                emitted
-                    .iter()
-                    .all(|event| !matches!(event, SessionEvent::CompactionStarted { .. }))
-            );
+            assert!(emitted.iter().all(|event| !matches!(
+                event,
+                SessionEvent::Turn(TurnEvent::CompactionStarted { .. })
+            )));
         }
     }
 }
@@ -2173,17 +2199,17 @@ async fn mid_turn_compaction_waits_for_the_complete_tool_result_batch() {
     let events = collect_events(&mut receiver).await;
     let tool_event = events
         .iter()
-        .position(|event| matches!(event, SessionEvent::ToolResults { .. }))
+        .position(|event| matches!(event, SessionEvent::Turn(TurnEvent::ToolResults { .. })))
         .expect("tool event");
     let compact_event = events
         .iter()
         .position(|event| {
             matches!(
                 event,
-                SessionEvent::CompactionStarted {
+                SessionEvent::Turn(TurnEvent::CompactionStarted {
                     trigger: CompactionTrigger::AutomaticMidTurn,
                     ..
-                }
+                })
             )
         })
         .expect("compaction event");
@@ -2192,7 +2218,7 @@ async fn mid_turn_compaction_waits_for_the_complete_tool_result_batch() {
         .iter()
         .enumerate()
         .filter_map(|(index, event)| match event {
-            SessionEvent::ModelCallStarted { call, .. } => Some((index, *call)),
+            SessionEvent::Turn(TurnEvent::ModelCallStarted { call, .. }) => Some((index, *call)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -2205,11 +2231,14 @@ async fn mid_turn_compaction_waits_for_the_complete_tool_result_batch() {
     assert!(
         events[compact_event..calls[1].0]
             .iter()
-            .any(|event| matches!(event, SessionEvent::CompactionCompleted { .. }))
+            .any(|event| matches!(
+                event,
+                SessionEvent::Turn(TurnEvent::CompactionCompleted { .. })
+            ))
     );
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
     );
 }

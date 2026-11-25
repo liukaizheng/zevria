@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{PlanEvent, TurnEvent};
 
 #[path = "plan_draft_lifecycle.rs"]
 mod lifecycle;
@@ -85,20 +86,20 @@ async fn drafts_survive_turns_restart_and_submit_only_at_finalization() {
     let lifecycle = collect_events(&mut receiver).await;
     let results = lifecycle
         .iter()
-        .position(|event| matches!(event, SessionEvent::ToolResults { .. }))
+        .position(|event| matches!(event, SessionEvent::Turn(TurnEvent::ToolResults { .. })))
         .unwrap();
     assert!(matches!(
-        lifecycle[results + 1],
-        SessionEvent::PlanStateChanged {
-            state: PlanWorkflowState::Planning { draft: Some(_), .. }
-        }
-    ));
+        &lifecycle[results + 1],
+        SessionEvent::Plan(PlanEvent::StateChanged {
+            state
+        })
+     if matches!(state.as_ref(), PlanWorkflowState::Planning { draft: Some(_), .. })));
     assert!(!lifecycle.iter().any(|event| matches!(
         event,
-        SessionEvent::PlanStateChanged {
-            state: PlanWorkflowState::Ready { .. }
-        }
-    )));
+        SessionEvent::Plan(PlanEvent::StateChanged {
+            state
+        })
+     if matches!(state.as_ref(), PlanWorkflowState::Ready { .. }))));
     drop(engine);
     let provider = ScriptedProvider::new([
         Ok(batch(vec![
@@ -177,7 +178,7 @@ async fn serialized_draft_batches_are_atomic_and_lock_after_submission() {
         let results = lifecycle
             .iter()
             .filter_map(|event| match event {
-                SessionEvent::ToolResults { metadata, .. } => Some(metadata),
+                SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) => Some(metadata),
                 _ => None,
             })
             .last()

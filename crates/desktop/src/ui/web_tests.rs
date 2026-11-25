@@ -12,6 +12,8 @@ use zevria_content::{
 };
 use zevria_foundation::ModelProfileRef;
 use zevria_presentation::status_icon::StatusIcon;
+use zevria_session_api::SessionStreamState;
+use zevria_session_api::TurnEvent;
 use zevria_transcript::{IncompleteResponse, transcript::TranscriptItem};
 
 const TURN: TurnId = TurnId::new(90);
@@ -19,19 +21,19 @@ const TURN: TurnId = TurnId::new(90);
 fn start(controller: &Entity<SessionController>, cx: &mut TestAppContext) -> ResponseAttempt {
     event(
         controller,
-        E::TurnStarted {
+        E::Turn(TurnEvent::Started {
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("Trace the source."),
-        },
+        }),
         cx,
     );
     event(
         controller,
-        E::ModelCallStarted {
+        E::Turn(TurnEvent::ModelCallStarted {
             turn_id: TURN,
             call: 1,
-        },
+        }),
         cx,
     );
     ResponseAttempt::new(ModelProfileRef::new("fixture", "fixture"))
@@ -84,13 +86,13 @@ fn stream(
         )]);
     event(
         controller,
-        E::AssistantStreamUpdated {
-            turn_id: TURN,
-            snapshot: AssistantStreamSnapshot {
+        SessionStreamState::new(
+            TURN,
+            AssistantStreamSnapshot {
                 message: Some(message),
                 attempt: Some(attempt.clone()),
             },
-        },
+        ),
         cx,
     );
 }
@@ -335,7 +337,7 @@ fn attempt_thought_rekeys_by_anchor_without_overwriting_an_existing_group(cx: &m
 
 #[gpui_kit::test]
 fn closed_web_attempt_keeps_explicit_interrupted_and_unconfirmed_states(cx: &mut TestAppContext) {
-    let (window, view, controller, _) = setup(cx);
+    let (window, view, controller, _receiver) = setup(cx);
     let mut attempt = start(&controller, cx);
     attempt.hosted_activity = vec![
         web(
@@ -353,13 +355,17 @@ fn closed_web_attempt_keeps_explicit_interrupted_and_unconfirmed_states(cx: &mut
     attempt.close(ResponseAttemptOutcome::Interrupted);
     event(
         &controller,
-        E::ResponseAttemptUpdated {
+        E::Turn(TurnEvent::ResponseAttemptUpdated {
             turn_id: TURN,
-            attempt,
-        },
+            attempt: Box::new(attempt),
+        }),
         cx,
     );
-    event(&controller, E::TurnCancelled { turn_id: TURN }, cx);
+    event(
+        &controller,
+        E::Turn(TurnEvent::Cancelled { turn_id: TURN }),
+        cx,
+    );
     frame(window, cx);
     let closed = web_rows(&view, cx).remove(0);
     assert_eq!(web_step(&closed).status(), StatusIcon::Interrupted);

@@ -26,19 +26,17 @@ fn shared_history(
 ) -> project::ValidatedHistory {
     let (assessment, Some(history)) = project::prepare_history(
         &request.input,
-        options.target,
-        options.compatibility,
         request.input_identity,
+        project::HistoryOptions::new(options.target, options.compatibility),
     )
     .unwrap() else {
         panic!("compatible history")
     };
     assert_eq!(
         assessment,
-        project::preflight_with_compatibility(
+        project::assess_history(
             &request.input,
-            options.target,
-            options.compatibility
+            project::HistoryOptions::new(options.target, options.compatibility),
         )
         .unwrap()
     );
@@ -161,7 +159,11 @@ fn inline_additions_merge_with_directives_in_order_and_fold_only_when_ineffectiv
         .unwrap();
         assert_eq!(fallback.body["tools"], body["tools"]);
         assert_eq!(fallback.body["tool_choice"], json!({"type":"none"}));
-        project::preflight_with_compatibility(&request.input, &target, &compatibility).unwrap();
+        project::assess_history(
+            &request.input,
+            project::HistoryOptions::new(&target, &compatibility),
+        )
+        .unwrap();
     }
 }
 

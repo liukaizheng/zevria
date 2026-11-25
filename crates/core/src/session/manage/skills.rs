@@ -5,6 +5,7 @@ use crate::session::kernel::request_plan::RequestPlan;
 use std::sync::Arc;
 use zevria_foundation::policy::SessionMode;
 use zevria_instructions::skill::{ActiveSkills, SkillApplication, SkillName};
+use zevria_session_api::ManagementEvent;
 use zevria_session_api::event::{SessionEvent, SessionEventSender};
 use zevria_session_api::provider::ModelProvider;
 use zevria_transcript::SessionReplayError;
@@ -170,7 +171,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                             .collect::<Vec<_>>();
                         if let Err(error) = self.commit(revocations) {
                             self.persistence_failed(&error, events).await?;
-                            let _ = events.send(SessionEvent::SkillsResult { request_id, result: Result::error("persistence_failed", format!("management changed but revocation persistence failed; generation requires reconciliation: {error:#}")) }).await;
+                            let _ = events.send(SessionEvent::Manage(ManagementEvent::SkillsResult { request_id, result: Box::new(Result::error("persistence_failed", format!("management changed but revocation persistence failed; generation requires reconciliation: {error:#}"))) })).await;
                             return Ok(());
                         }
                     }
@@ -178,10 +179,10 @@ impl<P: ModelProvider> SessionEngine<P> {
                     let revision = self.skills.catalog.revision().to_string();
                     if !unchanged {
                         let _ = events
-                            .send(SessionEvent::SkillsChanged {
+                            .send(SessionEvent::Manage(ManagementEvent::SkillsChanged {
                                 revision: revision.clone(),
                                 counts: counts.clone(),
-                            })
+                            }))
                             .await;
                     }
                     Result::Changed {
@@ -198,7 +199,10 @@ impl<P: ModelProvider> SessionEngine<P> {
             )
         };
         let _ = events
-            .send(SessionEvent::SkillsResult { request_id, result })
+            .send(SessionEvent::Manage(ManagementEvent::SkillsResult {
+                request_id,
+                result: Box::new(result),
+            }))
             .await;
         Ok(())
     }
@@ -216,7 +220,9 @@ impl<P: ModelProvider> SessionEngine<P> {
         }
     }
 
-    pub(in crate::session) fn management_skill_context(
+    /// Snapshot for skill queries and frontend restoration, including the
+    /// effective activation permission for the currently selected mode.
+    pub fn management_skill_context(
         &self,
     ) -> Result<zevria_instructions::skill::SkillContext, SessionReplayError> {
         let policy = self.policies.policy(self.selected_mode());

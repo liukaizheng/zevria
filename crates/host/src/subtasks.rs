@@ -10,41 +10,46 @@
 //! engine itself fails. An aborted supervisor drops the pending oneshots,
 //! which the awaiting `launch_subtasks` calls observe as failures.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 
 use rig_agent::tool::server::ToolServerHandle;
-
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc::Receiver};
-use tokio::task::JoinSet;
+use tokio::{
+    sync::{Semaphore, mpsc::Receiver},
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
-use zevria_content::assistant_plain_text;
-use zevria_core::SessionEngine;
-use zevria_foundation::SessionMode;
-use zevria_foundation::SessionPolicies;
-use zevria_foundation::subtask::SubtaskDescriptor;
-use zevria_foundation::subtask::SubtaskId;
-use zevria_foundation::subtask::SubtaskKind;
-use zevria_foundation::subtask::SubtaskOutcome;
-use zevria_foundation::subtask::SubtaskStatus;
-use zevria_foundation::{TurnPolicy, WorkspaceBinding, WorkspaceContract};
 use zevria_instructions::SkillCatalog;
-use zevria_instructions::prompts::BUILD_SUBTASK_INSTRUCTIONS;
-use zevria_instructions::prompts::EXPLORE_AGENT_INSTRUCTIONS;
 use zevria_model::config::CompactionPolicy;
 use zevria_provider::ProviderRouterFactory;
-use zevria_session_api::SessionEvent;
-use zevria_session_api::SessionEventSender;
-use zevria_session_api::SessionUpdate;
-use zevria_session_api::session_event_channel;
-use zevria_session_api::subtask::ChildWorkspace;
-use zevria_session_api::subtask::SubtaskLaunchRequest;
-use zevria_transcript::transcript::TranscriptWriter;
+use zevria_session_api::{SessionEventSender, subtask::SubtaskLaunchRequest};
+
+mod child;
+use child::{finish_cancelled, run_child};
 
 #[cfg(test)]
-use zevria_foundation::ModelRole;
+use child::{
+    ChildSession, build_policies, child_outcome, child_session_result, explore_policies,
+    run_child_session,
+};
+#[cfg(test)]
+use std::path::Path;
+#[cfg(test)]
+use zevria_content::assistant_plain_text;
+#[cfg(test)]
+use zevria_core::SessionEngine;
+#[cfg(test)]
+use zevria_foundation::{
+    ModelRole, SessionMode,
+    subtask::{SubtaskDescriptor, SubtaskId, SubtaskKind, SubtaskOutcome, SubtaskStatus},
+};
+#[cfg(test)]
+use zevria_instructions::prompts::EXPLORE_AGENT_INSTRUCTIONS;
+#[cfg(test)]
+use zevria_session_api::{
+    SessionEvent, SessionUpdate, SubtaskEvent, session_event_channel, subtask::ChildWorkspace,
+};
+#[cfg(test)]
+use zevria_transcript::transcript::TranscriptWriter;
 
 /// Shared, immutable configuration across all children of one root.
 pub(crate) struct SubtaskSupervisorConfig {
@@ -64,47 +69,6 @@ pub(crate) struct SubtaskSupervisorConfig {
     pub max_concurrent_subtasks: usize,
     /// The parent's opening/resume snapshot, even for late or queued children.
     pub guidance: zevria_instructions::GuidanceSnapshot,
-}
-
-/// The composed Explore inspection/scratch overlay with a command-only local
-/// allow-list, identical in every nominal mode so switching cannot add tools.
-fn explore_policies() -> SessionPolicies {
-    let policy = TurnPolicy::new(
-        EXPLORE_AGENT_INSTRUCTIONS,
-        Some(vec![
-            "command".to_string(),
-            zevria_foundation::WEB_SEARCH_TOOL_NAME.into(),
-        ]),
-        SubtaskKind::Explore.model_role(),
-        false,
-    )
-    .with_contract(WorkspaceContract::SourceReadOnlyScratch);
-    SessionPolicies::new(policy.clone(), policy)
-}
-
-fn build_policies(child_workspace: &Path, startup_workspace: &Path) -> SessionPolicies {
-    let policy = TurnPolicy::new(
-        BUILD_SUBTASK_INSTRUCTIONS,
-        Some(
-            [
-                "command",
-                "task",
-                "edit",
-                "write",
-                "delete",
-                zevria_foundation::WEB_SEARCH_TOOL_NAME,
-            ]
-            .map(str::to_string)
-            .to_vec(),
-        ),
-        SubtaskKind::Build.model_role(),
-        false,
-    )
-    .with_workspace(WorkspaceBinding {
-        root: child_workspace.to_string_lossy().into_owned(),
-        startup: startup_workspace.to_string_lossy().into_owned(),
-    });
-    SessionPolicies::new(policy.clone(), policy)
 }
 
 /// Own the workers in the actual supervisor task. Shutdown stops admission,
@@ -176,261 +140,6 @@ fn spawn_supervisor(
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(run_supervisor(requests, Arc::new(config), shutdown))
-}
-
-/// Run one child to its terminal state and always resolve the launch oneshot.
-async fn run_child(
-    mut request: SubtaskLaunchRequest,
-    config: Arc<SubtaskSupervisorConfig>,
-    permit: OwnedSemaphorePermit,
-    cancellation: &CancellationToken,
-    stop_delivery: &CancellationToken,
-) {
-    let id = request.descriptor.id.clone();
-    let kind = request.descriptor.kind;
-    tracing::info!(target: "zevria::subtasks", subtask = %id, title = %request.descriptor.title, %kind, "starting subtask");
-
-    // The JoinSet worker owns the outcome sender, but a separate cleanup task
-    // owns execution, its permit and its workspace. Aborting the supervisor
-    // still fails the unresolved oneshot immediately. It cancels, rather than
-    // aborts, execution so command process cleanup is awaited before reuse.
-    // Rig's pinned ToolServerHandle directly awaits tool futures; none of the
-    // five registered tools spawns detached mutations beyond command cleanup.
-    let child = ChildSession {
-        descriptor: request.descriptor.clone(),
-        prompt: std::mem::take(&mut request.prompt),
-        // This preparation context has no delegation capability. The execution
-        // context below is bound to the child's composed policy, never the parent's.
-        turn: zevria_session_api::TurnContext::new(
-            request.turn.id,
-            SessionMode::Build,
-            cancellation.clone(),
-        ),
-        workspace: request.workspace.take(),
-    };
-    let execution_config = config.clone();
-    let stop_forwarding = stop_delivery.clone();
-    let execution = tokio::spawn(async move {
-        let _permit = permit;
-        run_child_session(child, &execution_config, stop_forwarding).await
-    });
-    let result = match execution.await {
-        Ok(result) => result,
-        Err(error) => Err(anyhow::anyhow!("child execution failed: {error}")),
-    };
-    let outcome = child_outcome(result, cancellation.is_cancelled());
-    if let SubtaskOutcome::Failed { error } = &outcome {
-        tracing::warn!(target: "zevria::subtasks", subtask = %id, %kind, "subtask failed: {error}");
-    }
-    let status = match &outcome {
-        SubtaskOutcome::Completed { .. } => SubtaskStatus::Completed,
-        SubtaskOutcome::Failed { .. } => SubtaskStatus::Failed,
-        SubtaskOutcome::Cancelled => SubtaskStatus::Cancelled,
-    };
-    // The awaiting tool call may have been dropped with its turn; the status
-    // event still keeps the frontend row truthful.
-    let _ = request.outcome.send(outcome);
-    send_status(&config.events, request.turn.id, id, status, stop_delivery).await;
-}
-
-fn child_outcome(result: anyhow::Result<String>, cancelled: bool) -> SubtaskOutcome {
-    match result {
-        Ok(report) => SubtaskOutcome::Completed { report },
-        Err(error) if cancelled && !error.is::<zevria_transcript::SessionReplayError>() => {
-            SubtaskOutcome::Cancelled
-        }
-        Err(error) => SubtaskOutcome::Failed {
-            error: format!("{error:#}"),
-        },
-    }
-}
-
-async fn finish_cancelled(
-    mut request: SubtaskLaunchRequest,
-    config: &SubtaskSupervisorConfig,
-    stop_delivery: &CancellationToken,
-) {
-    let id = request.descriptor.id.clone();
-    drop(request.workspace.take());
-    let _ = request.outcome.send(SubtaskOutcome::Cancelled);
-    send_status(
-        &config.events,
-        request.turn.id,
-        id,
-        SubtaskStatus::Cancelled,
-        stop_delivery,
-    )
-    .await;
-}
-
-struct ChildSession {
-    descriptor: SubtaskDescriptor,
-    prompt: String,
-    turn: zevria_session_api::TurnContext,
-    workspace: Option<ChildWorkspace>,
-}
-
-async fn run_child_session(
-    request: ChildSession,
-    config: &SubtaskSupervisorConfig,
-    stop_delivery: CancellationToken,
-) -> anyhow::Result<String> {
-    let id = request.descriptor.id.clone();
-    let directory = config.subsessions_dir.clone();
-    let child_id = id.clone();
-    let transcript = tokio::task::spawn_blocking(move || {
-        TranscriptWriter::allocate_with_id(&directory, child_id.as_str())
-    })
-    .await??;
-    if request.turn.is_cancelled() {
-        anyhow::bail!("subtask cancelled before its model turn started");
-    }
-    let (tools, factory, policies) = match request.descriptor.kind {
-        SubtaskKind::Explore => {
-            anyhow::ensure!(
-                request.workspace.is_none(),
-                "explore child cannot own a workspace"
-            );
-            (
-                config.explore_tools.clone(),
-                &config.explore_factory,
-                explore_policies(),
-            )
-        }
-        SubtaskKind::Build => {
-            let workspace = request
-                .workspace
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("build child requires a reserved workspace"))?;
-            (
-                crate::runtime::build_isolated_build_tools(&workspace.path, config.command_config)?,
-                &config.builder_factory,
-                build_policies(&workspace.path, &config.startup_workspace),
-            )
-        }
-    };
-    let provider = factory.create(id.as_str())?;
-    send_status(
-        &config.events,
-        request.turn.id,
-        id.clone(),
-        SubtaskStatus::Running,
-        &stop_delivery,
-    )
-    .await;
-
-    let mut engine = SessionEngine::builder(
-        provider,
-        tools,
-        policies,
-        transcript,
-        config.empty_skills.clone(),
-    )?
-    .with_incremental_tools(config.incremental_tools)
-    .with_guidance_snapshot(config.guidance.clone())
-    .with_compaction_policy(config.compaction.clone())
-    .build()?;
-
-    // Forward live child events while the submission runs; the forwarder also
-    // extracts the terminal result so the report comes from the same stream
-    // the frontend saw.
-    let (child_events, mut child_updates) = session_event_channel(64);
-    let forwarder = {
-        let parent_events = config.events.clone();
-        let id = id.clone();
-        tokio::spawn(async move {
-            let mut outcome: Option<Result<String, String>> = None;
-            while let Some(update) = child_updates.recv().await {
-                match update {
-                    SessionUpdate::Lifecycle(event) => {
-                        match &event {
-                            SessionEvent::TurnCompleted { message, .. } => {
-                                outcome = Some(Ok(assistant_plain_text(message)));
-                            }
-                            SessionEvent::TurnFailed { error, .. }
-                            | SessionEvent::TurnRejected { error, .. } => {
-                                outcome = Some(Err(error.clone()));
-                            }
-                            SessionEvent::TurnCancelled { .. } => {
-                                outcome = Some(Err("subtask cancelled".to_string()));
-                            }
-                            _ => {}
-                        }
-                        // Preserve normal forwarding/backpressure, but do
-                        // not strand execution cleanup on a stopped runtime.
-                        tokio::select! {
-                            biased;
-                            () = stop_delivery.cancelled() => {},
-                            _ = parent_events.send(SessionEvent::SubtaskSession {
-                                id: id.clone(), event: Box::new(event),
-                            }) => {}
-                        }
-                    }
-                    SessionUpdate::Streams(batch) => {
-                        if let Some(stream) = batch.root
-                            && !stop_delivery.is_cancelled()
-                        {
-                            parent_events.set_subtask_stream(id.clone(), stream);
-                        }
-                    }
-                }
-            }
-            outcome
-        })
-    };
-
-    let child_turn = zevria_session_api::TurnContext::new(
-        request.turn.id,
-        SessionMode::Build,
-        request.turn.cancellation().clone(),
-    );
-    let execution = engine
-        .handle_turn(
-            zevria_session_api::TurnCommand::Submit {
-                text: zevria_content::UserPrompt::from_text(request.prompt),
-                mode: SessionMode::Build,
-                behavior: zevria_foundation::RequestBehavior::Standard,
-            },
-            &child_turn,
-            &child_events,
-        )
-        .await;
-    drop(child_events);
-
-    let forwarded = forwarder.await;
-    child_session_result(execution, forwarded, request.descriptor.kind)
-}
-
-fn child_session_result(
-    execution: Result<(), zevria_transcript::SessionReplayError>,
-    forwarded: Result<Option<Result<String, String>>, tokio::task::JoinError>,
-    kind: SubtaskKind,
-) -> anyhow::Result<String> {
-    // A fatal replay result is authoritative even if cancellation raced it or
-    // the child correctly emitted no recoverable terminal lifecycle event.
-    execution?;
-    match forwarded {
-        Ok(Some(Ok(report))) => Ok(report),
-        Ok(Some(Err(error))) => anyhow::bail!("{error}"),
-        Ok(None) => anyhow::bail!("the {kind} agent finished without a final response"),
-        Err(join_error) => anyhow::bail!("child event forwarding failed: {join_error}"),
-    }
-}
-
-async fn send_status(
-    events: &SessionEventSender,
-    turn_id: zevria_foundation::TurnId,
-    id: SubtaskId,
-    status: SubtaskStatus,
-    stop_delivery: &CancellationToken,
-) {
-    tokio::select! {
-        biased;
-        // Send when immediately possible, even at shutdown, without letting
-        // a full frontend queue prevent the supervisor from draining.
-        _ = events.send(SessionEvent::SubtaskStatus { turn_id, id, status }) => {},
-        () = stop_delivery.cancelled() => {},
-    }
 }
 
 #[cfg(test)]
@@ -730,10 +439,10 @@ mod tests {
         while let Ok(event) = events_rx.try_recv() {
             if matches!(
                 event,
-                SessionUpdate::Lifecycle(SessionEvent::SubtaskStatus {
+                SessionUpdate::Lifecycle(SessionEvent::Subtask(SubtaskEvent::Status {
                     status: SubtaskStatus::Failed,
                     ..
-                })
+                }))
             ) {
                 saw_failed_status = true;
             }
@@ -905,11 +614,11 @@ mod tests {
                 let event = events_rx.recv().await.expect("event channel remains open");
                 if matches!(
                     event,
-                    SessionUpdate::Lifecycle(SessionEvent::SubtaskStatus {
+                    SessionUpdate::Lifecycle(SessionEvent::Subtask(SubtaskEvent::Status {
                         turn_id,
                         status: SubtaskStatus::Cancelled,
                         ..
-                    }) if turn_id == TurnId::new(7)
+                    })) if turn_id == TurnId::new(7)
                 ) {
                     break;
                 }
@@ -956,9 +665,9 @@ mod tests {
         // Make room for Running, then stop reading so forwarding is backpressured.
         assert!(matches!(
             events_rx.recv().await,
-            Some(SessionUpdate::Lifecycle(
-                SessionEvent::SubtaskLaunched { .. }
-            ))
+            Some(SessionUpdate::Lifecycle(SessionEvent::Subtask(
+                SubtaskEvent::Launched { .. }
+            )))
         ));
         let (_parked, _) =
             tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())

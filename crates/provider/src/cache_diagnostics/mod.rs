@@ -9,7 +9,7 @@ mod tests;
 
 use crate::{
     connection::{OpenAiProvider, OpenAiTransport},
-    turn::PreparedRequest,
+    responses::PreparedRequest,
 };
 use fingerprint::{Comparison, Fingerprint, ItemFingerprint, Properties, compare, ordered};
 pub use persistence::CacheDiagnosticContext;
@@ -98,7 +98,7 @@ impl Route {
             header_name: name.map(|s| identifier(s).to_owned()),
             header_identity: name.map(|s| fingerprint::bytes(s.as_bytes())),
             header_value: name
-                .and_then(|n| openai.ws.config.headers.get(n))
+                .and_then(|n| openai.responses_transport.ws.config.headers.get(n))
                 .map(|v| fingerprint::bytes(v.as_bytes())),
         }
     }
@@ -331,7 +331,7 @@ pub(crate) fn dispatch(
         missing_baseline_reason = state.baseline.is_none().then_some(state.missing_reason),
         comparison_unavailable = (!within_limit).then_some("snapshot_item_limit"),
         provider = identifier(&openai.profile.provider), model = identifier(&openai.profile.model),
-        transport = openai.transport.as_str(), socket_generation = openai.ws.socket_generation,
+        transport = openai.responses_transport.kind().as_str(), socket_generation = openai.responses_transport.ws.socket_generation,
         instructions_hash = %properties.instructions, tools_hash = %properties.tools, remaining_properties_hash = %properties.remaining,
         full_input_hash = ?snapshot.full_input_hash.map(|h| h.to_string()), input_count = snapshot.input_count,
         prefix_status = comparison.status, baseline_count = ?comparison.baseline_count,
@@ -364,7 +364,7 @@ pub(crate) fn transport_restored(openai: &mut OpenAiProvider) {
 }
 
 pub(crate) fn no_continuation_reason(openai: &OpenAiProvider) -> FullReason {
-    if openai.ws.socket_generation > 0 {
+    if openai.responses_transport.ws.socket_generation > 0 {
         FullReason::Reconnect
     } else if openai.cache_diagnostics.recent.is_empty()
         && openai.cache_diagnostics.source != "memory"
@@ -390,7 +390,7 @@ pub(crate) fn transmission(
     let Some(snapshot) = &prepared.cache_diagnostics else {
         return;
     };
-    let http = openai.transport == OpenAiTransport::Http;
+    let http = openai.responses_transport.kind() == OpenAiTransport::Http;
     let parsed = payload
         .filter(|p| p.len() <= 16 * 1024 * 1024)
         .and_then(|p| serde_json::from_slice::<serde_json::Value>(p).ok());
@@ -451,8 +451,8 @@ pub(crate) fn transmission(
     });
     tracing::info!(diagnostic_event = "transmission", runtime_id = %state.runtime, local_request_id = snapshot.id,
         provider = identifier(&openai.profile.provider), model = identifier(&openai.profile.model),
-        transport = openai.transport.as_str(), socket_generation = openai.ws.socket_generation, transmission_number = state.sends,
-        websocket_connection_request_id = ?openai.ws.websocket_connection_request_id.as_deref().map(identifier),
+        transport = openai.responses_transport.kind().as_str(), socket_generation = openai.responses_transport.ws.socket_generation, transmission_number = state.sends,
+        websocket_connection_request_id = ?openai.responses_transport.ws.websocket_connection_request_id.as_deref().map(identifier),
         request_mode = mode, full_replay_reason = reason.map(FullReason::as_str), transmitted_item_count = count,
         previous_response_id = ?previous.map(identifier), prefix_status = snapshot.comparison.status,
         wire_bytes = ?payload.map(<[u8]>::len), wire_hash = ?payload.map(|p| fingerprint::bytes(p).to_string()),
@@ -464,8 +464,8 @@ pub(crate) fn transmission(
 pub(crate) fn connection(openai: &OpenAiProvider, event: &'static str) {
     let route = Route::new(openai);
     // Paths too may contain secrets. Reveal only scheme/host/port, hash the full URL.
-    let endpoint = if openai.transport == OpenAiTransport::WebSocket {
-        reqwest::Url::parse(&openai.ws.config.url)
+    let endpoint = if openai.responses_transport.kind() == OpenAiTransport::WebSocket {
+        reqwest::Url::parse(&openai.responses_transport.ws.config.url)
             .map(|u| u.origin().ascii_serialization())
             .unwrap_or_else(|_| "<invalid URL>".into())
     } else {
@@ -477,8 +477,8 @@ pub(crate) fn connection(openai: &OpenAiProvider, event: &'static str) {
         endpoint = identifier(&endpoint), endpoint_fingerprint = %route.endpoint,
         session_routing_header_configured = route.header_name.is_some(), session_routing_header = ?route.header_name,
         session_routing_value_fingerprint = ?route.header_value.map(|h| h.to_string()),
-        transport = openai.transport.as_str(), socket_generation = openai.ws.socket_generation,
-        websocket_connection_request_id = ?openai.ws.websocket_connection_request_id.as_deref().map(identifier), "cache diagnostics");
+        transport = openai.responses_transport.kind().as_str(), socket_generation = openai.responses_transport.ws.socket_generation,
+        websocket_connection_request_id = ?openai.responses_transport.ws.websocket_connection_request_id.as_deref().map(identifier), "cache diagnostics");
 }
 
 // Invoked before *existing* suppression. It neither consumes events nor changes
@@ -517,25 +517,25 @@ pub(crate) fn observe_value(
         raw.response_identity.is_some()
             && old.raw.response_identity == raw.response_identity
             && (Some(old.request_id) == state.current_request
-                || (openai.transport == OpenAiTransport::WebSocket
-                    && old.socket_generation == openai.ws.socket_generation))
+                || (openai.responses_transport.kind() == OpenAiTransport::WebSocket
+                    && old.socket_generation == openai.responses_transport.ws.socket_generation))
     });
     let owner = seen
         .map(|s| s.request_id)
         .or_else(|| (!prior_terminal).then_some(state.current_request).flatten());
     let generation = seen
         .map(|s| s.socket_generation)
-        .unwrap_or(openai.ws.socket_generation);
+        .unwrap_or(openai.responses_transport.ws.socket_generation);
     let duplicate = prior_terminal || seen.is_some();
     tracing::info!(diagnostic_event = "raw_terminal", runtime_id = %state.runtime, local_request_id = ?owner,
         provider = identifier(&openai.profile.provider), model = identifier(&openai.profile.model),
-        socket_generation = generation, observed_socket_generation = openai.ws.socket_generation,
-        transport = openai.transport.as_str(), event_type = ?raw.event, response_id = ?raw.response_id, returned_model = ?raw.model,
+        socket_generation = generation, observed_socket_generation = openai.responses_transport.ws.socket_generation,
+        transport = openai.responses_transport.kind().as_str(), event_type = ?raw.event, response_id = ?raw.response_id, returned_model = ?raw.model,
         response_status = ?raw.status, service_tier = ?raw.service_tier,
         raw_input = ?raw.input, raw_cached = ?raw.cached, raw_cache_write = ?raw.cache_write, raw_output = ?raw.output, raw_total = ?raw.total,
         echoed_instructions = ?raw.instructions, echoed_tools = ?raw.tools, echoed_cache_key = ?raw.cache_key,
         upstream_request_id = ?upstream.map(identifier),
-        websocket_connection_request_id = ?openai.ws.websocket_connection_request_id.as_deref().map(identifier),
+        websocket_connection_request_id = ?openai.responses_transport.ws.websocket_connection_request_id.as_deref().map(identifier),
         duplicate_terminal = duplicate, duplicate_counters_differ = ?seen.map(|old| raw.counters_differ(&old.raw)), "cache diagnostics");
     let accounting = raw.accounting();
     tracing::info!(diagnostic_event = "reported_input", runtime_id = %state.runtime, local_request_id = ?owner,
@@ -587,8 +587,8 @@ pub(crate) fn terminal(
         .map(|raw| raw.projection_differs(state.usage, cache_write_tokens));
     tracing::info!(diagnostic_event = "terminal", runtime_id = %state.runtime, local_request_id = id,
         provider = identifier(&openai.profile.provider), model = identifier(&openai.profile.model),
-        transport = transport.as_str(), socket_generation = openai.ws.socket_generation,
-        websocket_connection_request_id = ?openai.ws.websocket_connection_request_id.as_deref().map(identifier),
+        transport = transport.as_str(), socket_generation = openai.responses_transport.ws.socket_generation,
+        websocket_connection_request_id = ?openai.responses_transport.ws.websocket_connection_request_id.as_deref().map(identifier),
         response_status = identifier(status), response_id = ?response_id.map(identifier), upstream_request_id = ?state.upstream_request_id,
         input_tokens = ?usage.map(|u| u.input_tokens), cached_tokens = ?usage.map(|u| u.cached_tokens), output_tokens = ?usage.map(|u| u.output_tokens),
         total_tokens = ?usage.map(|u| u.total_tokens), cache_write_tokens = ?cache_write_tokens,
@@ -641,8 +641,8 @@ fn summary(snapshot: &RequestSnapshot, openai: &OpenAiProvider, current_native: 
         comparison_unavailable = (snapshot.input_count > MAX_ITEMS).then_some("snapshot_item_limit"),
         instructions_changed = ?comparison.instructions_changed, tools_changed = ?comparison.tools_changed, remaining_properties_changed = ?comparison.properties_changed,
         routing_metadata_changed = ?routing_changed,
-        connection_changed = ?prior.map(|p| p.runtime != state.runtime || p.socket_generation != openai.ws.socket_generation || p.wire.as_ref().map(|w| w.transport) != state.wire.as_ref().map(|w| w.transport)),
-        socket_generation = openai.ws.socket_generation, request_mode = state.wire.as_ref().map(|w| if w.incremental { "incremental" } else { "full" }),
+        connection_changed = ?prior.map(|p| p.runtime != state.runtime || p.socket_generation != openai.responses_transport.ws.socket_generation || p.wire.as_ref().map(|w| w.transport) != state.wire.as_ref().map(|w| w.transport)),
+        socket_generation = openai.responses_transport.ws.socket_generation, request_mode = state.wire.as_ref().map(|w| if w.incremental { "incremental" } else { "full" }),
         full_replay_reason = state.wire.as_ref().and_then(|w| w.full_reason).map(FullReason::as_str),
         preparation_to_wire_consistent = ?wire_consistent, previous_preparation_to_wire_consistent = ?previous_wire_consistent,
         wire_projection_mismatch = wire_consistent == Some(false) || previous_wire_consistent == Some(false),
@@ -664,7 +664,7 @@ fn summary(snapshot: &RequestSnapshot, openai: &OpenAiProvider, current_native: 
         returned_model = ?state.raw.as_ref().and_then(|r| r.model.as_deref()),
         previous_upstream_request_id = ?prior.and_then(|p| p.upstream_request_id.as_deref()), upstream_request_id = ?state.upstream_request_id,
         previous_connection_request_id = ?prior.and_then(|p| p.connection_request_id.as_deref()),
-        websocket_connection_request_id = ?openai.ws.websocket_connection_request_id.as_deref().map(identifier), "cache diagnostics");
+        websocket_connection_request_id = ?openai.responses_transport.ws.websocket_connection_request_id.as_deref().map(identifier), "cache diagnostics");
 }
 
 // Only after native validation AND search finalization. Not transcript durability.
@@ -712,13 +712,14 @@ pub(crate) fn finish(
                     output_count: output.items.len(),
                     historical_native: snapshot.historical_native,
                     current_native,
-                    socket_generation: openai.ws.socket_generation,
+                    socket_generation: openai.responses_transport.ws.socket_generation,
                     wire: state.wire.clone(),
                     route: snapshot.route.clone(),
                     raw: state.raw.clone(),
                     usage: state.usage,
                     upstream_request_id: state.upstream_request_id.clone(),
                     connection_request_id: openai
+                        .responses_transport
                         .ws
                         .websocket_connection_request_id
                         .as_deref()
@@ -733,7 +734,7 @@ pub(crate) fn finish(
     }
     tracing::info!(diagnostic_event = "attempt_finished", runtime_id = %state.runtime, local_request_id = snapshot.id,
         provider = identifier(&openai.profile.provider), model = identifier(&openai.profile.model),
-        transport = openai.transport.as_str(), socket_generation = openai.ws.socket_generation,
+        transport = openai.responses_transport.kind().as_str(), socket_generation = openai.responses_transport.ws.socket_generation,
         validated_completion = response.is_some(), baseline_promoted = promoted, persistence_configured = state.store.is_some(), persistence_error = ?persistence_error,
         baseline_authority = "validated_provider_completion_not_transcript_durability", prefix_status = snapshot.comparison.status,
         retained_baseline_bytes = retained_bytes(state), "cache diagnostics");
@@ -758,14 +759,19 @@ pub(crate) fn recovery(prepared: &PreparedRequest, openai: &OpenAiProvider) {
     let Some(snapshot) = &prepared.cache_diagnostics else {
         return;
     };
-    let observation = openai.ws.session.cache_diagnostics.observation();
+    let observation = openai
+        .responses_transport
+        .ws
+        .session
+        .cache_diagnostics
+        .observation();
     tracing::info!(diagnostic_event = "socket_recovery", runtime_id = %openai.cache_diagnostics.runtime, local_request_id = snapshot.id,
-        provider = identifier(&openai.profile.provider), model = identifier(&openai.profile.model), transport = openai.transport.as_str(), socket_generation = openai.ws.socket_generation,
-        websocket_connection_request_id = ?openai.ws.websocket_connection_request_id.as_deref().map(identifier),
-        terminal_category = openai.ws.session.terminal_status().map(|c| c.as_str()), observed_category = ?observation.map(|o| o.category.as_str()),
+        provider = identifier(&openai.profile.provider), model = identifier(&openai.profile.model), transport = openai.responses_transport.kind().as_str(), socket_generation = openai.responses_transport.ws.socket_generation,
+        websocket_connection_request_id = ?openai.responses_transport.ws.websocket_connection_request_id.as_deref().map(identifier),
+        terminal_category = openai.responses_transport.ws.session.terminal_status().map(|c| c.as_str()), observed_category = ?observation.map(|o| o.category.as_str()),
         observation_source = observation.map_or("inferred", |o| o.source),
         termination_age_ms = ?observation.and_then(|o| o.at.map(|at| at.elapsed().as_millis().min(u64::MAX as u128) as u64)),
-        since_last_completion_ms = openai.ws.idle_for().as_millis().min(u64::MAX as u128) as u64,
+        since_last_completion_ms = openai.responses_transport.ws.idle_for().as_millis().min(u64::MAX as u128) as u64,
         error_class = ?observation.and_then(|o| o.error_class), io_error_kind = ?observation.and_then(|o| o.io_kind), "cache diagnostics");
 }
 fn retained_bytes(state: &DiagnosticState) -> usize {

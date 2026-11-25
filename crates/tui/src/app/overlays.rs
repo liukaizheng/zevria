@@ -70,13 +70,12 @@ impl OverlayController {
         self.models.show(mode, scope);
         self.replace(Overlay::Models);
     }
-    pub(crate) fn show_jobs(&mut self) {
+    pub(crate) fn show_jobs(&mut self, inspector: &mut zevria_presentation::jobs::JobsInspector) {
         self.subtasks.close();
-        self.jobs.show();
+        self.jobs.show(inspector);
         self.replace(Overlay::Jobs);
     }
     pub(crate) fn show_subtasks(&mut self, rows: Vec<SubtaskRow>) {
-        self.jobs.inspector.close();
         self.subtasks.show(rows);
         self.replace(Overlay::Subtasks);
     }
@@ -107,28 +106,28 @@ impl OverlayController {
     pub(crate) fn show_help(&mut self, context: KeyContext, eligibility: &Eligibility) {
         self.replace(Overlay::Help(HelpOverlay::new(context, eligibility)));
     }
-    fn visible(&self, overlay: &Overlay) -> bool {
+    fn visible(&self, overlay: &Overlay, jobs_open: bool) -> bool {
         match overlay {
             Overlay::Models => self.models.is_open(),
             Overlay::Skills => self.skills.is_open(),
-            Overlay::Jobs => self.jobs.is_open(),
+            Overlay::Jobs => jobs_open,
             Overlay::Mcp => self.mcp.inspector.open,
             Overlay::Subtasks => self.subtasks.is_open(),
             _ => true,
         }
     }
-    pub(crate) fn owns(&self, kind: SurfaceKind) -> bool {
+    pub(crate) fn owns(&self, kind: SurfaceKind, jobs_open: bool) -> bool {
         self.stack
             .iter()
-            .any(|entry| entry.kind() == kind && self.visible(entry))
+            .any(|entry| entry.kind() == kind && self.visible(entry, jobs_open))
     }
 
-    pub(crate) fn snapshot(&self, pane: Surface) -> SurfaceSnapshot {
+    pub(crate) fn snapshot(&self, pane: Surface, jobs_open: bool) -> SurfaceSnapshot {
         let mut layers = vec![pane];
         layers.extend(
             self.stack
                 .iter()
-                .filter(|entry| self.visible(entry))
+                .filter(|entry| self.visible(entry, jobs_open))
                 .map(|entry| Surface::new(pane.id.pane, entry.kind())),
         );
         layers.sort_by_key(|surface| surface.layer);
@@ -151,7 +150,13 @@ impl OverlayController {
             }
         }
     }
-    pub(crate) fn render(&mut self, snapshot: &SurfaceSnapshot, frame: &mut Frame, bounds: Rect) {
+    pub(crate) fn render(
+        &mut self,
+        snapshot: &SurfaceSnapshot,
+        jobs: &zevria_presentation::jobs::JobsInspector,
+        frame: &mut Frame,
+        bounds: Rect,
+    ) {
         for surface in &snapshot.layers {
             let Some(entry) = self
                 .stack
@@ -164,7 +169,7 @@ impl OverlayController {
                 Overlay::Picker(picker) => picker.render(frame, bounds),
                 Overlay::Models => self.models.render(frame, bounds),
                 Overlay::Skills => self.skills.render(frame, bounds),
-                Overlay::Jobs => self.jobs.render(frame, bounds),
+                Overlay::Jobs => self.jobs.render(jobs, frame, bounds),
                 Overlay::Mcp => self.mcp.render(frame, bounds),
                 Overlay::Subtasks => self.subtasks.render(frame, bounds),
                 Overlay::Question(question) => question.render(frame, bounds),
@@ -176,6 +181,7 @@ impl OverlayController {
         &mut self,
         owner: Surface,
         input: UserInput,
+        jobs: &mut zevria_presentation::jobs::JobsInspector,
         busy: bool,
         mode: zevria_foundation::SessionMode,
     ) -> Option<UiAction> {
@@ -187,7 +193,7 @@ impl OverlayController {
         let context = match &self.stack[index] {
             Overlay::Models => self.models.context(),
             Overlay::Skills => self.skills.context(),
-            Overlay::Jobs => self.jobs.context(),
+            Overlay::Jobs => self.jobs.context(jobs),
             Overlay::Mcp => KeyContext::OverlayList,
             Overlay::Subtasks => KeyContext::SubtasksList,
             Overlay::Question(question) => question.context(),
@@ -202,7 +208,7 @@ impl OverlayController {
                 Overlay::Question(question) => question.hint_eligibility(),
                 Overlay::Models => self.models.hint_eligibility(),
                 Overlay::Skills => self.skills.hint_eligibility(),
-                Overlay::Jobs => self.jobs.hint_eligibility(),
+                Overlay::Jobs => self.jobs.hint_eligibility(jobs),
                 Overlay::Subtasks => self.subtasks.hint_eligibility(),
                 Overlay::Picker(picker) => picker.hint_eligibility(),
                 Overlay::Help(_) | Overlay::Mcp => unreachable!("help is not opened here"),
@@ -233,10 +239,14 @@ impl OverlayController {
                         response,
                     } => {
                         close = true;
-                        Some(UiAction::AnswerQuestion {
-                            request_id,
-                            response,
-                        })
+                        Some(UiAction::Session(
+                            zevria_session_api::SessionCommand::Control(
+                                zevria_session_api::ControlCommand::AnswerQuestion {
+                                    request_id,
+                                    response,
+                                },
+                            ),
+                        ))
                     }
                 }
             }
@@ -248,16 +258,16 @@ impl OverlayController {
                 None
             }
             Overlay::Mcp => {
-                let action = self
-                    .mcp
-                    .input(input, busy, mode)
-                    .map(UiAction::InvokeMcpPrompt);
+                let action = self.mcp.input(input, busy, mode).map(|command| {
+                    UiAction::Session(zevria_session_api::SessionCommand::Turn(command))
+                });
                 close = !self.mcp.inspector.open;
                 action
             }
             Overlay::Jobs => {
                 if let UserInput::Key(key) = input {
-                    self.jobs.handle_input(key);
+                    self.jobs.handle_input(jobs, key);
+                    close = !jobs.is_open();
                 }
                 None
             }

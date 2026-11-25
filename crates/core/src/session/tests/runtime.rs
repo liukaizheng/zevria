@@ -9,6 +9,7 @@ use zevria_model::models::ModelManagementRequest;
 use zevria_model::models::ModelManagementResult;
 use zevria_model::models::ModelSelectionPreview;
 use zevria_model::models::ModelSelectionScope as Scope;
+use zevria_session_api::{EnsembleEvent, ManagementEvent, PlanEvent, QuestionEvent, TurnEvent};
 use zevria_transcript::test_support::TranscriptRewriteBlocker;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -198,9 +199,8 @@ impl RunningSession {
             },
         ));
         self.until(|event| matches!(event,
-            SessionEvent::SkillsResult { request_id, result: SkillManagementResult::View { .. } }
-                if request_id == id
-        )).await;
+            SessionEvent::Manage(ManagementEvent::SkillsResult { request_id, result })
+                 if matches!(result.as_ref(), SkillManagementResult::View { .. } if request_id == id))).await;
     }
 
     /// The correlated reply is a FIFO fence: every earlier command has been
@@ -222,26 +222,26 @@ impl RunningSession {
         let event = self
             .until(|event| {
                 matches!(event,
-                    SessionEvent::ModelsResult { request_id, .. } if request_id == id
+                    SessionEvent::Manage(ManagementEvent::ModelsResult { request_id, .. }) if request_id == id
                 )
             })
             .await;
         assert_eq!(
             event,
-            SessionEvent::ModelsResult {
+            SessionEvent::Manage(ManagementEvent::ModelsResult {
                 request_id: id.into(),
-                result: ModelManagementResult::rejected(
+                result: Box::new(ModelManagementResult::rejected(
                     "busy",
                     "model changes require an idle root session; request was not queued",
-                ),
-            }
+                )),
+            })
         );
     }
 
     async fn completed(&mut self, id: TurnId) {
         self.until(|event| {
             matches!(event,
-                SessionEvent::TurnCompleted { turn_id, .. } if *turn_id == id
+                SessionEvent::Turn(TurnEvent::Completed { turn_id, .. }) if *turn_id == id
             )
         })
         .await;
@@ -289,13 +289,13 @@ fn assert_turns_do_not_overlap(events: &[SessionEvent], expected: &[u64]) {
     let mut started = Vec::new();
     for event in events {
         match event {
-            SessionEvent::TurnStarted { turn_id, .. } => {
+            SessionEvent::Turn(TurnEvent::Started { turn_id, .. }) => {
                 assert_eq!(active.replace(*turn_id), None, "turns must not overlap");
                 started.push(turn_id.get());
             }
-            SessionEvent::TurnCompleted { turn_id, .. }
-            | SessionEvent::TurnFailed { turn_id, .. }
-            | SessionEvent::TurnCancelled { turn_id } => {
+            SessionEvent::Turn(TurnEvent::Completed { turn_id, .. })
+            | SessionEvent::Turn(TurnEvent::Failed { turn_id, .. })
+            | SessionEvent::Turn(TurnEvent::Cancelled { turn_id }) => {
                 assert_eq!(active.take(), Some(*turn_id));
             }
             _ => {}
@@ -339,10 +339,10 @@ fn assert_no_plan_events(events: &[SessionEvent]) {
     assert!(
         !events.iter().any(|event| matches!(
             event,
-            SessionEvent::PlanStateChanged { .. }
-                | SessionEvent::PlanProjectionWarning { .. }
-                | SessionEvent::PlanHandoffStarted { .. }
-                | SessionEvent::FreshPlanHandoffRequested { .. }
+            SessionEvent::Plan(PlanEvent::StateChanged { .. })
+                | SessionEvent::Plan(PlanEvent::ProjectionWarning { .. })
+                | SessionEvent::Plan(PlanEvent::HandoffStarted { .. })
+                | SessionEvent::Plan(PlanEvent::FreshHandoffRequested { .. })
         )),
         "unexpected Plan lifecycle: {events:?}"
     );
@@ -362,7 +362,7 @@ async fn fresh_build_startup_has_no_plan_lifecycle_or_filesystem_work() {
     assert_call(&call, 1, "build it");
     assert!(matches!(
         run.lifecycle.first(),
-        Some(SessionEvent::TurnStarted { .. })
+        Some(SessionEvent::Turn(TurnEvent::Started { .. }))
     ));
     answer(call, "built");
     run.completed(TurnId::new(1)).await;
@@ -420,7 +420,7 @@ async fn build_commands_publish_real_restored_workflow_transitions_without_readi
         );
         if approve {
             assert!(run.lifecycle.iter().any(|event| matches!(event,
-                SessionEvent::PlanHandoffStarted { handoff: actual, .. } if actual == &handoff
+                SessionEvent::Plan(PlanEvent::HandoffStarted { handoff: actual, .. }) if **actual == handoff
             )));
         }
         answer(call, "built");
@@ -429,7 +429,9 @@ async fn build_commands_publish_real_restored_workflow_transitions_without_readi
         let transitions = lifecycle
             .iter()
             .filter_map(|event| match event {
-                SessionEvent::PlanStateChanged { state } => Some(state.clone()),
+                SessionEvent::Plan(PlanEvent::StateChanged { state }) => {
+                    Some(state.as_ref().clone())
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -445,11 +447,10 @@ async fn build_commands_publish_real_restored_workflow_transitions_without_readi
             }],
             "only the actual Build-driven transition should publish"
         );
-        assert!(
-            !lifecycle
-                .iter()
-                .any(|event| matches!(event, SessionEvent::PlanProjectionWarning { .. }))
-        );
+        assert!(!lifecycle.iter().any(|event| matches!(
+            event,
+            SessionEvent::Plan(PlanEvent::ProjectionWarning { .. })
+        )));
         assert_eq!(
             std::fs::read_to_string(&projection).unwrap(),
             "manual edit must not enter Build input"
@@ -507,10 +508,13 @@ async fn fresh_and_restored_idle_exit_without_an_event_consumer() {
                 .with_fixture(items)
                 .unwrap();
             let (events, mut receiver) = session_event_channel(1);
-            let marker = SessionEvent::SkillsResult {
+            let marker = SessionEvent::Manage(ManagementEvent::SkillsResult {
                 request_id: "unconsumed-lifecycle-marker".into(),
-                result: SkillManagementResult::error("marker", "keep the queue full"),
-            };
+                result: Box::new(SkillManagementResult::error(
+                    "marker",
+                    "keep the queue full",
+                )),
+            });
             events.send(marker.clone()).await.unwrap();
             let (commands, command_rx) = mpsc::unbounded_channel();
             if explicit {
@@ -575,7 +579,7 @@ async fn restored_plan_is_available_before_run_without_startup_events_or_project
     assert_eq!(call.turn.mode, SessionMode::Plan);
     assert!(matches!(
         run.lifecycle.first(),
-        Some(SessionEvent::TurnStarted { .. })
+        Some(SessionEvent::Turn(TurnEvent::Started { .. }))
     ));
     assert_eq!(
         std::fs::read_to_string(&projection).unwrap(),
@@ -615,8 +619,8 @@ async fn unfinished_ensemble_recovery_precedes_queued_frontend_work() {
         .iter()
         .position(|event| {
             matches!(event,
-                SessionEvent::EnsembleStarted { turn_id, start: resumed, resumed: true }
-                    if *turn_id == TurnId::new(1) && resumed == &start
+                SessionEvent::Ensemble(EnsembleEvent::Started { turn_id, start: resumed, resumed: true })
+                    if *turn_id == TurnId::new(1) && **resumed == start
             )
         })
         .expect("automatic recovery started");
@@ -625,7 +629,7 @@ async fn unfinished_ensemble_recovery_precedes_queued_frontend_work() {
         .iter()
         .position(|event| {
             matches!(event,
-                SessionEvent::TurnRecovered { turn_id, .. } if *turn_id == TurnId::new(1)
+                SessionEvent::Turn(TurnEvent::Recovered { turn_id, .. }) if *turn_id == TurnId::new(1)
             )
         })
         .expect("automatic recovery finished");
@@ -634,7 +638,7 @@ async fn unfinished_ensemble_recovery_precedes_queued_frontend_work() {
         .iter()
         .position(|event| {
             matches!(event,
-                SessionEvent::TurnStarted { turn_id, .. } if *turn_id == TurnId::new(2)
+                SessionEvent::Turn(TurnEvent::Started { turn_id, .. }) if *turn_id == TurnId::new(2)
             )
         })
         .expect("frontend work started");
@@ -698,7 +702,7 @@ async fn read_only_startup_and_shutdown_skip_recovery_and_projection_writes() {
         events,
         receiver,
     );
-    run.until(|event| matches!(event, SessionEvent::SkillsResult { request_id, result: SkillManagementResult::View { .. } } if request_id == "read-only-query")).await;
+    run.until(|event| matches!(event, SessionEvent::Manage(ManagementEvent::SkillsResult { request_id, result })  if matches!(result.as_ref(), SkillManagementResult::View { .. } if request_id == "read-only-query"))).await;
     let lifecycle = run.shutdown().await;
     assert_eq!(
         lifecycle.len(),
@@ -706,7 +710,7 @@ async fn read_only_startup_and_shutdown_skip_recovery_and_projection_writes() {
         "inspection must only answer the explicit query"
     );
     assert!(
-        matches!(&lifecycle[0], SessionEvent::SkillsResult { request_id, .. } if request_id == "read-only-query")
+        matches!(&lifecycle[0], SessionEvent::Manage(ManagementEvent::SkillsResult { request_id, .. }) if request_id == "read-only-query")
     );
     assert!(requests.lock().unwrap().is_empty());
     assert_eq!(launcher.launches.load(Ordering::SeqCst), 0);
@@ -748,7 +752,7 @@ async fn queued_submissions_execute_fifo_without_overlap_and_recover_from_provid
     let third = run.call(&mut calls).await;
     assert_call(&third, 3, "third");
     assert!(run.lifecycle.iter().any(|event| matches!(event,
-        SessionEvent::TurnFailed { turn_id, error } if *turn_id == TurnId::new(2) && error == "scripted provider failure"
+        SessionEvent::Turn(TurnEvent::Failed { turn_id, error }) if *turn_id == TurnId::new(2) && error == "scripted provider failure"
     )));
     answer(third, "third result");
     run.completed(TurnId::new(3)).await;
@@ -850,18 +854,18 @@ async fn queued_cancellation_takes_effect_before_ready_turn_work_is_polled() {
             .until(|event| {
                 matches!(
                     event,
-                    SessionEvent::TurnCancelled { .. }
-                        | SessionEvent::TurnCompleted { .. }
-                        | SessionEvent::TurnFailed { .. }
-                        | SessionEvent::TurnRejected { .. }
+                    SessionEvent::Turn(TurnEvent::Cancelled { .. })
+                        | SessionEvent::Turn(TurnEvent::Completed { .. })
+                        | SessionEvent::Turn(TurnEvent::Failed { .. })
+                        | SessionEvent::Turn(TurnEvent::Rejected { .. })
                 )
             })
             .await;
         assert_eq!(
             terminal,
-            SessionEvent::TurnCancelled {
+            SessionEvent::Turn(TurnEvent::Cancelled {
                 turn_id: TurnId::new(1),
-            }
+            })
         );
         assert!(requests.lock().unwrap().is_empty());
         assert!(
@@ -905,7 +909,7 @@ async fn idle_question_answers_and_maintenance_do_not_allocate_turns() {
             )
             .await
     });
-    run.until(|event| matches!(event, SessionEvent::QuestionAsked { .. }))
+    run.until(|event| matches!(event, SessionEvent::Question(QuestionEvent::Asked { .. })))
         .await;
     run.send(SessionCommand::Control(
         crate::session::ControlCommand::AnswerQuestion {
@@ -929,14 +933,14 @@ async fn idle_question_answers_and_maintenance_do_not_allocate_turns() {
             },
         },
     ));
-    run.until(|event| matches!(event, SessionEvent::SkillsResult { request_id, result: SkillManagementResult::View { .. } } if request_id == "idle-skills")).await;
+    run.until(|event| matches!(event, SessionEvent::Manage(ManagementEvent::SkillsResult { request_id, result })  if matches!(result.as_ref(), SkillManagementResult::View { .. } if request_id == "idle-skills"))).await;
     run.send(SessionCommand::Manage(
         crate::session::ManagementCommand::Models {
             request_id: "idle-models".into(),
             request: ModelManagementRequest::Cancel,
         },
     ));
-    run.until(|event| matches!(event, SessionEvent::ModelsResult { request_id, result: ModelManagementResult::Cancelled } if request_id == "idle-models")).await;
+    run.until(|event| matches!(event, SessionEvent::Manage(ManagementEvent::ModelsResult { request_id, result })  if matches!(result.as_ref(), ModelManagementResult::Cancelled if request_id == "idle-models"))).await;
     run.send(submit("first actual turn"));
     run.completed(TurnId::new(1)).await;
     assert_turns_do_not_overlap(&run.shutdown().await, &[1]);
@@ -1020,7 +1024,10 @@ async fn model_management_requests_during_turns_are_correlated_busy_traffic() {
     assert_eq!(
         lifecycle
             .iter()
-            .filter(|event| matches!(event, SessionEvent::ModelsResult { .. }))
+            .filter(|event| matches!(
+                event,
+                SessionEvent::Manage(ManagementEvent::ModelsResult { .. })
+            ))
             .count(),
         8
     );
@@ -1048,7 +1055,7 @@ async fn explicit_shutdown_and_channel_exhaustion_terminate_idle_sessions() {
         }
         let lifecycle = run.finish().await;
         assert!(
-            matches!(lifecycle.as_slice(), [SessionEvent::SkillsResult { request_id, .. }] if request_id == "idle-ready")
+            matches!(lifecycle.as_slice(), [SessionEvent::Manage(ManagementEvent::SkillsResult { request_id, .. })] if request_id == "idle-ready")
         );
         assert!(
             zevria_transcript::transcript::load(&path)
@@ -1078,9 +1085,9 @@ async fn queued_shutdown_and_channel_exhaustion_cancel_before_ready_work_starts(
         }
         assert_eq!(
             run.finish().await,
-            vec![SessionEvent::TurnCancelled {
+            vec![SessionEvent::Turn(TurnEvent::Cancelled {
                 turn_id: TurnId::new(1),
-            }]
+            })]
         );
         assert!(requests.lock().unwrap().is_empty());
         assert!(
@@ -1107,7 +1114,7 @@ async fn ready_work_is_polled_between_immediately_ready_commands() {
     assert_eq!(requests.lock().unwrap().len(), 1);
     assert_turns_do_not_overlap(&lifecycle, &[1]);
     assert!(lifecycle.iter().any(|event| {
-        matches!(event, SessionEvent::TurnCompleted { turn_id, .. } if *turn_id == TurnId::new(1))
+        matches!(event, SessionEvent::Turn(TurnEvent::Completed { turn_id, .. }) if *turn_id == TurnId::new(1))
     }));
 }
 
@@ -1134,10 +1141,13 @@ async fn active_shutdown_and_channel_exhaustion_await_cleanup_and_discard_pendin
         // Deliberately block terminal event publication. Cancellation must not
         // drop the command future to bypass this awaited cleanup boundary.
         backpressure
-            .send(SessionEvent::SkillsResult {
+            .send(SessionEvent::Manage(ManagementEvent::SkillsResult {
                 request_id: "cleanup-backpressure".into(),
-                result: SkillManagementResult::error("test", "occupy the lifecycle slot"),
-            })
+                result: Box::new(SkillManagementResult::error(
+                    "test",
+                    "occupy the lifecycle slot",
+                )),
+            }))
             .await
             .unwrap();
         drop(backpressure);
@@ -1162,7 +1172,7 @@ async fn active_shutdown_and_channel_exhaustion_await_cleanup_and_discard_pendin
                 .iter()
                 .any(|event| matches!(event, SessionEvent::EngineIdle))
         );
-        assert!(lifecycle.iter().any(|event| matches!(event, SessionEvent::TurnCancelled { turn_id } if *turn_id == call.turn.id)));
+        assert!(lifecycle.iter().any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Cancelled { turn_id }) if *turn_id == call.turn.id)));
         assert_eq!(cancellations.load(Ordering::SeqCst), 1);
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
         assert!(call.response.is_closed());
@@ -1193,10 +1203,10 @@ async fn clean_turn_completion_still_delivers_backpressured_control_reply() {
     );
     let call = run.call(&mut calls).await;
     backpressure
-        .try_send(SessionEvent::SkillsResult {
+        .try_send(SessionEvent::Manage(ManagementEvent::SkillsResult {
             request_id: "occupy-slot".into(),
-            result: SkillManagementResult::error("test", "backpressure"),
-        })
+            result: Box::new(SkillManagementResult::error("test", "backpressure")),
+        }))
         .unwrap();
     run.send(SessionCommand::Manage(
         crate::session::ManagementCommand::Skills {
@@ -1208,14 +1218,14 @@ async fn clean_turn_completion_still_delivers_backpressured_control_reply() {
     ));
     tokio::task::yield_now().await;
     answer(call, "done");
-    let reply = run.until(|event| matches!(event, SessionEvent::SkillsResult { request_id, .. } if request_id == "owed-reply")).await;
+    let reply = run.until(|event| matches!(event, SessionEvent::Manage(ManagementEvent::SkillsResult { request_id, .. }) if request_id == "owed-reply")).await;
     assert!(matches!(
         reply,
-        SessionEvent::SkillsResult {
-            result: SkillManagementResult::View { .. },
+        SessionEvent::Manage(ManagementEvent::SkillsResult {
+            result,
             ..
-        }
-    ));
+        })
+     if matches!(result.as_ref(), SkillManagementResult::View { .. })));
     run.shutdown().await;
 }
 
@@ -1243,10 +1253,10 @@ async fn fatal_active_replay_bypasses_control_backpressure_and_discards_queued_w
     run.send(submit("pending must not run"));
     run.busy_fence("pending-handled").await;
     backpressure
-        .try_send(SessionEvent::SkillsResult {
+        .try_send(SessionEvent::Manage(ManagementEvent::SkillsResult {
             request_id: "occupy-slot".into(),
-            result: SkillManagementResult::error("test", "backpressure"),
-        })
+            result: Box::new(SkillManagementResult::error("test", "backpressure")),
+        }))
         .unwrap();
     run.send(SessionCommand::Manage(
         crate::session::ManagementCommand::Skills {
@@ -1286,9 +1296,9 @@ async fn fatal_active_replay_bypasses_control_backpressure_and_discards_queued_w
     let lifecycle = collect_events(&mut run.receiver).await;
     assert!(!lifecycle.iter().any(|event| matches!(
         event,
-        SessionEvent::TurnCompleted { .. }
-            | SessionEvent::TurnFailed { .. }
-            | SessionEvent::TurnCancelled { .. }
+        SessionEvent::Turn(TurnEvent::Completed { .. })
+            | SessionEvent::Turn(TurnEvent::Failed { .. })
+            | SessionEvent::Turn(TurnEvent::Cancelled { .. })
             | SessionEvent::EngineIdle
     )));
     let bytes = std::fs::read_to_string(path).unwrap();

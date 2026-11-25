@@ -112,11 +112,13 @@ use zevria_model::SUMMARY_PREFIX;
 use zevria_model::TokenUsage;
 use zevria_session_api::AgentRunStreamState;
 use zevria_session_api::SessionStreamBatch;
+use zevria_session_api::SessionStreamState;
 use zevria_session_api::SessionUpdate;
 use zevria_session_api::TranscriptEdit;
 use zevria_session_api::TranscriptEditReplacement;
 use zevria_session_api::TranscriptEditTarget;
 use zevria_session_api::session_event_channel;
+use zevria_session_api::{EnsembleEvent, ManagementEvent, PlanEvent, TurnEvent};
 use zevria_transcript::AGENT_RUN_TRANSCRIPT_VERSION;
 use zevria_transcript::AgentRunTranscriptHeader;
 use zevria_transcript::AgentRunTranscriptRecord;
@@ -159,11 +161,24 @@ use zevria_workflow::UnavailableDecisionAccounting;
 use zevria_workflow::UnavailableDecisionDisposition;
 
 impl App {
-    fn reduce_without_effects(&mut self, event: SessionEvent) {
+    fn reduce_without_effects(&mut self, update: impl Into<SessionUpdate>) {
         assert!(
-            self.reduce(event).is_empty(),
+            self.apply_test_update_at(update, Instant::now()).is_empty(),
             "fixture must explicitly handle reducer effects"
         );
+    }
+
+    fn apply_test_update_at(
+        &mut self,
+        update: impl Into<SessionUpdate>,
+        now: Instant,
+    ) -> Vec<AppEffect> {
+        match update.into() {
+            SessionUpdate::Lifecycle(event) => self.reduce_at(event, now),
+            SessionUpdate::Streams(batch) => {
+                self.apply_stream_at(batch.root.expect("root preview fixture"), now)
+            }
+        }
     }
 }
 
@@ -317,55 +332,67 @@ fn test_plan_artifact() -> PlanArtifact {
 /// messages create no visible row, so characterization fixtures keep their
 /// original history shape while using the real lifecycle transition.
 fn start_empty_turn(app: &mut App, turn_id: TurnId, mode: SessionMode) {
-    app.reduce_without_effects(SessionEvent::TurnStarted {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Started {
         turn_id,
         message: Message::User {
             content: Vec::new(),
         },
         mode,
-    });
+    }));
 }
 
 fn toggle_mode_with_ack(app: &mut App) {
-    let Some(UiAction::SetMode { request_id, mode }) = app.handle_event(key(KeyCode::BackTab))
+    let Some(UiAction::Session(zevria_session_api::SessionCommand::Manage(
+        zevria_session_api::ManagementCommand::SetMode { request_id, mode },
+    ))) = app.handle_event(key(KeyCode::BackTab))
     else {
         panic!("idle mode shortcut must request management selection");
     };
-    app.reduce_without_effects(SessionEvent::ModeResult {
+    app.reduce_without_effects(SessionEvent::Manage(ManagementEvent::ModeResult {
         request_id,
         result: zevria_session_api::ModeSelectionResult::Accepted {
             mode,
             changed: true,
         },
-    });
+    }));
 }
 
-fn apply_turn_event(app: &mut App, event: SessionEvent) {
-    match &event {
-        SessionEvent::TurnRejected { .. }
-        | SessionEvent::TurnStarted { .. }
-        | SessionEvent::EnsembleStarted { .. }
-        | SessionEvent::PlanHandoffStarted { .. }
-        | SessionEvent::CompactionStarted { .. } => {}
-        SessionEvent::CompactionCompleted {
+fn apply_turn_event(app: &mut App, update: impl Into<SessionUpdate>) {
+    let update = update.into();
+    let SessionUpdate::Lifecycle(event) = &update else {
+        if !app.is_busy() {
+            start_empty_turn(app, TEST_TURN_ID, app.next_mode());
+        }
+        app.reduce_without_effects(update);
+        return;
+    };
+    match event {
+        SessionEvent::Turn(TurnEvent::Rejected { .. })
+        | SessionEvent::Turn(TurnEvent::Started { .. })
+        | SessionEvent::Ensemble(EnsembleEvent::Started { .. })
+        | SessionEvent::Plan(PlanEvent::HandoffStarted { .. })
+        | SessionEvent::Turn(TurnEvent::CompactionStarted { .. }) => {}
+        SessionEvent::Turn(TurnEvent::CompactionCompleted {
             turn_id, trigger, ..
-        } if !app.is_busy() => app.reduce_without_effects(SessionEvent::CompactionStarted {
-            turn_id: *turn_id,
-            trigger: *trigger,
-        }),
+        }) if !app.is_busy() => {
+            app.reduce_without_effects(SessionEvent::Turn(TurnEvent::CompactionStarted {
+                turn_id: *turn_id,
+                trigger: *trigger,
+            }))
+        }
         _ if !app.is_busy() => {
             let mode = app.next_mode();
             start_empty_turn(app, TEST_TURN_ID, mode);
         }
         _ => {}
     }
-    app.reduce_without_effects(event);
+    app.reduce_without_effects(update);
 }
 
 fn apply_transport_update(views: &mut SessionViews, update: SessionUpdate) {
     match update {
         SessionUpdate::Lifecycle(event) => views.apply(event),
-        SessionUpdate::Streams(batch) => views.apply_streams(&batch),
+        SessionUpdate::Streams(batch) => views.apply_streams(batch),
     }
 }
 
@@ -872,43 +899,43 @@ fn cursor_position_after_render(app: &mut App, width: u16, height: u16) -> Posit
     terminal.backend().cursor_position()
 }
 
-fn handoff_stream_update(rows: usize, assistant_snapshot: bool) -> SessionEvent {
+fn handoff_stream_update(
+    rows: usize,
+    assistant_snapshot: bool,
+) -> zevria_session_api::SessionStreamState {
     let message = Message::assistant("Implementation stream row.\n".repeat(rows));
     if assistant_snapshot {
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: zevria_content::AssistantStreamSnapshot {
+        SessionStreamState::new(
+            TEST_TURN_ID,
+            zevria_content::AssistantStreamSnapshot {
                 message: Some(message),
                 attempt: None,
             },
-        }
+        )
     } else {
-        SessionEvent::AssistantStreamUpdated {
-            turn_id: TEST_TURN_ID,
-            snapshot: message.into(),
-        }
+        SessionStreamState::new(TEST_TURN_ID, message.into())
     }
 }
 
 fn streaming_handoff_app(with_compaction: bool) -> App {
     let mut app = App::new();
-    app.reduce_without_effects(SessionEvent::PlanHandoffStarted {
+    app.reduce_without_effects(SessionEvent::Plan(PlanEvent::HandoffStarted {
         turn_id: TEST_TURN_ID,
-        handoff: PlanHandoff::new(test_plan_artifact(), "source-session"),
-    });
+        handoff: Box::new(PlanHandoff::new(test_plan_artifact(), "source-session")),
+    }));
     if with_compaction {
-        app.reduce_without_effects(SessionEvent::CompactionStarted {
+        app.reduce_without_effects(SessionEvent::Turn(TurnEvent::CompactionStarted {
             turn_id: TEST_TURN_ID,
             trigger: CompactionTrigger::AutomaticMidTurn,
-        });
-        app.reduce_without_effects(SessionEvent::CompactionCompleted {
+        }));
+        app.reduce_without_effects(SessionEvent::Turn(TurnEvent::CompactionCompleted {
             turn_id: TEST_TURN_ID,
             trigger: CompactionTrigger::AutomaticMidTurn,
             backend: CompactionBackend::LocalSummary,
-        });
+        }));
         assert!(matches!(app.history()[1], HistoryEntry::CompactionDivider));
     }
-    app.reduce_without_effects(SessionEvent::Intermediate {
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Intermediate {
         turn_id: TEST_TURN_ID,
         attempt_id: None,
         message: assistant_message(vec![
@@ -920,7 +947,7 @@ fn streaming_handoff_app(with_compaction: bool) -> App {
                 json!({"command": "echo implemented"}),
             ),
         ]),
-    });
+    }));
     app.reduce_without_effects(handoff_stream_update(8, true));
     rendered_text(&mut app, 80, 18);
     let conversation_index = 1 + usize::from(with_compaction);
@@ -968,34 +995,34 @@ fn editable_ensemble_start(
 
 fn idle_app_with_ensemble(start: EnsembleStart) -> App {
     let mut app = App::new();
-    app.reduce_without_effects(SessionEvent::EnsembleStarted {
+    app.reduce_without_effects(SessionEvent::Ensemble(EnsembleEvent::Started {
         turn_id: TEST_TURN_ID,
-        start,
+        start: Box::new(start),
         resumed: false,
-    });
-    app.reduce_without_effects(SessionEvent::TurnRecovered {
+    }));
+    app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Recovered {
         turn_id: TEST_TURN_ID,
-    });
+    }));
     app
 }
 
-fn start_timed_tail(app: &mut App, event: Option<SessionEvent>) {
+fn start_timed_tail(app: &mut App, event: Option<SessionUpdate>) {
     let now = std::time::Instant::now();
     assert!(
         app.reduce_at(
-            SessionEvent::TurnStarted {
+            SessionEvent::Turn(TurnEvent::Started {
                 turn_id: TEST_TURN_ID,
                 message: Message::User {
                     content: Vec::new()
                 },
                 mode: SessionMode::Build,
-            },
+            }),
             now
         )
         .is_empty()
     );
     if let Some(event) = event {
-        assert!(app.reduce_at(event, now).is_empty());
+        assert!(app.apply_test_update_at(event, now).is_empty());
     }
 }
 

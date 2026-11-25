@@ -22,6 +22,7 @@ use zevria_model::request::{
     InputTokenCount, ModelRequest, ModelRequestItem, OwnedModelRequestItem,
 };
 use zevria_model::telemetry::{ContextTokenSnapshot, ContextTokenSource};
+use zevria_session_api::ManagementEvent;
 use zevria_session_api::event::{ProgressReporter, SessionEvent, SessionEventSender};
 use zevria_session_api::provider::ModelProvider;
 use zevria_session_api::turn::TurnContext;
@@ -221,17 +222,20 @@ impl<P: ModelProvider> SessionEngine<P> {
                 biased;
                 () = cancellation.cancelled() => {
                     self.cancel_model_preview(&request_id);
-                    let _ = events.send(SessionEvent::ModelsResult {
-                        request_id: request_id.clone(), result: Result::Cancelled,
-                    }).await;
+                    let _ = events.send(SessionEvent::Manage(ManagementEvent::ModelsResult {
+                        request_id: request_id.clone(), result: Box::new(Result::Cancelled),
+                    })).await;
                 }
-                _ = events.send(SessionEvent::ModelsResult { request_id: request_id.clone(), result }) => {}
+                _ = events.send(SessionEvent::Manage(ManagementEvent::ModelsResult { request_id: request_id.clone(), result: Box::new(result) })) => {}
             }
         } else {
             // Never hide an already committed success or partial-save failure
             // behind cancellation, even if its acknowledgement was delayed.
             let _ = events
-                .send(SessionEvent::ModelsResult { request_id, result })
+                .send(SessionEvent::Manage(ManagementEvent::ModelsResult {
+                    request_id,
+                    result: Box::new(result),
+                }))
                 .await;
         }
         Ok(())

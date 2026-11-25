@@ -104,67 +104,47 @@ impl App {
         &mut self,
         classified: ClassifiedInput,
     ) -> Option<UiAction> {
-        if self.model.ready_revision_target().is_some()
-            && matches!(
-                &classified,
-                ClassifiedInput::Orchestrate(_) | ClassifiedInput::Ensemble { .. }
-            )
-        {
-            self.push_error(
-                "This plan is awaiting review; send ordinary feedback to revise it, or reopen the review with p."
-                    .into(),
-            );
-            return None;
-        }
-        let behavior = if matches!(&classified, ClassifiedInput::Orchestrate(_)) {
-            zevria_foundation::RequestBehavior::Orchestrate
-        } else {
-            zevria_foundation::RequestBehavior::Standard
-        };
+        use zevria_presentation::workspace::{InputRoute, admit_work};
         match classified {
-            ClassifiedInput::Message(text) | ClassifiedInput::Orchestrate(text) => {
-                let action = match self.model.submit(text, behavior)? {
-                    TurnCommand::Submit {
-                        text,
-                        mode,
-                        behavior,
-                    } => UiAction::Submit {
-                        text,
-                        mode,
-                        behavior,
-                    },
-                    TurnCommand::RevisePlanWithMessage { expected, text } => {
-                        UiAction::RevisePlanWithMessage { expected, text }
+            work @ (ClassifiedInput::Message(_)
+            | ClassifiedInput::Orchestrate(_)
+            | ClassifiedInput::McpPrompt { .. }
+            | ClassifiedInput::Skill { .. }
+            | ClassifiedInput::Ensemble { .. }
+            | ClassifiedInput::Builtin(SlashCommand::Compact)) => {
+                let mode = self.mcp_mode();
+                let command = match admit_work(
+                    &mut self.model,
+                    work,
+                    zevria_foundation::RequestBehavior::Standard,
+                    mode,
+                ) {
+                    InputRoute::Command(command) | InputRoute::McpPrompt(command) => *command,
+                    InputRoute::Notice(notice) => {
+                        self.push_error(notice);
+                        return None;
                     }
-                    _ => unreachable!("submit admission"),
+                    _ => return None,
                 };
                 self.after_admission();
-                self.view.invalidate_rendered_geometry();
-                self.stage_draft();
-                self.queue.resume();
-                Some(action)
-            }
-            ClassifiedInput::McpPrompt {
-                server,
-                prompt,
-                arguments,
-            } => {
-                let mode = self.mcp_mode();
-                if !self.model.begin_mcp_prompt(mode) {
-                    self.push_error(
-                        "Finish reviewing the current Plan before running an MCP prompt.".into(),
-                    );
-                    return None;
+                if matches!(
+                    &command,
+                    zevria_session_api::SessionCommand::Turn(TurnCommand::Compact { .. })
+                ) {
+                    self.composer.clear();
+                } else {
+                    if matches!(
+                        &command,
+                        zevria_session_api::SessionCommand::Turn(
+                            TurnCommand::Submit { .. } | TurnCommand::RevisePlanWithMessage { .. }
+                        )
+                    ) {
+                        self.view.invalidate_rendered_geometry();
+                    }
+                    self.stage_draft();
+                    self.queue.resume();
                 }
-                self.after_admission();
-                self.stage_draft();
-                self.queue.resume();
-                Some(UiAction::InvokeMcpPrompt(TurnCommand::InvokeMcpPrompt {
-                    server,
-                    prompt,
-                    arguments,
-                    mode,
-                }))
+                Some(UiAction::Session(command))
             }
             ClassifiedInput::Builtin(SlashCommand::Build) => {
                 self.begin_mode_selection(SessionMode::Build, true)
@@ -172,30 +152,11 @@ impl App {
             ClassifiedInput::Builtin(SlashCommand::Plan) => {
                 self.begin_mode_selection(SessionMode::Plan, true)
             }
-            ClassifiedInput::Builtin(SlashCommand::Compact) => {
-                let TurnCommand::Compact { mode } = self.model.compact()? else {
-                    unreachable!("compaction admission")
-                };
-                self.after_admission();
-                self.composer.clear();
-                Some(UiAction::Compact { mode })
-            }
             ClassifiedInput::Builtin(SlashCommand::Implement) => {
                 self.implement_submitted_plan(PlanDecision::ImplementCurrent)
             }
             ClassifiedInput::Builtin(SlashCommand::ImplementFresh) => {
                 self.implement_submitted_plan(PlanDecision::ImplementFresh)
-            }
-            ClassifiedInput::Ensemble { workflow, prompt } => {
-                let TurnCommand::RunEnsemble { workflow, prompt } =
-                    self.model.run_ensemble(workflow, prompt)?
-                else {
-                    unreachable!("ensemble admission")
-                };
-                self.after_admission();
-                self.stage_draft();
-                self.queue.resume();
-                Some(UiAction::RunEnsemble { workflow, prompt })
             }
             ClassifiedInput::Builtin(command) => {
                 if self.queue.len() > 0
@@ -208,27 +169,6 @@ impl App {
                 }
                 self.composer.clear();
                 Some(UiAction::RunCommand(command))
-            }
-            ClassifiedInput::Skill { name, args } => {
-                let action = match self.model.invoke_skill(name, args)? {
-                    TurnCommand::InvokeSkill { name, args, mode } => {
-                        UiAction::InvokeSkill { name, args, mode }
-                    }
-                    TurnCommand::RevisePlanWithSkill {
-                        expected,
-                        name,
-                        args,
-                    } => UiAction::RevisePlanWithSkill {
-                        expected,
-                        name,
-                        args,
-                    },
-                    _ => unreachable!("skill admission"),
-                };
-                self.after_admission();
-                self.stage_draft();
-                self.queue.resume();
-                Some(action)
             }
         }
     }
@@ -292,7 +232,9 @@ impl App {
             unreachable!("job continuation admission")
         };
         self.after_admission();
-        Some(UiAction::ContinueAfterJobs { mode })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            TurnCommand::ContinueAfterJobs { mode },
+        )))
     }
 
     fn dispatch_queue_head(&mut self) -> Option<UiAction> {
@@ -317,13 +259,17 @@ impl App {
                 text,
                 mode,
                 behavior,
-            } => UiAction::Submit {
-                text,
-                mode,
-                behavior,
-            },
+            } => UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                TurnCommand::Submit {
+                    text,
+                    mode,
+                    behavior,
+                },
+            )),
             TurnCommand::InvokeSkill { name, args, mode } => {
-                UiAction::InvokeSkill { name, args, mode }
+                UiAction::Session(zevria_session_api::SessionCommand::Turn(
+                    TurnCommand::InvokeSkill { name, args, mode },
+                ))
             }
             _ => unreachable!("queued admission only submits prompts and skills"),
         })
@@ -444,7 +390,9 @@ impl App {
             .stage_submission()
             .expect("validated recall must stage exactly once");
         self.stage_draft();
-        Some(UiAction::EditTranscript(edit))
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            TurnCommand::EditTranscript(edit),
+        )))
     }
 
     pub(super) fn implement_submitted_plan(&mut self, decision: PlanDecision) -> Option<UiAction> {
@@ -490,7 +438,9 @@ impl App {
         }
         self.interaction.clear_selection();
         self.interaction.clear_chords();
-        Some(UiAction::ResolvePlan { expected, decision })
+        Some(UiAction::Session(zevria_session_api::SessionCommand::Turn(
+            TurnCommand::ResolvePlan { expected, decision },
+        )))
     }
 
     pub(super) fn apply_plan_snapshot(&mut self, state: zevria_workflow::PlanWorkflowState) {

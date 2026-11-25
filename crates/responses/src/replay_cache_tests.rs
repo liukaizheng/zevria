@@ -1,5 +1,5 @@
 use crate::replay::{
-    InputProjection, PreflightCache, PreflightOptions, preflight_with_compatibility, project,
+    InputProjection, PreflightCache, PreflightOptions, ProjectionOptions, preflight, project,
 };
 use crate::tools::ToolRendererOptions;
 use rig_core::message::{AssistantContent, Message, ToolFunction, ToolName, ToolResultContent};
@@ -50,13 +50,7 @@ fn incremental_projection_matches_full_at_every_split_and_rebuilds_for_native_co
     for split in 0..=input.len() {
         let mut projection = InputProjection::default();
         projection
-            .extend(
-                &input[..split],
-                &target,
-                true,
-                ToolRendererOptions::default(),
-                true,
-            )
+            .extend(&input[..split], (&target).into())
             .unwrap();
         let can_extend = projection.can_extend(&input[split..], &target).unwrap();
         if (3..=4).contains(&split) {
@@ -70,9 +64,7 @@ fn incremental_projection_matches_full_at_every_split_and_rebuilds_for_native_co
         } else {
             &input[..]
         };
-        projection
-            .extend(suffix, &target, true, ToolRendererOptions::default(), true)
-            .unwrap();
+        projection.extend(suffix, (&target).into()).unwrap();
         assert_eq!(projection.source().as_str(), expected_source.as_str());
         assert_eq!(projection.take_input(), expected, "split {split}");
     }
@@ -126,22 +118,10 @@ fn prepared_and_historical_images_are_byte_preserving_in_generic_and_native_repl
     for split in 0..=input.len() {
         let mut projection = InputProjection::default();
         projection
-            .extend(
-                &input[..split],
-                &target,
-                true,
-                ToolRendererOptions::default(),
-                true,
-            )
+            .extend(&input[..split], (&target).into())
             .unwrap();
         projection
-            .extend(
-                &input[split..],
-                &target,
-                true,
-                ToolRendererOptions::default(),
-                true,
-            )
+            .extend(&input[split..], (&target).into())
             .unwrap();
         assert!(
             projection.take_input() == full,
@@ -169,40 +149,20 @@ fn incremental_preflight_matches_full_across_appends_edits_and_compatibility_cha
                     for end in 0..=input.len() {
                         let prefix = &input[..end];
                         let identity = ModelInputIdentity::from_items(prefix).unwrap();
-                        let options = ToolRendererOptions { strict_tools };
-                        let expected = preflight_with_compatibility(
-                            prefix,
-                            &target,
-                            developer_messages,
-                            options,
-                            additional_tools,
-                        )
-                        .unwrap();
-                        let actual = cache
-                            .assess(
-                                prefix,
-                                &identity,
-                                &target,
+                        let options = PreflightOptions {
+                            projection: ProjectionOptions {
+                                target: &target,
                                 developer_messages,
-                                options,
+                                tool_options: ToolRendererOptions { strict_tools },
                                 additional_tools,
-                            )
-                            .unwrap();
+                            },
+                            ..PreflightOptions::from(&target)
+                        };
+                        let expected = preflight(prefix, options).unwrap();
+                        let actual = cache.assess(prefix, &identity, options).unwrap();
                         assert_eq!(actual, expected, "prefix {end}, edit {edit}");
                         // An unchanged input must reuse the same accounting without adding it twice.
-                        assert_eq!(
-                            cache
-                                .assess(
-                                    prefix,
-                                    &identity,
-                                    &target,
-                                    developer_messages,
-                                    options,
-                                    additional_tools
-                                )
-                                .unwrap(),
-                            expected
-                        );
+                        assert_eq!(cache.assess(prefix, &identity, options).unwrap(), expected);
                     }
                 }
             }
@@ -225,10 +185,7 @@ fn slot_reuses_wire_projection_and_fences_rebuilt_continuation_prefixes() {
             .assess(
                 prefix,
                 &ModelInputIdentity::from_items(prefix).unwrap(),
-                &target,
-                true,
-                ToolRendererOptions::default(),
-                true,
+                (&target).into(),
             )
             .unwrap();
         cache.projected_input().unwrap()
@@ -263,10 +220,7 @@ fn failed_or_foreign_preflight_does_not_install_a_partial_cache() {
         cache.assess(
             input,
             &ModelInputIdentity::from_items(input).unwrap(),
-            &target,
-            true,
-            ToolRendererOptions::default(),
-            true,
+            (&target).into(),
         )
     };
     assess(&mut cache, &input[..3]).unwrap();
@@ -340,29 +294,13 @@ fn accounting_policy_changes_recompute_numbers_but_leave_transport_identity_unch
     ] {
         for end in 0..=input.len() {
             let identity = ModelInputIdentity::from_items(&input[..end]).unwrap();
+            let options = PreflightOptions {
+                projection: (&target).into(),
+                policy: &policy,
+            };
             assert_eq!(
-                cache
-                    .assess_with_policy(
-                        &input[..end],
-                        &identity,
-                        PreflightOptions {
-                            target: &target,
-                            developer_messages: true,
-                            tool_options: Default::default(),
-                            additional_tools: true,
-                            policy: &policy,
-                        },
-                    )
-                    .unwrap(),
-                crate::replay::preflight_with_policy(
-                    &input[..end],
-                    &target,
-                    true,
-                    Default::default(),
-                    true,
-                    &policy
-                )
-                .unwrap()
+                cache.assess(&input[..end], &identity, options).unwrap(),
+                preflight(&input[..end], options).unwrap(),
             );
         }
         assert_eq!(ModelInputIdentity::from_items(&input).unwrap(), identity);

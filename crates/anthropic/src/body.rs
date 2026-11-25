@@ -95,7 +95,7 @@ pub fn build_with_history(
         );
         history.completion(&system, &tools, false, &request.input)?
     } else {
-        project::project_with_compatibility(
+        project::project(
             &request.input,
             options.target,
             options.compatibility,

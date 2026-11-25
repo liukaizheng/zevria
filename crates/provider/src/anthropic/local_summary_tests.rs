@@ -1,5 +1,6 @@
 use super::*;
 use zevria_model::models::{ModelSelection, SessionModels};
+use zevria_session_api::TurnEvent;
 
 #[tokio::test]
 async fn single_messages_router_uses_the_core_local_summary_path() {
@@ -10,7 +11,7 @@ async fn single_messages_router_uses_the_core_local_summary_path() {
     ));
     profile.retained_user_tokens = 0;
     if let ProfileProtocol::Anthropic { endpoint, .. } = &mut profile.protocol {
-        endpoint.input_token_count.enabled = false;
+        std::sync::Arc::make_mut(endpoint).input_token_count.enabled = false;
     }
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -73,7 +74,9 @@ async fn single_messages_router_uses_the_core_local_summary_path() {
         .unwrap();
     let mut failed = Vec::new();
     while let Ok(update) = receiver.try_recv() {
-        if let SessionUpdate::Lifecycle(SessionEvent::TurnFailed { error, .. }) = update {
+        if let SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Failed { error, .. })) =
+            update
+        {
             failed.push(error);
         }
     }

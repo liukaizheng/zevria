@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{EnsembleEvent, PlanEvent, QuestionEvent, SubtaskEvent, TurnEvent};
 use zevria_transcript::test_support::TranscriptRewriteBlocker;
 
 #[tokio::test]
@@ -157,13 +158,13 @@ async fn admission_rejections_are_event_only_and_preserve_transcript_bytes() {
         );
         let lifecycle = collect_events(&mut receiver).await;
         assert!(
-            matches!(lifecycle.last(), Some(SessionEvent::TurnRejected { turn_id, .. }) if *turn_id == TurnId::new(1)),
+            matches!(lifecycle.last(), Some(SessionEvent::Turn(TurnEvent::Rejected { turn_id, .. })) if *turn_id == TurnId::new(1)),
             "{case}: {lifecycle:?}"
         );
         assert_eq!(
             lifecycle
                 .iter()
-                .filter(|event| matches!(event, SessionEvent::TurnRejected { .. }))
+                .filter(|event| matches!(event, SessionEvent::Turn(TurnEvent::Rejected { .. })))
                 .count(),
             1,
             "{case}"
@@ -171,10 +172,10 @@ async fn admission_rejections_are_event_only_and_preserve_transcript_bytes() {
         assert!(
             !lifecycle.iter().any(|event| matches!(
                 event,
-                SessionEvent::TurnStarted { .. }
-                    | SessionEvent::EnsembleStarted { .. }
-                    | SessionEvent::TurnFailed { .. }
-                    | SessionEvent::TurnCancelled { .. }
+                SessionEvent::Turn(TurnEvent::Started { .. })
+                    | SessionEvent::Ensemble(EnsembleEvent::Started { .. })
+                    | SessionEvent::Turn(TurnEvent::Failed { .. })
+                    | SessionEvent::Turn(TurnEvent::Cancelled { .. })
             )),
             "{case}"
         );
@@ -216,7 +217,7 @@ async fn direct_control_answers_questions_without_allocating_a_turn() {
     });
     assert!(matches!(
         recv_event(&mut receiver).await,
-        Some(SessionEvent::QuestionAsked { .. })
+        Some(SessionEvent::Question(QuestionEvent::Asked { .. }))
     ));
     engine
         .handle_command(
@@ -286,7 +287,7 @@ async fn unconvertible_replay_fails_without_committing_the_fallback_message() {
     let lifecycle = collect_events(&mut receiver).await;
     assert!(matches!(
         lifecycle.last(),
-        Some(SessionEvent::TurnFailed { error, .. })
+        Some(SessionEvent::Turn(TurnEvent::Failed { error, .. }))
             if error.contains("provider replay contained no assistant content")
     ));
     drop(engine);
@@ -391,16 +392,18 @@ async fn captured_insert_decision_resolves_incident_without_duplicate_root_quest
     assert_eq!(
         lifecycle
             .iter()
-            .filter(|event| matches!(event, SessionEvent::QuestionAsked { .. }))
+            .filter(|event| matches!(event, SessionEvent::Question(QuestionEvent::Asked { .. })))
             .count(),
         0
     );
     let tools = lifecycle
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::Intermediate { message, .. } => assistant_tool_calls(message)
-                .first()
-                .map(|call| call.function.name.clone()),
+            SessionEvent::Turn(TurnEvent::Intermediate { message, .. }) => {
+                assistant_tool_calls(message)
+                    .first()
+                    .map(|call| call.function.name.clone())
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -532,9 +535,9 @@ async fn durable_root_command_transcript_resumes_without_redispatch() {
     let lifecycle = collect_events(&mut receiver).await;
     assert!(lifecycle.iter().all(|event| !matches!(
         event,
-        SessionEvent::AgentRunFinished { .. }
-            | SessionEvent::Intermediate { .. }
-            | SessionEvent::ToolResults { .. }
+        SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished { .. })
+            | SessionEvent::Turn(TurnEvent::Intermediate { .. })
+            | SessionEvent::Turn(TurnEvent::ToolResults { .. })
     )));
 }
 
@@ -624,7 +627,7 @@ async fn review_recovery_finishes_a_durable_final_response_without_another_model
         collect_events(&mut receiver)
             .await
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnRecovered { turn_id, .. } if *turn_id == TurnId::new(405)))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Recovered { turn_id, .. }) if *turn_id == TurnId::new(405)))
     );
 }
 
@@ -633,11 +636,11 @@ async fn channel_closure_drains_both_sources_before_returning_none() {
     let (sender, mut receiver) = session_event_channel(4);
     let turn_id = TurnId::new(18);
     sender
-        .send(SessionEvent::TurnStarted {
+        .send(SessionEvent::Turn(TurnEvent::Started {
             turn_id,
             message: Message::user("question"),
             mode: SessionMode::Build,
-        })
+        }))
         .await
         .expect("lifecycle queues");
     sender.stream_updated(turn_id, Message::assistant("pending preview"));
@@ -645,13 +648,15 @@ async fn channel_closure_drains_both_sources_before_returning_none() {
 
     assert!(matches!(
         receiver.recv().await,
-        Some(SessionUpdate::Lifecycle(SessionEvent::TurnStarted { .. }))
+        Some(SessionUpdate::Lifecycle(SessionEvent::Turn(
+            TurnEvent::Started { .. }
+        )))
     ));
     assert!(matches!(
         receiver.recv().await,
         Some(SessionUpdate::Streams(SessionStreamBatch {
             root: Some(SessionStreamState {
-                message: Some(Message::Assistant { .. }),
+                message: Some(_),
                 ..
             }),
             ..
@@ -722,7 +727,7 @@ async fn question_answer_and_note_resume_the_same_turn_and_persist_as_one_tool_r
 
     let request = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            if let Some(SessionEvent::QuestionAsked { request, .. }) =
+            if let Some(SessionEvent::Question(QuestionEvent::Asked { request, .. })) =
                 recv_event(&mut receiver).await
             {
                 break request;
@@ -752,7 +757,7 @@ async fn question_answer_and_note_resume_the_same_turn_and_persist_as_one_tool_r
         loop {
             if matches!(
                 recv_event(&mut receiver).await,
-                Some(SessionEvent::TurnCompleted { .. })
+                Some(SessionEvent::Turn(TurnEvent::Completed { .. }))
             ) {
                 break;
             }
@@ -852,7 +857,7 @@ async fn cancelling_an_active_turn_stops_the_provider_and_keeps_the_engine_respo
             .expect("turn should start promptly")
             .expect("event channel remains open")
         {
-            SessionEvent::TurnStarted { turn_id, .. } => turn_id,
+            SessionEvent::Turn(TurnEvent::Started { turn_id, .. }) => turn_id,
             event => panic!("expected TurnStarted, got {event:?}"),
         };
 
@@ -862,7 +867,7 @@ async fn cancelling_an_active_turn_stops_the_provider_and_keeps_the_engine_respo
                 .await
                 .expect("dispatch marker should arrive promptly")
                 .expect("event channel");
-        if let SessionEvent::ModelCallStarted { turn_id: id, call } = event {
+        if let SessionEvent::Turn(TurnEvent::ModelCallStarted { turn_id: id, call }) = event {
             assert_eq!(id, turn_id);
             assert_eq!(call, 1);
             break;
@@ -894,7 +899,8 @@ async fn cancelling_an_active_turn_stops_the_provider_and_keeps_the_engine_respo
                 .await
                 .expect("cancellation should resolve promptly")
                 .expect("event channel remains open");
-        if matches!(event, SessionEvent::TurnCancelled { turn_id: id } if id == turn_id) {
+        if matches!(event, SessionEvent::Turn(TurnEvent::Cancelled { turn_id: id }) if id == turn_id)
+        {
             break;
         }
     }
@@ -982,17 +988,17 @@ async fn valid_submission_commits_ready_after_completion_and_projects_markdown()
     let events = collect_events(&mut receiver).await;
     let completed = events
         .iter()
-        .position(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+        .position(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
         .expect("completion");
     let ready = events
         .iter()
         .position(|event| {
             matches!(
                 event,
-                SessionEvent::PlanStateChanged {
-                    state: PlanWorkflowState::Ready { .. }
-                }
-            )
+                SessionEvent::Plan(PlanEvent::StateChanged {
+                    state
+                })
+             if matches!(state.as_ref(), PlanWorkflowState::Ready { .. }))
         })
         .expect("ready state");
     assert!(completed < ready);
@@ -1158,9 +1164,9 @@ async fn structured_file_metadata_is_emitted_but_never_enters_model_messages() {
 
     let events = collect_events(&mut receiver).await;
     let metadata = events.iter().find_map(|event| match event {
-        SessionEvent::ToolResults {
+        SessionEvent::Turn(TurnEvent::ToolResults {
             message, metadata, ..
-        } => {
+        }) => {
             let serialized = serde_json::to_string(message).expect("message");
             assert!(serialized.contains("plain model output"));
             assert!(!serialized.contains("secret/path.rs"));
@@ -1473,12 +1479,12 @@ async fn denied_launches_never_reach_the_supervisor() {
     assert!(
         events
             .iter()
-            .all(|event| !matches!(event, SessionEvent::SubtaskLaunched { .. }))
+            .all(|event| !matches!(event, SessionEvent::Subtask(SubtaskEvent::Launched { .. })))
     );
     let metadata = events
         .iter()
         .find_map(|event| match event {
-            SessionEvent::ToolResults { metadata, .. } => Some(metadata),
+            SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) => Some(metadata),
             _ => None,
         })
         .expect("tool results event");
@@ -1486,7 +1492,7 @@ async fn denied_launches_never_reach_the_supervisor() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
     );
 }
 
@@ -1546,7 +1552,7 @@ async fn supervisor_shutdown_mid_call_fails_the_launch_without_wedging() {
     let metadata = events
         .iter()
         .find_map(|event| match event {
-            SessionEvent::ToolResults { metadata, .. } => Some(metadata),
+            SessionEvent::Turn(TurnEvent::ToolResults { metadata, .. }) => Some(metadata),
             _ => None,
         })
         .expect("tool results event");
@@ -1554,7 +1560,7 @@ async fn supervisor_shutdown_mid_call_fails_the_launch_without_wedging() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
     );
 }
 
@@ -1603,14 +1609,14 @@ async fn failed_launches_are_model_visible_and_recoverable() {
     assert!(
         events
             .iter()
-            .all(|event| !matches!(event, SessionEvent::SubtaskLaunched { .. }))
+            .all(|event| !matches!(event, SessionEvent::Subtask(SubtaskEvent::Launched { .. })))
     );
     let tool_results = events
         .iter()
         .find_map(|event| match event {
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 message, metadata, ..
-            } => Some((message, metadata)),
+            }) => Some((message, metadata)),
             _ => None,
         })
         .expect("tool results event");
@@ -1622,7 +1628,7 @@ async fn failed_launches_are_model_visible_and_recoverable() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnCompleted { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Completed { .. })))
     );
 }
 
@@ -1729,7 +1735,7 @@ async fn exact_below_trigger_overrides_a_high_usage_tracker() {
             .iter()
             .any(|event| matches!(
                 event,
-                SessionEvent::ContextUsageUpdated { snapshot, .. }
+                SessionEvent::Turn(TurnEvent::ContextUsageUpdated { snapshot, .. })
                     if snapshot.source == ContextTokenSource::Exact
                         && snapshot.projected_input_tokens == Some(400)
             ))
@@ -1798,7 +1804,7 @@ async fn exact_above_trigger_overrides_a_low_usage_tracker() {
             .iter()
             .any(|event| matches!(
                 event,
-                SessionEvent::ContextUsageUpdated { snapshot, .. }
+                SessionEvent::Turn(TurnEvent::ContextUsageUpdated { snapshot, .. })
                     if snapshot.source == ContextTokenSource::Exact
                         && snapshot.projected_input_tokens == Some(400)
             ))
@@ -1892,14 +1898,14 @@ async fn opaque_replay_regression_uses_usage_delta_instead_of_legacy_wire_maximu
     let events = collect_events(&mut receiver).await;
     assert!(events.iter().any(|event| matches!(
         event,
-        SessionEvent::ContextUsageUpdated { snapshot, .. }
+        SessionEvent::Turn(TurnEvent::ContextUsageUpdated { snapshot, .. })
             if snapshot.source == ContextTokenSource::UsagePlusDelta
                 && snapshot.projected_input_tokens.is_some_and(|tokens| tokens < 244_800)
                 && snapshot.input_token_limit == 272_000
     )));
     assert!(matches!(
         events.last(),
-        Some(SessionEvent::TurnCompleted { .. })
+        Some(SessionEvent::Turn(TurnEvent::Completed { .. }))
     ));
 }
 

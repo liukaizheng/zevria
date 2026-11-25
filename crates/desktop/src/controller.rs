@@ -1,11 +1,12 @@
 //! In-process session ownership and explicit ordered replacement/shutdown.
+mod event_pump;
+mod runtime_lifecycle;
 use crate::{
     engine::{EngineRuntime, LOG_FILE, LogGuard},
     session::{InputRoute, WorkspaceModel},
 };
 use gpui_kit::{Context, Subscription, Task};
 use std::{
-    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -15,10 +16,7 @@ use zevria_host::{
     Config, RunningSession, SessionStart,
     sessions::{self, SessionSummary},
 };
-use zevria_presentation::{
-    Reduction, SessionModel,
-    blocks::{NativeHeader, ProjectionEpoch},
-};
+use zevria_presentation::Reduction;
 use zevria_session_api::{ControlCommand, ModeSelectionResult, SessionCommand, SessionUpdate};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,19 +31,6 @@ pub struct SessionRequest {
     pub workspace: PathBuf,
     pub start: SessionStart,
 }
-struct SubmittedDraft {
-    text: String,
-    generation: u64,
-    accepted: bool,
-}
-/// Attempt-backed streaming is materialized in presentation history before
-/// commit. Keep only its lifecycle here so Desktop can place the active tip.
-struct DisplayAttempt {
-    header: NativeHeader,
-    id: String,
-    revision: u64,
-    open: bool,
-}
 pub struct SessionController {
     pub phase: Phase,
     pub config: Option<Arc<Config>>,
@@ -54,20 +39,13 @@ pub struct SessionController {
     pub model: WorkspaceModel,
     pub sessions: Vec<SessionSummary>,
     pub draft: String,
-    pub recovery: Vec<String>,
     pub orchestrate: bool,
     pub cancelling: bool,
     pub show_sessions: bool,
     /// Native capturing dialogs (for example replacement confirmation).
     pub capturing_dialog: bool,
-    /// Display-only partials. Never sent to the host or persisted.
-    pub unsaved_blocks: HashSet<(
-        zevria_presentation::blocks::ProjectionEpoch,
-        zevria_presentation::blocks::PresentationBlockId,
-    )>,
-    display_attempts: HashMap<ProjectionEpoch, DisplayAttempt>,
     draft_generation: u64,
-    submitted: Option<SubmittedDraft>,
+    pub draft_slot: zevria_presentation::draft::DraftSlot<String>,
     running: Option<RunningSession>,
     command: Option<tokio::sync::mpsc::UnboundedSender<SessionCommand>>,
     pending: Option<SessionRequest>,
@@ -111,15 +89,12 @@ impl SessionController {
             model: WorkspaceModel::default(),
             sessions: Vec::new(),
             draft: String::new(),
-            recovery: Vec::new(),
             orchestrate: false,
             cancelling: false,
             show_sessions: false,
             capturing_dialog: false,
-            unsaved_blocks: HashSet::new(),
-            display_attempts: HashMap::new(),
             draft_generation: 0,
-            submitted: None,
+            draft_slot: Default::default(),
             running: None,
             command: None,
             pending: None,
@@ -130,636 +105,6 @@ impl SessionController {
             tick: None,
             catalog: None,
             _quit: quit,
-        }
-    }
-    pub fn start_initial(&mut self, continue_session: bool, cx: &mut Context<Self>) {
-        let Some(workspace) = self.workspace.clone() else {
-            return;
-        };
-        if self.config.is_none() {
-            return;
-        }
-        self.phase = Phase::Starting;
-        cx.notify();
-        let config = self.config.as_ref().unwrap().clone();
-        let job = cx.global::<EngineRuntime>().spawn(async move {
-            let (start, notice) = if continue_session {
-                match sessions::latest(&workspace)? {
-                    Some(path) => (SessionStart::Resume(path), None),
-                    None => (
-                        SessionStart::New {
-                            inherited_models: None,
-                        },
-                        Some("No previous session was found; started a new session.".to_string()),
-                    ),
-                }
-            } else {
-                (
-                    SessionStart::New {
-                        inherited_models: None,
-                    },
-                    None,
-                )
-            };
-            Self::open(config, workspace, start, notice).await
-        });
-        self.await_start(job, cx);
-    }
-    async fn open(
-        config: Arc<Config>,
-        workspace: PathBuf,
-        start: SessionStart,
-        notice: Option<String>,
-    ) -> anyhow::Result<(RunningSession, WorkspaceModel)> {
-        let zevria_host::StartedSession { running, restored } =
-            zevria_host::start_session(&config, &workspace, start).await?;
-        // Projection and restoration I/O never run on the GPUI main thread.
-        let model = tokio::task::spawn_blocking(move || WorkspaceModel::restore(restored)).await;
-        match model {
-            Ok(Ok(mut model)) => {
-                if let Some(notice) = notice {
-                    model.root.conversation.push_error(notice);
-                }
-                Ok((running, model))
-            }
-            outcome => {
-                let _ = running.shutdown().await;
-                match outcome {
-                    Ok(Err(error)) => Err(error),
-                    Err(error) => Err(error.into()),
-                    _ => unreachable!(),
-                }
-            }
-        }
-    }
-    fn await_start(
-        &mut self,
-        job: tokio::task::JoinHandle<anyhow::Result<(RunningSession, WorkspaceModel)>>,
-        cx: &mut Context<Self>,
-    ) {
-        self.transition = Some(cx.spawn(async move |owner, cx| {
-            let result = job.await;
-            // If the window/controller disappears, still shut a completed engine
-            // down instead of detaching it with live supervisor ownership.
-            let mut ready = Some(result);
-            let installed = owner.update(cx, |this, cx| {
-                match ready.take().unwrap() {
-                    Ok(Ok((running, model))) => {
-                        this.running = Some(running);
-                        this.model = model;
-                        this.unsaved_blocks.clear();
-                        this.display_attempts.clear();
-                        if this.quit_requested
-                            || this.pending.is_some()
-                            || this.phase == Phase::Stopping
-                        {
-                            this.stop(cx);
-                        } else {
-                            this.phase = Phase::Live;
-                            this.attach(cx);
-                            this.refresh_sessions(cx);
-                        }
-                    }
-                    Ok(Err(error)) => this.start_failed(format!("{error:#}"), cx),
-                    Err(error) => {
-                        this.start_failed(format!("Session startup task failed: {error}"), cx)
-                    }
-                }
-                cx.notify();
-            });
-            if installed.is_err()
-                && let Some(Ok(Ok((running, _)))) = ready.take()
-            {
-                let engine = cx.update(|cx| cx.global::<EngineRuntime>().clone());
-                engine.spawn(running.shutdown());
-            }
-        }));
-    }
-    fn start_failed(&mut self, error: String, cx: &mut Context<Self>) {
-        if self.quit_requested {
-            self.finish_quit(cx);
-        } else if let Some(next) = self.pending.take() {
-            self.launch(next, cx);
-        } else {
-            self.phase = Phase::Failed(error);
-        }
-    }
-    fn launch(&mut self, request: SessionRequest, cx: &mut Context<Self>) {
-        let Some(config) = self.config.clone() else {
-            return;
-        };
-        self.workspace = Some(request.workspace.clone());
-        self.catalog = None;
-        self.sessions.clear();
-        self.show_sessions = false;
-        self.model = WorkspaceModel::default();
-        self.recovery.clear();
-        self.terminal_error = None;
-        self.phase = Phase::Starting;
-        self.draft.clear();
-        self.draft_generation = 0;
-        self.submitted = None;
-        self.cancelling = false;
-        self.capturing_dialog = false;
-        self.orchestrate = false;
-        let job = cx.global::<EngineRuntime>().spawn(Self::open(
-            config,
-            request.workspace,
-            request.start,
-            None,
-        ));
-        self.await_start(job, cx);
-        cx.notify();
-    }
-    pub fn replace(&mut self, request: SessionRequest, cx: &mut Context<Self>) {
-        if self.quit_requested || self.model.models.is_open() {
-            return;
-        }
-        match self.phase {
-            Phase::Starting => {
-                self.pending = Some(request);
-                self.phase = Phase::Stopping;
-            }
-            Phase::Stopping => self.pending = Some(request),
-            _ if self.running.is_some() => {
-                self.pending = Some(request);
-                self.stop(cx);
-            }
-            _ => self.launch(request, cx),
-        }
-        cx.notify();
-    }
-    pub fn new_session(&mut self, cx: &mut Context<Self>) {
-        if let Some(workspace) = self.workspace.clone() {
-            let inherited_models = if self.model.session_id.is_empty() {
-                None
-            } else {
-                match self.model.root.session_models() {
-                    Ok(models) => Some(models),
-                    Err(error) => {
-                        self.model
-                            .root
-                            .conversation
-                            .push_error(format!("Cannot replace session: {error:#}"));
-                        cx.notify();
-                        return;
-                    }
-                }
-            };
-            self.replace(
-                SessionRequest {
-                    workspace,
-                    start: SessionStart::New { inherited_models },
-                },
-                cx,
-            );
-        }
-    }
-    pub fn quit(&mut self, cx: &mut Context<Self>) {
-        self.quit_requested = true;
-        self.pending = None;
-        if self.phase == Phase::Starting {
-            self.phase = Phase::Stopping;
-        } else if self.phase != Phase::Stopping {
-            self.stop(cx);
-        }
-        cx.notify();
-    }
-    fn stop(&mut self, cx: &mut Context<Self>) {
-        // Drop the sole receiver first, unblocking bounded lifecycle sends.
-        self.pump.take();
-        self.tick.take();
-        self.command.take();
-        if self.model.root.pending_prompt().is_some() {
-            let reduction = self.model.disconnected();
-            self.apply_reduction(reduction);
-        }
-        self.model.models.reset();
-        self.model.root.session.finish_model_management();
-        let Some(running) = self.running.take() else {
-            if self.quit_requested {
-                self.finish_quit(cx);
-            } else if let Some(error) = self.terminal_error.take() {
-                self.phase = Phase::Failed(error);
-            }
-            return;
-        };
-        self.phase = Phase::Stopping;
-        let job = cx.global::<EngineRuntime>().spawn(running.shutdown());
-        self.transition = Some(cx.spawn(async move |owner, cx| {
-            let result = job.await;
-            let _ = owner.update(cx, |this, cx| {
-                if let Err(error) = &result {
-                    tracing::error!("shutdown task: {error}");
-                }
-                if let Ok(Err(error)) = &result {
-                    tracing::error!("session shutdown: {error:#}");
-                }
-                let shutdown_error = match result {
-                    Ok(Ok(())) => None,
-                    Ok(Err(error)) => Some(format!("Session shutdown failed: {error:#}")),
-                    Err(error) => Some(format!("Shutdown task failed: {error}")),
-                };
-                if this.quit_requested {
-                    this.finish_quit(cx);
-                } else if let Some(error) = shutdown_error {
-                    this.pending = None;
-                    this.phase = Phase::Failed(error);
-                } else if let Some(next) = this.pending.take() {
-                    this.launch(next, cx);
-                } else if let Some(error) = this.terminal_error.take() {
-                    this.phase = Phase::Failed(error);
-                } else {
-                    this.phase = Phase::Idle;
-                }
-                cx.notify();
-            });
-        }));
-    }
-    fn finish_quit(&mut self, cx: &mut Context<Self>) {
-        if cx.has_global::<LogGuard>() {
-            cx.global_mut::<LogGuard>().0.take();
-        }
-        cx.quit();
-    }
-    fn attach(&mut self, cx: &mut Context<Self>) {
-        let running = self.running.as_mut().expect("live running session");
-        self.command = Some(running.command_sender());
-        let mut receiver = running.take_event_receiver().expect("sole receiver");
-        let mut exits = running.take_exit_receiver().expect("sole exit receiver");
-        self.pump = Some(cx.spawn(async move |owner, cx| {
-            let mut ready = None;
-            loop {
-                // Consume any ready acceptance before settling a disconnected runtime.
-                let next = if let Some(update) = ready.take() {
-                    Ok(update)
-                } else {
-                    tokio::select! {
-                        biased;
-                        update = receiver.recv() => update.ok_or_else(|| exits.try_recv().ok()),
-                        exit = exits.recv() => Err(exit),
-                    }
-                };
-                let first = match next {
-                    Ok(update) => update,
-                    Err(exit) => {
-                        let detail = exit.map_or_else(
-                            || "Session runtime disconnected".into(),
-                            |exit| {
-                                format!(
-                                    "{} stopped{}",
-                                    exit.component,
-                                    exit.error.map_or_else(String::new, |e| format!(": {e}"))
-                                )
-                            },
-                        );
-                        let _ = owner.update(cx, |this, cx| this.runtime_disconnected(detail, cx));
-                        break;
-                    }
-                };
-                let mut batch = Vec::with_capacity(64);
-                batch.push(first);
-                for _ in 1..64 {
-                    match receiver.try_recv() {
-                        Ok(update) => batch.push(update),
-                        Err(_) => break,
-                    }
-                }
-                let saturated = batch.len() == 64;
-                let keep_going = owner.update(cx, |this, cx| {
-                    let mut fresh = None;
-                    for update in batch {
-                        if let Some(handoff) = this.apply(update, cx) {
-                            fresh = Some(handoff);
-                            break;
-                        }
-                    }
-                    cx.notify();
-                    if let Some(handoff) = fresh {
-                        let inherited_models = match this.model.root.session_models() {
-                            Ok(models) => Some(models),
-                            Err(error) => {
-                                this.model.root.conversation.push_error(format!(
-                                    "Cannot create fresh Plan session: {error:#}"
-                                ));
-                                cx.notify();
-                                return true;
-                            }
-                        };
-                        let workspace = this.workspace.clone().expect("live workspace");
-                        let weak = cx.weak_entity();
-                        cx.defer(move |cx| {
-                            let _ = weak.update(cx, |this, cx| {
-                                this.replace(
-                                    SessionRequest {
-                                        workspace,
-                                        start: SessionStart::FromPlan {
-                                            handoff,
-                                            inherited_models,
-                                        },
-                                    },
-                                    cx,
-                                )
-                            });
-                        });
-                        false
-                    } else {
-                        true
-                    }
-                });
-                if !matches!(keep_going, Ok(true)) {
-                    break;
-                }
-                if saturated {
-                    // Pace sustained lifecycle floods.
-                    cx.background_executor()
-                        .timer(Duration::from_millis(1))
-                        .await;
-                } else if let Ok(update) = receiver.try_recv() {
-                    // A watch stream can be continuously ready with only one
-                    // update per batch. Let GPUI paint and handle input before
-                    // synchronizing another frame, without delaying with a timer.
-                    ready = Some(update);
-                    tokio::task::yield_now().await;
-                }
-            }
-        }));
-    }
-    fn runtime_disconnected(&mut self, detail: String, cx: &mut Context<Self>) {
-        let reduction = self.model.disconnected();
-        self.apply_reduction(reduction);
-        self.terminal_error = Some(detail);
-        self.phase = Phase::Stopping;
-        let weak = cx.weak_entity();
-        cx.defer(move |cx| {
-            let _ = weak.update(cx, |this, cx| {
-                this.stop(cx);
-                cx.notify();
-            });
-        });
-        cx.notify();
-    }
-    fn apply(
-        &mut self,
-        update: SessionUpdate,
-        cx: &mut Context<Self>,
-    ) -> Option<zevria_workflow::PlanHandoff> {
-        self.model.observe_clock(Instant::now());
-        self.observe_display_attempts(&update);
-        if let SessionUpdate::Lifecycle(event) = &update {
-            self.retain_unsaved_partial(event);
-        }
-        let reduction = self.model.apply(update);
-        self.flush_job_commands(cx);
-        self.flush_mcp_commands(cx);
-        self.ensure_tick(cx);
-        if let Some(root) = reduction.root {
-            self.apply_reduction(root);
-        }
-        if !self.model.root.is_busy() {
-            self.cancelling = false;
-            if let Some(submitted) = self.submitted.take()
-                && self.draft_generation == submitted.generation
-                && self.draft == submitted.text
-            {
-                self.draft.clear();
-                self.draft_generation += 1;
-            }
-        }
-        if reduction.fresh.is_none() {
-            self.dispatch_job_continuation(cx);
-        }
-        reduction.fresh
-    }
-    pub(crate) fn live_attempt_header(&self, pane: &SessionModel) -> Option<NativeHeader> {
-        let observed = self.display_attempts.get(&pane.conversation.epoch())?;
-        (observed.open
-            && pane.session.has_turn_work()
-            && pane.session.call_header() == Some(observed.header))
-        .then_some(observed.header)
-    }
-
-    fn observe_display_attempts(&mut self, update: &SessionUpdate) {
-        use zevria_session_api::SessionEvent as Event;
-        let child = |id| {
-            self.model
-                .children
-                .iter()
-                .find(|c| &c.id == id)
-                .map(|c| &c.model)
-        };
-        let attempts = &mut self.display_attempts;
-        let mut observe =
-            |pane: &SessionModel, turn, attempt: Option<&zevria_content::ResponseAttempt>| {
-                let Some(header) = pane
-                    .session
-                    .call_header()
-                    .filter(|_| pane.session.accepts_active(turn))
-                else {
-                    return;
-                };
-                let epoch = pane.conversation.epoch();
-                if let Some(attempt) = attempt {
-                    if let Some(prior) = attempts
-                        .get_mut(&epoch)
-                        .filter(|prior| prior.id == attempt.id)
-                    {
-                        if prior.header == header && attempt.revision > prior.revision {
-                            prior.revision = attempt.revision;
-                            prior.open = !attempt.outcome.is_terminal();
-                        }
-                    } else if !attempt.outcome.is_terminal()
-                        && attempt.has_display()
-                        && attempt.validate().is_ok()
-                    {
-                        attempts.insert(
-                            epoch,
-                            DisplayAttempt {
-                                header,
-                                id: attempt.id.clone(),
-                                revision: attempt.revision,
-                                open: true,
-                            },
-                        );
-                    }
-                } else if let Some(prior) = attempts.get_mut(&epoch) {
-                    prior.open = false;
-                }
-            };
-        match update {
-            SessionUpdate::Streams(batch) => {
-                if let Some(stream) = &batch.root {
-                    observe(&self.model.root, stream.turn_id, stream.attempt.as_ref());
-                }
-                for (id, stream) in &batch.subtasks {
-                    if let Some(pane) = child(id) {
-                        observe(pane, stream.turn_id, stream.attempt.as_ref());
-                    }
-                }
-            }
-            SessionUpdate::Lifecycle(event) => {
-                let (pane, event) = if let Event::SubtaskSession { id, event } = event {
-                    let Some(pane) = child(id) else { return };
-                    (pane, event.as_ref())
-                } else {
-                    (&self.model.root, event)
-                };
-                match event {
-                    Event::AssistantStreamUpdated { turn_id, snapshot } => {
-                        observe(pane, *turn_id, snapshot.attempt.as_ref())
-                    }
-                    Event::ResponseAttemptUpdated { turn_id, attempt } => {
-                        observe(pane, *turn_id, Some(attempt))
-                    }
-                    Event::StreamCleared { turn_id }
-                    | Event::Intermediate { turn_id, .. }
-                    | Event::TurnCompleted { turn_id, .. }
-                    | Event::TurnCancelled { turn_id }
-                    | Event::TurnFailed { turn_id, .. } => observe(pane, *turn_id, None),
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    fn retain_unsaved_partial(&mut self, event: &zevria_session_api::SessionEvent) {
-        use zevria_presentation::{
-            ConversationTail,
-            conversation::{HistoryEntry, ToolCallStatus},
-        };
-        use zevria_session_api::SessionEvent;
-        let (pane, event) = if let SessionEvent::SubtaskSession { id, event } = event {
-            let Some(child) = self.model.children.iter_mut().find(|child| &child.id == id) else {
-                return;
-            };
-            (&mut child.model, event.as_ref())
-        } else {
-            (&mut self.model.root, event)
-        };
-        let turn_id = match event {
-            SessionEvent::TurnCancelled { turn_id } | SessionEvent::TurnFailed { turn_id, .. } => {
-                *turn_id
-            }
-            _ => return,
-        };
-        if !pane.accepts_terminal(turn_id) {
-            return;
-        }
-        // Attempt-backed output lives in history, not this tail, and is already durable.
-        let ConversationTail::Streaming { message, .. } = pane.tail(Instant::now()) else {
-            return;
-        };
-        let Some(HistoryEntry::Conversation(preview)) =
-            HistoryEntry::from_message(message.clone(), ToolCallStatus::Finished)
-        else {
-            return;
-        };
-        if !preview
-            .blocks
-            .iter()
-            .any(|block| block.visible(false) && !block.primary_copy().trim().is_empty())
-        {
-            return;
-        }
-        let message = message.clone();
-        let before = pane.conversation.history().len();
-        pane.conversation.commit_response(
-            message,
-            None,
-            ToolCallStatus::Finished,
-            pane.session.call_header(),
-        );
-        let epoch = pane.conversation.epoch();
-        for entry in &pane.conversation.history()[before..] {
-            if let HistoryEntry::Conversation(entry) = entry {
-                self.unsaved_blocks
-                    .extend(entry.blocks.iter().map(|block| (epoch, block.id)));
-            }
-        }
-    }
-    fn dispatch_job_continuation(&mut self, cx: &mut Context<Self>) {
-        if self.phase == Phase::Live
-            && self.draft.is_empty()
-            && self.submitted.is_none()
-            && self.model.question.is_none()
-            && let Some(command) = self.model.root.continue_after_jobs()
-        {
-            self.send(SessionCommand::Turn(command), cx);
-        }
-    }
-    fn apply_reduction(&mut self, reduction: Reduction) {
-        if reduction.accepted == Some(zevria_presentation::session::OperationKind::Submit) {
-            self.orchestrate = false;
-        }
-        if reduction.accepted.is_some_and(|kind| {
-            !matches!(
-                kind,
-                zevria_presentation::session::OperationKind::JobContinuation
-                    | zevria_presentation::session::OperationKind::AuthoritativeJobContinuation
-            )
-        }) && let Some(submitted) = &mut self.submitted
-        {
-            if self.draft_generation == submitted.generation && self.draft == submitted.text {
-                self.draft.clear();
-                self.draft_generation += 1;
-                // The empty replacement is a separate editor identity. User
-                // editing and undoing cannot revive this restoration token.
-                submitted.generation = self.draft_generation;
-            }
-            submitted.accepted = true;
-        }
-        if let Some((kind, settlement)) = reduction.settled
-            && !matches!(
-                kind,
-                zevria_presentation::session::OperationKind::JobContinuation
-                    | zevria_presentation::session::OperationKind::AuthoritativeJobContinuation
-            )
-        {
-            self.cancelling = false;
-            if let Some(submitted) = self.submitted.take()
-                && settlement.restores_draft()
-            {
-                let unchanged = self.draft_generation == submitted.generation;
-                if unchanged
-                    && (if submitted.accepted {
-                        self.draft.is_empty()
-                    } else {
-                        self.draft == submitted.text
-                    })
-                {
-                    if self.draft != submitted.text {
-                        self.draft = submitted.text;
-                        self.draft_generation += 1;
-                    }
-                } else {
-                    self.recovery.push(submitted.text);
-                }
-            }
-        }
-        if let Some(mode) = reduction.mode_selection {
-            if matches!(
-                mode.result,
-                ModeSelectionResult::Accepted {
-                    mode: zevria_foundation::SessionMode::Plan,
-                    ..
-                }
-            ) {
-                self.orchestrate = false;
-            }
-            if let Some(submitted) = self.submitted.take() {
-                let unchanged =
-                    self.draft_generation == submitted.generation && self.draft == submitted.text;
-                match mode.result {
-                    ModeSelectionResult::Accepted { .. } if unchanged => {
-                        self.draft.clear();
-                        self.draft_generation += 1;
-                    }
-                    ModeSelectionResult::Rejected { .. } if !unchanged => {
-                        self.recovery.push(submitted.text)
-                    }
-                    _ => {}
-                }
-            }
         }
     }
     /// An actual editor change, including undo to identical text, retires the
@@ -778,10 +123,11 @@ impl SessionController {
     }
     fn clock_required(&self) -> bool {
         self.model.root.is_busy()
-            || self.model.jobs.is_open()
+            || self.model.root.jobs_inspector().is_open()
             || self
                 .model
-                .jobs
+                .root
+                .jobs_inspector()
                 .jobs()
                 .iter()
                 .any(zevria_presentation::jobs::JobsInspector::can_terminate)
@@ -798,7 +144,7 @@ impl SessionController {
                 let busy = owner.update(cx, |this, cx| {
                     let now = Instant::now();
                     this.model.observe_clock(now);
-                    this.model.jobs.tick(now);
+                    this.model.root.jobs_inspector_mut().tick(now);
                     this.flush_job_commands(cx);
                     cx.notify();
                     if this.clock_required() {
@@ -836,13 +182,13 @@ impl SessionController {
         if self.capturing_dialog {
             return Err("Close the current dialog before changing models.");
         }
-        if self.submitted.is_some() || self.cancelling {
+        if self.draft_slot.has_pending() || self.cancelling {
             return Err("Wait for the pending operation before changing models.");
         }
         self.model.model_selection_available()
     }
     fn flush_model_commands(&mut self, cx: &mut Context<Self>) {
-        while let Some(command) = self.model.models.commands.pop_front() {
+        while let Some(command) = self.model.controls.models.commands.pop_front() {
             self.send(command, cx);
             if self.phase != Phase::Live {
                 break;
@@ -858,33 +204,33 @@ impl SessionController {
             return false;
         }
         self.flush_model_commands(cx);
-        self.phase == Phase::Live && self.model.models.is_open()
+        self.phase == Phase::Live && self.model.controls.models.is_open()
     }
     pub fn select_model(&mut self, profile: usize, cx: &mut Context<Self>) {
-        self.model.models.choose_model(profile);
+        self.model.controls.models.choose_model(profile);
         cx.notify();
     }
     pub fn select_model_effort(&mut self, effort: usize, cx: &mut Context<Self>) {
-        self.model.models.choose_effort(effort);
+        self.model.controls.models.choose_effort(effort);
         cx.notify();
     }
     pub fn apply_model_selection(&mut self, cx: &mut Context<Self>) {
-        if self.phase == Phase::Live && self.model.models.apply() {
+        if self.phase == Phase::Live && self.model.controls.models.apply() {
             self.flush_model_commands(cx);
         }
     }
     pub fn confirm_model_conversion(&mut self, cx: &mut Context<Self>) {
-        if self.phase == Phase::Live && self.model.models.confirm_conversion() {
+        if self.phase == Phase::Live && self.model.controls.models.confirm_conversion() {
             self.flush_model_commands(cx);
         }
     }
     pub fn cancel_model_selection(&mut self, cx: &mut Context<Self>) {
-        self.model.models.cancel();
+        self.model.controls.models.cancel();
         self.flush_model_commands(cx);
     }
     pub fn flush_job_commands(&mut self, cx: &mut Context<Self>) {
         while self.phase == Phase::Live {
-            let Some(command) = self.model.jobs.commands.pop_front() else {
+            let Some(command) = self.model.root.jobs_inspector_mut().commands.pop_front() else {
                 break;
             };
             self.send(command, cx);
@@ -894,11 +240,11 @@ impl SessionController {
         self.phase == Phase::Live
             && self.model.root.workflow.dialog().is_none()
             && !self.capturing_dialog
-            && !self.model.models.is_open()
+            && !self.model.controls.models.is_open()
     }
     pub fn flush_mcp_commands(&mut self, cx: &mut Context<Self>) {
         while self.phase == Phase::Live {
-            let Some(command) = self.model.mcp.commands.pop_front() else {
+            let Some(command) = self.model.controls.mcp.commands.pop_front() else {
                 break;
             };
             self.send(command, cx);
@@ -907,12 +253,12 @@ impl SessionController {
     }
 
     fn open_mcp(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.can_open_session_panel() || self.model.selected_child.is_some() {
+        if !self.can_open_session_panel() || self.model.controls.selected_child.is_some() {
             return false;
         }
-        self.model.jobs.close();
-        self.model.subtasks_open = false;
-        self.model.mcp.show();
+        self.model.root.jobs_inspector_mut().close();
+        self.model.controls.subtasks_open = false;
+        self.model.controls.mcp.show();
         self.flush_mcp_commands(cx);
         true
     }
@@ -922,16 +268,21 @@ impl SessionController {
         arguments: std::collections::BTreeMap<String, String>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(draft) = &mut self.model.mcp.draft {
+        if let Some(draft) = &mut self.model.controls.mcp.draft {
             draft.values = arguments;
         }
         if self.model.root.ready_revision_target().is_some() {
-            self.model.mcp.notice = Some("Finish reviewing the current Plan first.".into());
+            self.model.controls.mcp.notice =
+                Some("Finish reviewing the current Plan first.".into());
             cx.notify();
             return;
         }
         let mode = self.model.root.next_mode();
-        if let Some(command) = self.model.mcp.run_prompt(mode, self.model.root.is_busy())
+        if let Some(command) = self
+            .model
+            .controls
+            .mcp
+            .run_prompt(mode, self.model.root.is_busy())
             && self.model.root.begin_mcp_prompt(mode)
         {
             self.send(SessionCommand::Turn(command), cx);
@@ -940,21 +291,21 @@ impl SessionController {
     }
 
     fn open_jobs(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.can_open_session_panel() || self.model.selected_child.is_some() {
+        if !self.can_open_session_panel() || self.model.controls.selected_child.is_some() {
             return false;
         }
-        self.model.subtasks_open = false;
-        self.model.mcp.close();
-        self.model.jobs.show();
+        self.model.controls.subtasks_open = false;
+        self.model.controls.mcp.close();
+        self.model.root.jobs_inspector_mut().show();
         self.model.select_default_job();
         self.flush_job_commands(cx);
         self.ensure_tick(cx);
         cx.notify();
-        self.model.jobs.is_open()
+        self.model.root.jobs_inspector().is_open()
     }
     pub fn toggle_jobs(&mut self, cx: &mut Context<Self>) {
         if self.model.jobs_panel_visible() {
-            self.model.jobs.close();
+            self.model.root.jobs_inspector_mut().close();
             cx.notify();
         } else {
             self.open_jobs(cx);
@@ -964,27 +315,27 @@ impl SessionController {
         if !self.can_open_session_panel() {
             return false;
         }
-        self.model.jobs.close();
-        self.model.mcp.close();
-        self.model.subtasks_open = true;
+        self.model.root.jobs_inspector_mut().close();
+        self.model.controls.mcp.close();
+        self.model.controls.subtasks_open = true;
         cx.notify();
         true
     }
     pub fn toggle_subtasks(&mut self, cx: &mut Context<Self>) {
-        if self.model.subtasks_open {
-            self.model.subtasks_open = false;
+        if self.model.controls.subtasks_open {
+            self.model.controls.subtasks_open = false;
             cx.notify();
         } else {
             self.open_subtasks(cx);
         }
     }
     pub fn select_pane(&mut self, child: Option<SubtaskId>, cx: &mut Context<Self>) {
-        self.model.selected_child = child;
+        self.model.controls.selected_child = child;
         cx.notify();
     }
     pub fn inspect_job(&mut self, id: CommandJobId, cx: &mut Context<Self>) {
         if self.open_jobs(cx) {
-            self.model.jobs.inspect(id);
+            self.model.root.jobs_inspector_mut().inspect(id);
             self.flush_job_commands(cx);
             cx.notify();
         }
@@ -1000,9 +351,9 @@ impl SessionController {
             return;
         }
         let notice = if terminate {
-            self.model.jobs.terminate(id)
+            self.model.root.jobs_inspector_mut().terminate(id)
         } else {
-            self.model.jobs.move_to_background(id)
+            self.model.root.jobs_inspector_mut().move_to_background(id)
         };
         if let Some(notice) = notice {
             self.model.root.conversation.push_error(notice);
@@ -1012,20 +363,17 @@ impl SessionController {
     }
     pub fn submit(&mut self, cx: &mut Context<Self>) {
         if self.phase != Phase::Live
-            || self.model.selected_child.is_some()
-            || self.model.question.is_some()
+            || self.model.controls.selected_child.is_some()
+            || self.model.controls.question.is_some()
             || self.capturing_dialog
-            || self.model.models.is_open()
+            || self.model.controls.models.is_open()
         {
             return;
         }
         match self.model.route_input(&self.draft, self.orchestrate) {
             InputRoute::Command(command) | InputRoute::McpPrompt(command) => {
-                self.submitted = Some(SubmittedDraft {
-                    text: self.draft.clone(),
-                    generation: self.draft_generation,
-                    accepted: false,
-                });
+                self.draft_slot
+                    .stage(self.draft.clone(), self.draft_generation);
                 self.send(*command, cx);
             }
             InputRoute::Models(scope) => {
@@ -1066,7 +414,7 @@ impl SessionController {
         cx.notify();
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
-        if self.model.models.is_open() {
+        if self.model.controls.models.is_open() {
             self.cancel_model_selection(cx);
             return;
         }
@@ -1079,7 +427,10 @@ impl SessionController {
         }
     }
     pub fn select_mode(&mut self, mode: zevria_foundation::SessionMode, cx: &mut Context<Self>) {
-        if self.phase != Phase::Live || self.model.models.is_open() || self.capturing_dialog {
+        if self.phase != Phase::Live
+            || self.model.controls.models.is_open()
+            || self.capturing_dialog
+        {
             return;
         }
         if let Some(command) = self.model.root.select_mode(mode) {
@@ -1091,7 +442,7 @@ impl SessionController {
         decision: zevria_workflow::PlanDecision,
         cx: &mut Context<Self>,
     ) {
-        if self.phase != Phase::Live || self.model.models.is_open() {
+        if self.phase != Phase::Live || self.model.controls.models.is_open() {
             return;
         }
         if let Some(artifact) = self.model.root.workflow.dialog_artifact() {
@@ -1105,7 +456,7 @@ impl SessionController {
         if self.phase != Phase::Live {
             return;
         }
-        let Some(form) = self.model.question.as_mut() else {
+        let Some(form) = self.model.controls.question.as_mut() else {
             return;
         };
         if form.pending {
@@ -1198,12 +549,8 @@ impl SessionController {
         this
     }
     #[cfg(any(test, feature = "fixtures"))]
-    pub fn fixture_event(
-        &mut self,
-        event: zevria_session_api::SessionEvent,
-        cx: &mut Context<Self>,
-    ) {
-        self.apply(SessionUpdate::Lifecycle(event), cx);
+    pub fn fixture_event(&mut self, event: impl Into<SessionUpdate>, cx: &mut Context<Self>) {
+        self.apply(event.into(), cx);
         cx.notify();
     }
 }

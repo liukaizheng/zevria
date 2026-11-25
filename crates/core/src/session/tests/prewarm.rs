@@ -1,5 +1,6 @@
 //! Idle preparation shares the engine task and loses to accepted commands.
 use super::*;
+use zevria_session_api::ManagementEvent;
 
 struct PrewarmGuard {
     active: Arc<AtomicUsize>,
@@ -85,7 +86,7 @@ async fn pending_prewarm_yields_to_mode_turn_and_shutdown_without_detached_work(
             mode: SessionMode::Plan,
         },
     ));
-    session.until(|event| matches!(event, SessionEvent::ModeResult { request_id, .. } if request_id == "plan")).await;
+    session.until(|event| matches!(event, SessionEvent::Manage(ManagementEvent::ModeResult { request_id, .. }) if request_id == "plan")).await;
     assert_eq!(
         tokio::time::timeout(TIMEOUT, idle.recv()).await.unwrap(),
         Some(ModelRole::Plan)

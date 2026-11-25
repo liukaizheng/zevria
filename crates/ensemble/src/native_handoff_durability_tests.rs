@@ -51,7 +51,7 @@ async fn native_feedback_recovers_from_missing_payload_and_retains_last_success(
                 .unwrap();
         }
         tokio::time::timeout(Duration::from_secs(5), async {
-            while state.settled_generation < generation {
+            while state.inputs.settled_generation < generation {
                 let update = execution.updates.recv().await.unwrap();
                 state.apply(&update.event).unwrap();
             }
@@ -61,7 +61,7 @@ async fn native_feedback_recovers_from_missing_payload_and_retains_last_success(
             panic!("retry generation {generation}: native round did not settle: {error}; {state:?}")
         });
         assert!(
-            state.confirmation.is_none(),
+            state.proposals.confirmation.is_none(),
             "capturing is not confirmation"
         );
         match generation {
@@ -69,7 +69,7 @@ async fn native_feedback_recovers_from_missing_payload_and_retains_last_success(
                 assert!(state.eligible_snapshot().is_none());
                 assert!(
                     state
-                        .diagnostic
+                        .diagnostic()
                         .as_deref()
                         .is_some_and(|message| message.contains("no eligible completed artifact")),
                     "retry generation {generation}: {state:?}"
@@ -84,7 +84,7 @@ async fn native_feedback_recovers_from_missing_payload_and_retains_last_success(
                 assert_eq!(state.eligible_snapshot(), retained.as_ref());
                 assert!(
                     state
-                        .diagnostic
+                        .diagnostic()
                         .as_deref()
                         .is_some_and(|message| message.contains("no eligible completed artifact")),
                     "retry generation {generation}: {state:?}"
@@ -154,7 +154,7 @@ async fn native_cancellation_after_rejection_never_approves_or_captures() {
     let (events, mut receiver) = session_event_channel(256);
     let cancel = tokio::spawn(async move {
         while let Some(update) = receiver.recv().await {
-            if matches!(update, zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::AgentRunUpdated { event: AgentRunEvent::Permission { ref decision, .. }, .. }) if decision == "reject_once")
+            if matches!(update, zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated { event, .. }))  if matches!(event.as_ref(), AgentRunEvent::Permission { decision, .. } if decision == "reject_once"))
             {
                 cancellation.cancel();
                 return;
@@ -285,11 +285,11 @@ async fn native_permission_and_capture_sync_failures_cannot_complete_or_publish_
         while let Ok(update) = receiver.try_recv() {
             assert!(!matches!(
                 update,
-                zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::AgentRunUpdated {
-                    event: AgentRunEvent::NativePlanCaptured { .. },
+                zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
+                    event,
                     ..
-                })
-            ));
+                }))
+             if matches!(event.as_ref(), AgentRunEvent::NativePlanCaptured { .. })));
         }
         drop(guard);
         assert!(handoff.capture_error().is_some());
@@ -328,11 +328,11 @@ async fn native_capture_waits_for_durability_before_signalling_or_exposing_evide
     while let Ok(update) = receiver.try_recv() {
         assert!(!matches!(
             update,
-            zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::AgentRunUpdated {
-                event: AgentRunEvent::NativePlanCaptured { .. },
+            zevria_session_api::SessionUpdate::Lifecycle(SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
+                event,
                 ..
-            })
-        ));
+            }))
+         if matches!(event.as_ref(), AgentRunEvent::NativePlanCaptured { .. })));
     }
     release.send(()).unwrap();
     work.await.unwrap().unwrap();

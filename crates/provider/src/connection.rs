@@ -187,7 +187,7 @@ pub(crate) struct ContinuationState {
     pub(crate) socket_generation: u64,
     pub(crate) response_id: String,
     pub(crate) request_properties: std::sync::Arc<serde_json::Value>,
-    pub(crate) lineage: crate::turn::ContinuationLineage,
+    pub(crate) lineage: crate::responses::ContinuationLineage,
 }
 
 /// Everything needed to (re)establish the OpenAI Responses websocket. The base
@@ -368,12 +368,61 @@ pub(crate) enum HttpFallback {
     Provisional,
 }
 
+/// The parked socket state is kept across a provisional HTTP fallback, but
+/// only HTTP can carry a fallback classification.
+#[derive(Clone, Copy)]
+enum ResponsesRoute {
+    WebSocket,
+    Http { fallback: Option<HttpFallback> },
+}
+
+pub(crate) struct ResponsesTransport {
+    pub(crate) ws: OpenAiParkedWebSocket,
+    route: ResponsesRoute,
+}
+
+impl ResponsesTransport {
+    pub(crate) fn new(ws: OpenAiParkedWebSocket, transport: OpenAiTransport) -> Self {
+        let route = match transport {
+            OpenAiTransport::WebSocket => ResponsesRoute::WebSocket,
+            OpenAiTransport::Http => ResponsesRoute::Http { fallback: None },
+        };
+        Self { ws, route }
+    }
+
+    pub(crate) fn kind(&self) -> OpenAiTransport {
+        match self.route {
+            ResponsesRoute::WebSocket => OpenAiTransport::WebSocket,
+            ResponsesRoute::Http { .. } => OpenAiTransport::Http,
+        }
+    }
+
+    pub(crate) fn fallback(&self) -> Option<HttpFallback> {
+        match self.route {
+            ResponsesRoute::WebSocket => None,
+            ResponsesRoute::Http { fallback } => fallback,
+        }
+    }
+
+    pub(crate) fn prefer_websocket(&mut self) {
+        self.route = ResponsesRoute::WebSocket;
+    }
+
+    pub(crate) fn confirm_fallback(&mut self) {
+        if self.fallback() == Some(HttpFallback::Provisional) {
+            self.route = ResponsesRoute::Http {
+                fallback: Some(HttpFallback::Sticky("websocket_retries_exhausted")),
+            };
+        }
+    }
+}
+
 /// A live single-profile Responses runtime with an independent continuation
 /// chain and transport recovery state.
 pub struct OpenAiProvider {
     pub(crate) cache_diagnostics: crate::diagnostics::Diagnostics,
     pub(crate) profile: ModelProfileRef,
-    pub(crate) responses_cache: std::sync::Arc<std::sync::Mutex<crate::responses::ResponsesCache>>,
+    pub(crate) slot_cache: std::sync::Arc<std::sync::Mutex<crate::router::SlotCache>>,
     pub(crate) request_properties_cache: Option<crate::responses::PropertiesCache>,
     pub(crate) image_accounting: zevria_foundation::image_accounting::ImageAccountingPolicy,
     #[allow(dead_code)]
@@ -386,10 +435,8 @@ pub struct OpenAiProvider {
     pub(crate) web_search: crate::WebSearchConfig,
     pub(crate) additional_params: std::collections::BTreeMap<String, serde_json::Value>,
     pub(crate) prompt_cache_key: String,
-    pub(crate) ws: OpenAiParkedWebSocket,
+    pub(crate) responses_transport: ResponsesTransport,
     pub(crate) responses_url: reqwest::Url,
-    pub(crate) transport: OpenAiTransport,
-    pub(crate) http_fallback: Option<HttpFallback>,
     pub(crate) recovery: crate::recovery::RecoveryPolicy,
     pub(crate) compaction_url: Option<reqwest::Url>,
     pub(crate) compaction_timeout: std::time::Duration,
@@ -399,10 +446,14 @@ pub struct OpenAiProvider {
     pub(crate) api_key: ApiKeySource,
     pub(crate) http: reqwest::Client,
     /// Token counting/remote compaction retain their own request deadlines.
-    pub(crate) maintenance_http: reqwest::Client,
+    pub(crate) maintenance_http: std::sync::OnceLock<reqwest::Client>,
 }
 
 impl OpenAiProvider {
+    pub(crate) fn transport(&self) -> OpenAiTransport {
+        self.responses_transport.kind()
+    }
+
     /// All local profile setup checks, without opening a destination connection.
     /// Return the validated routing headers for both HTTP and WebSocket setup.
     pub(crate) fn validate_profile_settings(
@@ -448,52 +499,46 @@ impl OpenAiProvider {
         session_id: &str,
         cache_key: &str,
     ) -> anyhow::Result<Self> {
-        Self::construct(
-            profile,
-            reasoning_level,
-            preamble,
-            session_id,
-            cache_key,
-            true,
-        )
-        .await
+        let mut provider =
+            Self::unconnected(profile, reasoning_level, preamble, session_id, cache_key)?;
+        if provider.transport() == OpenAiTransport::WebSocket {
+            match provider.responses_transport.ws.config.connect().await {
+                Ok(connection) => {
+                    provider.responses_transport.ws.session = OpenAiWebSocketSession::new(
+                        connection.socket,
+                        provider.recovery.websocket_keepalive,
+                    );
+                    provider
+                        .responses_transport
+                        .ws
+                        .websocket_connection_request_id =
+                        connection.websocket_connection_request_id;
+                }
+                Err(error) if is_http_upgrade_required(&error) => {
+                    provider.switch_to_http("websocket_upgrade_required")
+                }
+                Err(error) if !retryable_connect_error(&error) => return Err(error),
+                Err(error) => {
+                    tracing::warn!(error = %error, "OpenAI startup WebSocket preconnect failed; the first request will retry");
+                    provider.responses_transport.ws.session = OpenAiWebSocketSession::disconnected(crate::websocket_session::OpenAiWebSocketTerminalCategory::StartupConnectFailed);
+                }
+            }
+        }
+        Ok(provider)
     }
 
-    /// Router initialization does local validation only. The active completion
-    /// owns its first connection attempt, including a failed handshake.
-    pub(crate) async fn unconnected(
+    /// Local validation only; the first completion owns the handshake.
+    pub(crate) fn unconnected(
         profile: &ResolvedModelProfile,
         reasoning_level: ReasoningLevel,
         preamble: &str,
         session_id: &str,
         cache_key: &str,
-    ) -> anyhow::Result<Self> {
-        Self::construct(
-            profile,
-            reasoning_level,
-            preamble,
-            session_id,
-            cache_key,
-            false,
-        )
-        .await
-    }
-
-    async fn construct(
-        profile: &ResolvedModelProfile,
-        reasoning_level: ReasoningLevel,
-        preamble: &str,
-        session_id: &str,
-        cache_key: &str,
-        preconnect: bool,
     ) -> anyhow::Result<Self> {
         let session_headers =
             Self::validate_profile_settings(profile, reasoning_level, session_id, cache_key)?;
         let endpoint = profile.responses_endpoint()?;
         let endpoints = OpenAiResponseEndpoints::parse(&endpoint.base_url)?;
-        let maintenance_http = reqwest::Client::builder()
-            .default_headers(session_headers.clone())
-            .build()?;
         let recovery = crate::recovery::RecoveryPolicy::from(&endpoint.network);
         let http = reqwest::Client::builder()
             .connect_timeout(recovery.connect_timeout)
@@ -508,67 +553,16 @@ impl OpenAiProvider {
             keepalive: recovery.websocket_keepalive,
             prewarm: endpoint.network.prewarm,
         };
-        let websocket_log_url = redacted_url_for_logging(&websocket_config.url);
-        let http_log_url = redacted_url_for_logging(endpoints.http.as_str());
-        let (session, transport, websocket_connection_request_id) = if endpoint.supports_websockets
-            && !preconnect
-        {
+        let (terminal, transport) = if endpoint.supports_websockets {
             (
-                OpenAiWebSocketSession::disconnected(
-                    crate::websocket_session::OpenAiWebSocketTerminalCategory::NotConnected,
-                ),
+                crate::websocket_session::OpenAiWebSocketTerminalCategory::NotConnected,
                 OpenAiTransport::WebSocket,
-                None,
             )
-        } else if endpoint.supports_websockets {
-            match websocket_config.connect().await {
-                Ok(connection) => (
-                    OpenAiWebSocketSession::new(connection.socket, recovery.websocket_keepalive),
-                    OpenAiTransport::WebSocket,
-                    connection.websocket_connection_request_id,
-                ),
-                Err(error) if is_http_upgrade_required(&error) => {
-                    tracing::info!(
-                        websocket_url = %websocket_log_url,
-                        http_url = %http_log_url,
-                        status = 426,
-                        "OpenAI WebSocket upgrade unavailable; selecting HTTP transport"
-                    );
-                    (
-                        OpenAiWebSocketSession::disconnected(
-                            crate::websocket_session::OpenAiWebSocketTerminalCategory::HttpFallback,
-                        ),
-                        OpenAiTransport::Http,
-                        None,
-                    )
-                }
-                Err(error) if !retryable_connect_error(&error) => return Err(error),
-                Err(error) => {
-                    tracing::warn!(
-                        websocket_url = %websocket_log_url,
-                        error = %error,
-                        "OpenAI startup WebSocket preconnect failed; the first request will retry"
-                    );
-                    (
-                        OpenAiWebSocketSession::disconnected(
-                            crate::websocket_session::OpenAiWebSocketTerminalCategory::StartupConnectFailed,
-                        ),
-                        OpenAiTransport::WebSocket,
-                        None,
-                    )
-                }
-            }
         } else {
-            tracing::info!(
-                http_url = %http_log_url,
-                "OpenAI WebSocket support disabled; selecting HTTP transport"
-            );
+            tracing::info!(http_url = %redacted_url_for_logging(endpoints.http.as_str()), "OpenAI WebSocket support disabled; selecting HTTP transport");
             (
-                OpenAiWebSocketSession::disconnected(
-                    crate::websocket_session::OpenAiWebSocketTerminalCategory::HttpFallback,
-                ),
+                crate::websocket_session::OpenAiWebSocketTerminalCategory::HttpFallback,
                 OpenAiTransport::Http,
-                None,
             )
         };
 
@@ -590,7 +584,7 @@ impl OpenAiProvider {
                 transport == OpenAiTransport::Http && endpoint.supports_websockets,
             ),
             profile: profile.profile.clone(),
-            responses_cache: Default::default(),
+            slot_cache: Default::default(),
             request_properties_cache: None,
             image_accounting: profile.image_accounting.clone(),
             context_window_tokens: profile.context_window_tokens,
@@ -608,19 +602,19 @@ impl OpenAiProvider {
             web_search: endpoint.web_search.clone(),
             additional_params: endpoint.additional_params.clone(),
             prompt_cache_key: cache_key.to_string(),
-            ws: OpenAiParkedWebSocket {
-                session,
-                config: websocket_config,
-                socket_generation: 0,
-                websocket_connection_request_id,
-                continuation: None,
-                pending_done_response_id: None,
-                last_activity: std::time::Instant::now(),
-            },
+            responses_transport: ResponsesTransport::new(
+                OpenAiParkedWebSocket {
+                    session: OpenAiWebSocketSession::disconnected(terminal),
+                    config: websocket_config,
+                    socket_generation: 0,
+                    websocket_connection_request_id: None,
+                    continuation: None,
+                    pending_done_response_id: None,
+                    last_activity: std::time::Instant::now(),
+                },
+                transport,
+            ),
             responses_url: endpoints.http,
-            transport,
-            http_fallback: (transport == OpenAiTransport::Http && endpoint.supports_websockets)
-                .then_some(HttpFallback::Sticky("websocket_upgrade_required")),
             recovery,
             compaction_url: endpoint
                 .compaction
@@ -638,21 +632,36 @@ impl OpenAiProvider {
             input_token_count_unsupported: false,
             api_key: endpoint.api_key().clone(),
             http,
-            maintenance_http,
+            maintenance_http: Default::default(),
         })
+    }
+
+    pub(crate) fn maintenance_client(&self) -> anyhow::Result<&reqwest::Client> {
+        if let Some(client) = self.maintenance_http.get() {
+            return Ok(client);
+        }
+        let client = reqwest::Client::builder()
+            .default_headers(self.responses_transport.ws.config.headers.clone())
+            .build()?;
+        Ok(self.maintenance_http.get_or_init(|| client))
     }
 
     /// One best-effort handshake, owned by the engine's idle select. Dropping
     /// this future before completion cannot install a socket or spend the next
     /// completion's recovery budget. HTTP-only/fallback profiles do nothing.
     pub(crate) async fn prewarm_connection(&mut self) {
-        if !self.ws.config.prewarm
-            || self.transport != OpenAiTransport::WebSocket
-            || self.ws.session.terminal_status().is_none()
+        if !self.responses_transport.ws.config.prewarm
+            || self.transport() != OpenAiTransport::WebSocket
+            || self
+                .responses_transport
+                .ws
+                .session
+                .terminal_status()
+                .is_none()
         {
             return;
         }
-        match self.ws.reconnect().await {
+        match self.responses_transport.ws.reconnect().await {
             Ok(()) => {}
             Err(error) if is_http_upgrade_required(&error) => {
                 self.switch_to_http("websocket_upgrade_required");
@@ -703,25 +712,27 @@ impl OpenAiProvider {
     }
 
     pub(crate) fn switch_to_http(&mut self, reason: &'static str) {
-        if self.transport == OpenAiTransport::Http {
+        if self.transport() == OpenAiTransport::Http {
             return;
         }
-        self.transport = OpenAiTransport::Http;
-        self.http_fallback = Some(if reason == "websocket_retries_exhausted" {
-            HttpFallback::Provisional
-        } else {
-            HttpFallback::Sticky(reason)
-        });
-        self.ws
+        self.responses_transport.route = ResponsesRoute::Http {
+            fallback: Some(if reason == "websocket_retries_exhausted" {
+                HttpFallback::Provisional
+            } else {
+                HttpFallback::Sticky(reason)
+            }),
+        };
+        self.responses_transport
+            .ws
             .session
             .terminate(crate::websocket_session::OpenAiWebSocketTerminalCategory::HttpFallback);
-        self.ws.invalidate_continuation(reason);
-        self.ws.pending_done_response_id = None;
+        self.responses_transport.ws.invalidate_continuation(reason);
+        self.responses_transport.ws.pending_done_response_id = None;
         Diagnostics::transport_fallback(self);
         let http_log_url = redacted_url_for_logging(self.responses_url.as_str());
         tracing::warn!(
             reason,
-            sticky = matches!(self.http_fallback, Some(HttpFallback::Sticky(_))),
+            sticky = matches!(self.responses_transport.fallback(), Some(HttpFallback::Sticky(_))),
             http_url = %http_log_url,
             "OpenAI transport switched to HTTP for this provider"
         );

@@ -22,7 +22,6 @@ mod responses;
 mod router;
 mod streaming;
 mod telemetry;
-use responses as turn;
 
 mod websocket_session;
 
@@ -65,16 +64,16 @@ use futures_util::{SinkExt, StreamExt};
 #[cfg(test)]
 use recovery::RecoveryPolicy;
 #[cfg(test)]
+use responses::{
+    is_websocket_disconnect, message_reports_upstream_disconnect, run_turn, run_turn_request,
+    run_turn_request_with_reconnect, run_turn_request_with_recovery,
+};
+#[cfg(test)]
 use rig_core::message::{AssistantContent, Message, Text, ToolFunction};
 #[cfg(test)]
 use tokio_tungstenite::{
     WebSocketStream, connect_async,
     tungstenite::{Message as WebSocketMessage, http::HeaderMap},
-};
-#[cfg(test)]
-use turn::{
-    is_websocket_disconnect, message_reports_upstream_disconnect, run_turn, run_turn_request,
-    run_turn_request_with_reconnect, run_turn_request_with_recovery,
 };
 #[cfg(test)]
 use websocket_session::{

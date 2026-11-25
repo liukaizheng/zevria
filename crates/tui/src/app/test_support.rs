@@ -125,26 +125,28 @@ impl App {
     #[cfg(test)]
     pub(crate) fn streaming(&self) -> Option<Message> {
         match self.model.session.activity() {
-            SessionActivity::Active(session::ActiveOperation {
+            SessionActivity::ActiveTurn(session::ActiveTurn {
                 phase: ActivePhase::Running(TurnTail::Streaming(message)),
                 ..
             }) => Some(message.clone()),
-            SessionActivity::Idle | SessionActivity::Pending(_) | SessionActivity::Active(_) => {
-                None
-            }
+            SessionActivity::Idle
+            | SessionActivity::Managing(_)
+            | SessionActivity::PendingTurn(_)
+            | SessionActivity::ActiveTurn(_) => None,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn retry_notice(&self) -> Option<RetryNotice> {
         match self.model.session.activity() {
-            SessionActivity::Active(session::ActiveOperation {
+            SessionActivity::ActiveTurn(session::ActiveTurn {
                 phase: ActivePhase::Running(TurnTail::Retrying(notice)),
                 ..
             }) => Some(notice.clone()),
-            SessionActivity::Idle | SessionActivity::Pending(_) | SessionActivity::Active(_) => {
-                None
-            }
+            SessionActivity::Idle
+            | SessionActivity::Managing(_)
+            | SessionActivity::PendingTurn(_)
+            | SessionActivity::ActiveTurn(_) => None,
         }
     }
 

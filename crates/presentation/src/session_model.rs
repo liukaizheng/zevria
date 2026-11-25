@@ -1,13 +1,14 @@
 //! One authoritative frontend-neutral reducer for native session panes.
 use crate::{
     PromptPaint, PromptPreview,
-    blocks::PresentationBlockId,
+    blocks::{NativeHeader, PresentationBlockId, ProjectionEpoch},
     conversation::{self, ConversationChange, ConversationState, HistoryEntry, ToolCallStatus},
     session::*,
     workflow::WorkflowState,
 };
 use rig_core::message::Message;
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -19,6 +20,9 @@ use zevria_model::CompactionTrigger;
 use zevria_session_api::{
     ControlCommand, ManagementCommand, ModeSelectionResult, SessionEvent, TranscriptEdit,
     TranscriptEditReplacement, TurnCommand,
+};
+use zevria_session_api::{
+    EnsembleEvent, JobEvent, ManagementEvent, PlanEvent, QuestionEvent, SubtaskEvent, TurnEvent,
 };
 use zevria_transcript::transcript::TranscriptItem;
 use zevria_workflow::{
@@ -75,6 +79,14 @@ pub struct PendingEdit {
     pub target_index: usize,
     pub compacted: bool,
 }
+#[derive(Debug)]
+struct DisplayAttempt {
+    header: NativeHeader,
+    id: String,
+    revision: u64,
+    open: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct SessionModel {
     pub session: SessionState,
@@ -82,13 +94,15 @@ pub struct SessionModel {
     pub conversation: ConversationState,
     pub model_profiles: Arc<ConfiguredModelProfiles>,
     scope: PaneScope,
-    jobs: crate::jobs::CommandJobsState,
+    jobs: crate::jobs::JobsInspector,
     pending_edit: Option<PendingEdit>,
     pending_prompt: Option<PromptPreview>,
     /// The latest local acceptance can beat the first render. Its probe belongs
     /// to the canonical block identity, never to the prompt text.
     accepted_prompt_paint: Option<(usize, PresentationBlockId, PromptPaint)>,
     continuation_offer: Option<SessionMode>,
+    display_attempt: Option<DisplayAttempt>,
+    unsaved_blocks: HashSet<(ProjectionEpoch, PresentationBlockId)>,
 }
 pub struct RestorationInput {
     pub items: Vec<TranscriptItem>,
@@ -101,18 +115,14 @@ pub struct RestorationInput {
 }
 
 impl SessionModel {
-    pub fn fold_transcript(
-        &self,
-        folds: &mut crate::fold::FoldState,
-        diagnostics_visible: bool,
-        action: crate::fold::TurnFold,
-    ) {
-        folds.fold_turns(&self.conversation, diagnostics_visible, action);
-        folds.fold_stream(self.session.stream_snapshot());
+    pub fn jobs(&self) -> &[zevria_foundation::CommandJobSnapshot] {
+        self.jobs.jobs()
     }
-
-    pub fn jobs(&self) -> &crate::jobs::CommandJobsState {
+    pub fn jobs_inspector(&self) -> &crate::jobs::JobsInspector {
         &self.jobs
+    }
+    pub fn jobs_inspector_mut(&mut self) -> &mut crate::jobs::JobsInspector {
+        &mut self.jobs
     }
     pub fn running_job_count(&self) -> usize {
         self.jobs.running_count()
@@ -121,43 +131,56 @@ impl SessionModel {
         self.jobs.job_for_call(call)
     }
     pub fn reduce(&mut self, event: SessionEvent) -> Reduction {
+        match &event {
+            SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated { turn_id, attempt }) => {
+                self.observe_display_attempt(*turn_id, Some(attempt))
+            }
+            SessionEvent::Turn(
+                TurnEvent::Intermediate { turn_id, .. }
+                | TurnEvent::Completed { turn_id, .. }
+                | TurnEvent::Failed { turn_id, .. }
+                | TurnEvent::Cancelled { turn_id },
+            ) => self.observe_display_attempt(*turn_id, None),
+            _ => {}
+        }
         let mut effects = Reduction::default();
         match event {
-            SessionEvent::CommandJobUpdated { job } => {
-                self.conversation.update_command_job(&job);
-                self.jobs.update(job);
+            event @ SessionEvent::Job(JobEvent::Updated { .. } | JobEvent::ControlResult { .. }) => {
+                let conversation = &mut self.conversation;
+                if let Some(notice) = self.jobs.reduce(&event, |job| conversation.update_command_job(job)) {
+                    conversation.push_error(notice);
+                }
             }
-            SessionEvent::CommandControlResult { .. } => {}
-            SessionEvent::JobContinuationChanged { mode } => {
+            SessionEvent::Job(JobEvent::ContinuationChanged { mode }) => {
                 if self.scope.is_root() { self.continuation_offer = mode; }
             }
-            SessionEvent::JobContinuationStarted { turn_id, mode, notice } => {
+            SessionEvent::Job(JobEvent::ContinuationStarted { turn_id, mode, notice }) => {
                 if self.session.start_job_continuation(turn_id, mode).is_none() { return effects; }
                 self.continuation_offer = None;
                 effects.accepted = self.session.operation_kind();
                 let turn = self.conversation.allocate_turn();
                 self.session.bind_display_turn(turn);
-                self.conversation.push_job_notice(notice, Some(crate::presentation::NativeHeader::Prompt(turn)));
+                self.conversation.push_job_notice(*notice, Some(crate::presentation::NativeHeader::Prompt(turn)));
             }
-            SessionEvent::CommandJobsReported { turn_id, notice } => {
-                if self.session.progress(turn_id) { self.conversation.push_job_notice(notice, None); }
+            SessionEvent::Job(JobEvent::Reported { turn_id, notice }) => {
+                if self.session.progress(turn_id) { self.conversation.push_job_notice(*notice, None); }
             }
             SessionEvent::EngineIdle => self.session.observe_engine_idle(),
-            SessionEvent::ResponseAttemptUpdated { turn_id, attempt } => {
+            SessionEvent::Turn(TurnEvent::ResponseAttemptUpdated { turn_id, attempt }) => {
                 if !self.session.accepts_active(turn_id) { return effects; }
-                self.conversation.update_native_attempt(attempt, self.session.call_header());
+                self.conversation.update_native_attempt(*attempt, self.session.call_header());
             }
-            SessionEvent::ModeResult { request_id, result } => {
+            SessionEvent::Manage(ManagementEvent::ModeResult { request_id, result }) => {
                 effects.mode_selection = self.accept_mode_selection(&request_id, result);
             }
-            SessionEvent::ModeChanged { mode } => self.apply_selected_mode(mode),
+            SessionEvent::Turn(TurnEvent::ModeChanged { mode }) => self.apply_selected_mode(mode),
             // Management transport belongs to SessionViews. Inspect panes never
             // install root completion metadata or accept management actions.
-            SessionEvent::ModelsResult { .. } | SessionEvent::SkillsResult { .. } | SessionEvent::SkillsChanged { .. } | SessionEvent::McpResult { .. } | SessionEvent::McpChanged { .. } | SessionEvent::WorkerControlResult { .. } => {}
-            SessionEvent::WorkerReviewUpdated { target, state } => {
+            SessionEvent::Manage(ManagementEvent::ModelsResult { .. }) | SessionEvent::Manage(ManagementEvent::SkillsResult { .. }) | SessionEvent::Manage(ManagementEvent::SkillsChanged { .. }) | SessionEvent::Manage(ManagementEvent::McpResult { .. }) | SessionEvent::Manage(ManagementEvent::McpChanged { .. }) | SessionEvent::Ensemble(EnsembleEvent::WorkerControlResult { .. }) => {}
+            SessionEvent::Ensemble(EnsembleEvent::WorkerReviewUpdated { target, state }) => {
                 self.conversation.project_worker_review(&target.run_id, &target.worker_id, &state, crate::projection::ProjectionMode::Live);
             }
-            SessionEvent::CompactionStarted { turn_id, trigger } => {
+            SessionEvent::Turn(TurnEvent::CompactionStarted { turn_id, trigger }) => {
                 // Only pre-turn compaction can announce the ID of an unaccepted submit.
                 if self.pending_prompt.is_some() && trigger != CompactionTrigger::AutomaticPreTurn {
                     return effects;
@@ -170,9 +193,9 @@ impl SessionModel {
                     .session
                     .compaction_started(turn_id, trigger, idle_role);
             }
-            SessionEvent::CompactionCompleted {
+            SessionEvent::Turn(TurnEvent::CompactionCompleted {
                 turn_id, trigger, ..
-            } => {
+            }) => {
                 let Some(transition) = self.session.compaction_completed(turn_id, trigger) else {
                     return effects;
                 };
@@ -182,11 +205,11 @@ impl SessionModel {
                     && let Some(edit) = &mut self.pending_edit
                 { edit.compacted = true; }
             }
-            SessionEvent::TurnStarted {
+            SessionEvent::Turn(TurnEvent::Started {
                 turn_id,
                 message,
                 mode,
-            } => {
+            }) => {
                 let role = self
                     .scope
                     .model_role_override()
@@ -213,7 +236,7 @@ impl SessionModel {
                     });
                 }
             }
-            SessionEvent::ModelCallStarted { turn_id, call } => {
+            SessionEvent::Turn(TurnEvent::ModelCallStarted { turn_id, call }) => {
                 let previous = self.session.call_header();
                 if self.session.model_call_started(turn_id, call) {
                         let now = self.session.observed_at();
@@ -225,11 +248,11 @@ impl SessionModel {
                     }
                 }
             }
-            SessionEvent::EnsembleStarted {
+            SessionEvent::Ensemble(EnsembleEvent::Started {
                 turn_id,
                 start,
                 resumed,
-            } => {
+            }) => {
                 let mode = ensemble_mode(start.workflow);
                 let role = ensemble_role(start.workflow);
                 let Some(transition) = self.session.start_ensemble(turn_id, mode, role) else {
@@ -244,7 +267,7 @@ impl SessionModel {
                 self.session.bind_display_turn(turn);
                 if !self.conversation.has_ensemble(&start.run_id) {
                     self.conversation.add_ensemble(
-                        start,
+                        *start,
                         if resumed {
                             AgentRunStatus::Resuming
                         } else {
@@ -259,15 +282,15 @@ impl SessionModel {
                     );
                 }
             }
-            SessionEvent::AgentRunUpdated {
+            SessionEvent::Ensemble(EnsembleEvent::AgentRunUpdated {
                 ensemble_run_id,
                 agent_run_id,
                 event,
                 ..
-            } => {
+            }) => {
                 // Stable run/worker identity permits late child evidence without
                 // changing a newer root stream or retry tail.
-                if let AgentRunEvent::Status { status, detail } = event {
+                if let AgentRunEvent::Status { status, detail } = *event {
                     self.conversation.update_ensemble_worker(
                         &ensemble_run_id,
                         &agent_run_id,
@@ -276,45 +299,34 @@ impl SessionModel {
                     );
                 }
             }
-            SessionEvent::AgentRunFinished { ensemble_run_id, outcome, .. } => {
-                self.conversation.project_worker_completion(&ensemble_run_id, crate::projection::WorkerCompletion::outcome(&ensemble_run_id, outcome));
+            SessionEvent::Ensemble(EnsembleEvent::AgentRunFinished { ensemble_run_id, outcome, .. }) => {
+                self.conversation.project_worker_completion(&ensemble_run_id, crate::projection::WorkerCompletion::outcome(&ensemble_run_id, *outcome));
             }
-            SessionEvent::EnsembleReportsReady { run_id, agents, .. } => {
+            SessionEvent::Ensemble(EnsembleEvent::ReportsReady { run_id, agents, .. }) => {
                 for summary in agents {
                     self.conversation.project_worker_completion(&run_id, crate::projection::WorkerCompletion::summary(&run_id, summary));
                 }
             }
-            SessionEvent::PlanHandoffStarted { turn_id, handoff } => {
+            SessionEvent::Plan(PlanEvent::HandoffStarted { turn_id, handoff }) => {
                 if self.session.start_plan_handoff(turn_id).is_none() {
                     return effects;
                 }
                 let turn = self.conversation.allocate_turn();
                 self.session.bind_display_turn(turn);
-                self.conversation.push_plan_handoff(handoff, turn);
+                self.conversation.push_plan_handoff(*handoff, turn);
                 self.session.set_next_mode(SessionMode::Build);
             }
-            SessionEvent::PlanStateChanged { state } => effects.plan_ready = self.apply_plan_snapshot(state),
-            SessionEvent::PlanProjectionWarning {
+            SessionEvent::Plan(PlanEvent::StateChanged { state }) => effects.plan_ready = self.apply_plan_snapshot(*state),
+            SessionEvent::Plan(PlanEvent::ProjectionWarning {
                 version,
                 draft,
                 path,
                 error,
-            } => self.conversation.push_error(format!(
+            }) => self.conversation.push_error(format!(
                 "Plan {version}{} remains available, but its projection at {} could not be written: {error}",
                 draft.map_or_else(String::new, |draft| format!(" draft {draft}")), path.display()
             )),
-            SessionEvent::AssistantStreamUpdated { turn_id, snapshot } => {
-                if !self.session.preview_progress(turn_id) { return effects; }
-                if let Some(attempt) = snapshot.attempt {
-                    self.conversation.update_native_attempt(attempt, self.session.call_header());
-                } else if let Some(message) = snapshot.message.and_then(conversation::without_tool_calls) {
-                    self.session.stream(turn_id, message);
-                }
-            }
-            SessionEvent::StreamCleared { turn_id } => {
-                let _ = self.session.clear_stream(turn_id);
-            }
-            SessionEvent::Intermediate { turn_id, message, attempt_id } => {
+            SessionEvent::Turn(TurnEvent::Intermediate { turn_id, message, attempt_id }) => {
                 if !self.session.progress(turn_id) {
                     return effects;
                 }
@@ -330,34 +342,34 @@ impl SessionModel {
                     self.conversation.finish_header(header, now);
                 }
             }
-            SessionEvent::ToolResults {
+            SessionEvent::Turn(TurnEvent::ToolResults {
                 turn_id,
                 message,
                 metadata,
-            } => {
+            }) => {
                 if !self.session.progress(turn_id) {
                     return effects;
                 }
                 for header in self.conversation.finish_tool_results(&message, &metadata) {
                     self.conversation.finish_header(Some(header), self.session.observed_at());
                 }
-                for job in self.jobs.iter().filter(|job| metadata.iter().any(|result| {
+                for job in self.jobs.jobs().iter().filter(|job| metadata.iter().any(|result| {
                     job.call_id.as_deref() == Some(result.id.as_str())
                         || result.command_job().is_some_and(|detail| detail.id == job.id)
                 })) {
                     self.conversation.update_command_job(job);
                 }
             }
-            SessionEvent::SubtaskLaunched {
+            SessionEvent::Subtask(SubtaskEvent::Launched {
                 call_id,
                 entry_index,
                 descriptor,
                 ..
-            } => {
+            }) => {
                 self.conversation
-                    .attach_subtask_launch(&call_id, entry_index, descriptor);
+                    .attach_subtask_launch(&call_id, entry_index, *descriptor);
             }
-            SessionEvent::SubtaskStatus { id, status, .. } => {
+            SessionEvent::Subtask(SubtaskEvent::Status { id, status, .. }) => {
                 self.conversation.update_subtask_status(&id, status);
             }
             SessionEvent::PersistenceChanged { path, error } => {
@@ -372,14 +384,14 @@ impl SessionModel {
                     self.conversation.push_error(warning);
                 }
             }
-            SessionEvent::UsageUpdated {
+            SessionEvent::Turn(TurnEvent::UsageUpdated {
                 turn_id,
                 usage,
                 profile,
                 model_role,
                 input_token_limit,
                 context_window_tokens,
-            } => {
+            }) => {
                 self.session.update_usage(
                     turn_id,
                     usage,
@@ -389,17 +401,17 @@ impl SessionModel {
                     context_window_tokens,
                 );
             }
-            SessionEvent::ContextUsageUpdated { turn_id, snapshot } => {
-                self.session.update_context_usage(turn_id, snapshot);
+            SessionEvent::Turn(TurnEvent::ContextUsageUpdated { turn_id, snapshot }) => {
+                self.session.update_context_usage(turn_id, *snapshot);
             }
-            SessionEvent::FreshPlanHandoffRequested { handoff } => {
+            SessionEvent::Plan(PlanEvent::FreshHandoffRequested { handoff }) => {
                 self.session
                     .settle_fresh_handoff_request(handoff.artifact.version);
             }
-            SessionEvent::SubtaskSession { .. }
-            | SessionEvent::QuestionAsked { .. }
-            | SessionEvent::QuestionClosed { .. } => {}
-            SessionEvent::TurnCompleted { turn_id, message, attempt_id } => {
+            SessionEvent::Subtask(SubtaskEvent::Session { .. })
+            | SessionEvent::Question(QuestionEvent::Asked { .. })
+            | SessionEvent::Question(QuestionEvent::Closed { .. }) => {}
+            SessionEvent::Turn(TurnEvent::Completed { turn_id, message, attempt_id }) => {
                 let Some((_kind, header)) = self.finish_turn(turn_id) else {
                     return effects;
                 };
@@ -409,7 +421,7 @@ impl SessionModel {
                 self.conversation
                     .complete_response(message, attempt_id.as_deref(), header);
             }
-            SessionEvent::TurnRecovered { turn_id, .. } => {
+            SessionEvent::Turn(TurnEvent::Recovered { turn_id, .. }) => {
                 let Some((_kind, _)) = self.finish_turn(turn_id) else {
                     return effects;
                 };
@@ -417,7 +429,7 @@ impl SessionModel {
                 effects.settled = Some((_kind, Settlement::Recovered));
                 self.conversation.interrupt_executing_tool_calls();
             }
-            SessionEvent::TurnRejected { turn_id, error } => {
+            SessionEvent::Turn(TurnEvent::Rejected { turn_id, error }) => {
                 let Some((kind, _)) = self.finish_turn(turn_id) else {
                     return effects;
                 };
@@ -432,7 +444,7 @@ impl SessionModel {
                     self.conversation.push_error(error);
                 }
             }
-            SessionEvent::TurnFailed { turn_id, error } => {
+            SessionEvent::Turn(TurnEvent::Failed { turn_id, error }) => {
                 let Some((kind, _)) = self.finish_turn(turn_id) else {
                     return effects;
                 };
@@ -444,7 +456,7 @@ impl SessionModel {
                 self.conversation.interrupt_executing_tool_calls();
                 self.conversation.push_error(error);
             }
-            SessionEvent::TurnCancelled { turn_id } => {
+            SessionEvent::Turn(TurnEvent::Cancelled { turn_id }) => {
                 let Some((kind, _)) = self.finish_turn(turn_id) else {
                     return effects;
                 };
@@ -457,17 +469,17 @@ impl SessionModel {
                 self.conversation
                     .push_error(crate::blocks::TURN_CANCELLED.to_string());
             }
-            SessionEvent::NetworkStatus { turn_id, call, attempt, transport, status } => {
+            SessionEvent::Turn(TurnEvent::NetworkStatus { turn_id, call, attempt, transport, status }) => {
                 self.session.network_status(turn_id, call, attempt, transport, status);
             }
-            SessionEvent::TurnRetrying {
+            SessionEvent::Turn(TurnEvent::Retrying {
                 turn_id,
                 call,
                 attempt,
                 retry_after,
                 retrying_for,
                 error,
-            } => {
+            }) => {
                 if self.session.accepts_network(turn_id, call, attempt) {
                     self.session.retry(turn_id, attempt, retry_after, retrying_for, error);
                 }
@@ -565,33 +577,138 @@ impl SessionModel {
     pub fn observe_clock(&mut self, now: Instant) {
         self.session.observe_clock(now);
     }
-    pub fn apply_stream(
-        &mut self,
-        stream: &zevria_session_api::event::SessionStreamState,
-    ) -> Reduction {
-        self.reduce(if stream.message.is_some() || stream.attempt.is_some() {
-            SessionEvent::AssistantStreamUpdated {
-                turn_id: stream.turn_id,
-                snapshot: zevria_content::AssistantStreamSnapshot {
-                    message: stream.message.clone(),
-                    attempt: stream.attempt.clone(),
-                },
+    pub fn apply_stream(&mut self, stream: zevria_session_api::SessionStreamState) -> Reduction {
+        let turn_id = stream.turn_id;
+        self.observe_display_attempt(turn_id, stream.attempt.as_deref());
+        if stream.message.is_none() && stream.attempt.is_none() {
+            let _ = self.session.clear_stream(turn_id);
+        } else if self.session.preview_progress(turn_id) {
+            if let Some(attempt) = stream.attempt {
+                self.conversation.update_native_attempt(
+                    Arc::unwrap_or_clone(attempt),
+                    self.session.call_header(),
+                );
+            } else if let Some(message) = stream
+                .message
+                .map(Arc::unwrap_or_clone)
+                .and_then(conversation::without_tool_calls)
+            {
+                self.session.stream(turn_id, message);
             }
-        } else {
-            SessionEvent::StreamCleared {
-                turn_id: stream.turn_id,
-            }
-        })
+        }
+        Reduction::default()
     }
+    fn observe_display_attempt(
+        &mut self,
+        turn: TurnId,
+        attempt: Option<&zevria_content::ResponseAttempt>,
+    ) {
+        let Some(header) = self
+            .session
+            .call_header()
+            .filter(|_| self.session.accepts_active(turn))
+        else {
+            return;
+        };
+        match attempt {
+            Some(attempt) => {
+                if let Some(prior) = self
+                    .display_attempt
+                    .as_mut()
+                    .filter(|prior| prior.id == attempt.id)
+                {
+                    if prior.header == header && attempt.revision > prior.revision {
+                        prior.revision = attempt.revision;
+                        prior.open = !attempt.outcome.is_terminal();
+                    }
+                } else if !attempt.outcome.is_terminal()
+                    && attempt.has_display()
+                    && attempt.validate().is_ok()
+                {
+                    self.display_attempt = Some(DisplayAttempt {
+                        header,
+                        id: attempt.id.clone(),
+                        revision: attempt.revision,
+                        open: true,
+                    });
+                }
+            }
+            None => {
+                if let Some(prior) = &mut self.display_attempt {
+                    prior.open = false;
+                }
+            }
+        }
+    }
+
+    pub fn live_attempt_header(&self) -> Option<NativeHeader> {
+        let attempt = self.display_attempt.as_ref()?;
+        (attempt.open
+            && self.session.has_turn_work()
+            && self.session.call_header() == Some(attempt.header))
+        .then_some(attempt.header)
+    }
+
+    pub fn unsaved_blocks(&self) -> &HashSet<(ProjectionEpoch, PresentationBlockId)> {
+        &self.unsaved_blocks
+    }
+
+    /// Retain a readable message-only partial on a correlated terminal update.
+    /// Attempt-backed output is already durable and must not be copied here.
+    pub fn retain_unsaved_partial(&mut self, event: &SessionEvent) {
+        let turn = match event {
+            SessionEvent::Turn(
+                TurnEvent::Failed { turn_id, .. } | TurnEvent::Cancelled { turn_id },
+            ) => *turn_id,
+            _ => return,
+        };
+        if !self.accepts_terminal(turn) {
+            return;
+        }
+        let ConversationTail::Streaming { message, .. } = self.tail(self.session.observed_at())
+        else {
+            return;
+        };
+        let Some(HistoryEntry::Conversation(preview)) =
+            HistoryEntry::from_message(message.clone(), ToolCallStatus::Finished)
+        else {
+            return;
+        };
+        if !preview
+            .blocks
+            .iter()
+            .any(|block| block.visible(false) && !block.primary_copy().trim().is_empty())
+        {
+            return;
+        }
+        let message = message.clone();
+        let before = self.conversation.history().len();
+        self.conversation.commit_response(
+            message,
+            None,
+            ToolCallStatus::Finished,
+            self.session.call_header(),
+        );
+        let epoch = self.conversation.epoch();
+        for entry in &self.conversation.history()[before..] {
+            if let HistoryEntry::Conversation(entry) = entry {
+                self.unsaved_blocks
+                    .extend(entry.blocks.iter().map(|block| (epoch, block.id)));
+            }
+        }
+    }
+
     pub fn restore_transcript(&mut self, items: Vec<TranscriptItem>) {
         self.session.reset_for_restore();
+        self.display_attempt = None;
+        self.unsaved_blocks.clear();
         self.workflow.reset();
         self.pending_edit = None;
         self.pending_prompt = None;
         self.accepted_prompt_paint = None;
         self.continuation_offer = None;
         self.conversation.restore(items);
-        for job in self.jobs.iter() {
+        for job in self.jobs.jobs().iter() {
             self.conversation.update_command_job(job);
         }
     }
@@ -816,23 +933,10 @@ impl SessionModel {
         if !self.admits_work() || self.workflow.dialog().is_some() {
             return None;
         }
-        let current = self.next_mode();
-        if !self.begin_operation(
-            OperationKind::ModeManagement,
-            current,
-            role_for_mode(current),
-        ) {
+        let request_id = crate::outbox::RequestIdAllocator::allocate("mode-");
+        if !self.session.begin_mode_selection(request_id.clone(), mode) {
             return None;
         }
-        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let request_id = format!(
-            "mode-{}",
-            SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
-        self.session.pending_mode_selection = Some(PendingModeSelection {
-            request_id: request_id.clone(),
-            mode,
-        });
         Some(ManagementCommand::SetMode { request_id, mode })
     }
     fn accept_mode_selection(
@@ -840,14 +944,13 @@ impl SessionModel {
         request_id: &str,
         result: ModeSelectionResult,
     ) -> Option<ModeSelectionSettled> {
-        let pending = self.session.pending_mode_selection.as_ref()?;
+        let (pending_id, requested) = self.session.mode_selection()?;
         if !self.scope.is_root()
-            || pending.request_id != request_id
-            || matches!(&result, ModeSelectionResult::Accepted { mode, .. } if *mode != pending.mode)
+            || pending_id != request_id
+            || matches!(&result, ModeSelectionResult::Accepted { mode, .. } if *mode != requested)
         {
             return None;
         }
-        self.session.pending_mode_selection = None;
         self.session.finish_mode_management();
         match &result {
             ModeSelectionResult::Accepted { mode, .. } => self.apply_selected_mode(*mode),
@@ -861,8 +964,9 @@ impl SessionModel {
         })
     }
     pub fn disconnected(&mut self) -> Reduction {
-        if let Some(pending) = &self.session.pending_mode_selection {
-            let id = pending.request_id.clone();
+        self.jobs.disconnect();
+        if let Some((id, _)) = self.session.mode_selection() {
+            let id = id.to_owned();
             return Reduction {
                 mode_selection: self.accept_mode_selection(
                     &id,
@@ -877,10 +981,10 @@ impl SessionModel {
         }
         // Finish even an unpromoted pending turn; management has no cancel target.
         if self.session.cancel_target().is_some() {
-            return self.reduce(SessionEvent::TurnFailed {
+            return self.reduce(SessionEvent::Turn(TurnEvent::Failed {
                 turn_id: self.active_turn_id().unwrap_or(TurnId::new(0)),
                 error: "The session engine stopped.".into(),
-            });
+            }));
         }
         self.session.finish_model_management();
         Reduction::default()
@@ -955,15 +1059,26 @@ impl SessionModel {
             }
         }
     }
-    pub fn begin_model_management(&mut self) -> Option<SessionMode> {
-        if !self.scope.is_root()
-            || self.is_busy()
-            || self.session.persistence_error().is_some()
-            || matches!(self.workflow.snapshot(), PlanWorkflowState::Ready { .. })
+    pub fn model_selection_available(&self) -> Result<(), &'static str> {
+        if !self.scope.is_root() {
+            return Err("Return to the root conversation to change models.");
+        }
+        if self.is_busy() {
+            return Err("Wait for the current operation to finish before changing models.");
+        }
+        if self.session.persistence_error().is_some() {
+            return Err("Resolve the session saving error before changing models.");
+        }
+        if matches!(self.workflow.snapshot(), PlanWorkflowState::Ready { .. })
             || self.workflow.dialog().is_some()
         {
-            return None;
+            return Err("Resolve the pending Plan before changing models.");
         }
+        Ok(())
+    }
+
+    pub fn begin_model_management(&mut self) -> Option<SessionMode> {
+        self.model_selection_available().ok()?;
         let mode = self.next_mode();
         self.session
             .begin_operation(OperationKind::ModelManagement, mode, role_for_mode(mode))
@@ -998,23 +1113,17 @@ impl<'a> ConversationTail<'a> {
     pub fn observe(session: &'a SessionState, now: Instant) -> Self {
         let elapsed = session.elapsed().unwrap_or_default();
         let pending_manual = session.operation_kind() == Some(OperationKind::ManualCompaction)
-            && matches!(session.activity(), SessionActivity::Pending(_));
+            && matches!(session.activity(), SessionActivity::PendingTurn(_));
         if session.is_compacting() || pending_manual {
             return ConversationTail::Compacting { elapsed };
         }
         match session.activity() {
-            SessionActivity::Idle => ConversationTail::None,
-            SessionActivity::Pending(pending)
-                if pending.kind.is_plan_decision()
-                    || matches!(
-                        pending.kind,
-                        OperationKind::ModeManagement | OperationKind::ModelManagement
-                    ) =>
-            {
+            SessionActivity::Idle | SessionActivity::Managing(_) => ConversationTail::None,
+            SessionActivity::PendingTurn(pending) if pending.kind.is_plan_decision() => {
                 ConversationTail::None
             }
-            SessionActivity::Pending(_) => ConversationTail::Waiting { elapsed },
-            SessionActivity::Active(active) => match &active.phase {
+            SessionActivity::PendingTurn(_) => ConversationTail::Waiting { elapsed },
+            SessionActivity::ActiveTurn(active) => match &active.phase {
                 ActivePhase::Compacting { .. } => ConversationTail::Compacting { elapsed },
                 ActivePhase::AwaitingStart | ActivePhase::Running(TurnTail::Waiting) => {
                     ConversationTail::Waiting { elapsed }

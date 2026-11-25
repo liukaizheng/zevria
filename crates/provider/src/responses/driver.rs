@@ -7,11 +7,13 @@ use crate::{
 };
 
 use crate::accumulator::AttemptState;
-use crate::http::{HttpAttemptError, diagnostic_detail};
+use crate::http::diagnostic_detail;
+use crate::recovery::AttemptError;
 use crate::recovery::ProgressClock;
 use crate::telemetry::RequestTelemetry;
 use crate::websocket_session::OpenAiWebSocketTerminalCategory;
 use rig_core::error::ProviderError as CompletionError;
+use zevria_model::RetryCategory;
 use zevria_model::{ModelResponse, TokenUsage, openai::ResponseStatus};
 use zevria_responses::{
     accumulator::{response_cache_write_tokens_value, response_token_usage},
@@ -77,7 +79,13 @@ pub(super) fn log_terminal_response(openai: &mut OpenAiProvider, terminal: Termi
     );
     let prompt_cache_key_fingerprint = openai.transmitted_prompt_cache_key_fingerprint();
     let websocket_connection_request_id = (transport == OpenAiTransport::WebSocket)
-        .then_some(openai.ws.websocket_connection_request_id.as_deref())
+        .then_some(
+            openai
+                .responses_transport
+                .ws
+                .websocket_connection_request_id
+                .as_deref(),
+        )
         .flatten();
     tracing::info!(
         provider = %openai.profile.provider,
@@ -107,15 +115,12 @@ pub(super) fn log_terminal_response(openai: &mut OpenAiProvider, terminal: Termi
 }
 
 use super::{
-    continuation::successful_model_response,
     errors::{
-        StaleResponseId, TransientResponseError, WebSocketDisconnected, classify_input_size,
-        done_failure_error, error_reports_missing_previous_response,
-        error_reports_websocket_connection_limit, input_size_code,
-        message_reports_upstream_disconnect, response_attempt_error, response_failure_error,
-        transient_response_code,
+        StaleResponseId, WebSocketDisconnected, classify_input_size, done_failure_error,
+        error_reports_missing_previous_response, error_reports_websocket_connection_limit,
+        input_size_code, message_reports_upstream_disconnect, response_attempt_error,
+        response_failure_error, transient_response_code,
     },
-    http::successful_http_model_response,
     prepare::PreparedRequest,
     websocket::abandon_attempt,
 };
@@ -133,23 +138,40 @@ pub(super) enum DriverTransport<'a> {
     },
 }
 
-pub(super) enum DriverFailure {
-    WebSocket(anyhow::Error),
-    Http(HttpAttemptError),
-}
-impl DriverFailure {
-    pub(super) fn into_websocket(self) -> anyhow::Error {
-        match self {
-            Self::WebSocket(error) => error,
-            Self::Http(_) => unreachable!("HTTP failure in WebSocket driver"),
+/// Collect and close streamed attempt evidence for either Responses transport.
+pub(super) async fn run_with_attempt_stream(
+    prepared: &PreparedRequest,
+    openai: &mut OpenAiProvider,
+    state: &mut AttemptState,
+    progress: &ProgressReporter,
+    run: impl AsyncFnOnce(&mut OpenAiProvider, &mut AttemptState) -> Result<ModelResponse, AttemptError>,
+) -> Result<ModelResponse, AttemptError> {
+    state.attempt = progress
+        .records_attempts()
+        .then(|| crate::attempt::AttemptStream::new(openai.profile.clone(), progress));
+    let result = run(openai, state).await;
+    state.flush_stream(progress);
+    let result = match result {
+        Ok(response) => response
+            .with_attempt_id(
+                state
+                    .attempt
+                    .as_ref()
+                    .map(|attempt| attempt.id().to_owned()),
+            )
+            .map_err(AttemptError::terminal),
+        Err(error) => {
+            if let Some(attempt) = &mut state.attempt
+                && let Err(close_error) = attempt.close_failed(progress).await
+            {
+                Err(close_error.into())
+            } else {
+                Err(error)
+            }
         }
-    }
-    pub(super) fn into_http(self) -> HttpAttemptError {
-        match self {
-            Self::Http(error) => error,
-            Self::WebSocket(_) => unreachable!("WebSocket failure in HTTP driver"),
-        }
-    }
+    };
+    Diagnostics::finish(prepared, openai, result.as_ref().ok());
+    result
 }
 
 pub(super) struct DriverContext<'a, 'clock> {
@@ -233,19 +255,16 @@ impl<'a> ResponseDriver<'a> {
         &self,
         ctx: &mut DriverContext<'_, '_>,
         error: anyhow::Error,
-    ) -> DriverFailure {
+    ) -> AttemptError {
         match self.transport {
             DriverTransport::WebSocket { .. } => {
                 abandon_attempt(ctx.openai, ctx.state);
-                DriverFailure::WebSocket(error)
+                AttemptError::terminal(error)
             }
             DriverTransport::Http {
                 upstream_request_id,
                 ..
-            } => DriverFailure::Http(HttpAttemptError::terminal_response(
-                error,
-                upstream_request_id,
-            )),
+            } => AttemptError::terminal_response(error, upstream_request_id),
         }
     }
 
@@ -255,29 +274,38 @@ impl<'a> ResponseDriver<'a> {
         response_id: String,
         usage: Option<TokenUsage>,
         done: bool,
-    ) -> Result<ModelResponse, DriverFailure> {
-        match self.transport {
-            DriverTransport::WebSocket { .. } => {
-                ctx.openai.ws.pending_done_response_id = if done {
-                    None
-                } else {
-                    Some(response_id.clone())
-                };
-                successful_model_response(ctx.openai, ctx.state, ctx.prepared, response_id, usage)
-                    .map_err(DriverFailure::WebSocket)
-            }
-            DriverTransport::Http {
-                upstream_request_id,
-                ..
-            } => successful_http_model_response(&ctx.openai.profile, ctx.state, usage).map_err(
+    ) -> Result<ModelResponse, AttemptError> {
+        if let DriverTransport::Http {
+            upstream_request_id,
+            ..
+        } = self.transport
+        {
+            return finalize_native_response(&ctx.openai.profile, ctx.state, usage).map_err(
                 |error| {
-                    DriverFailure::Http(HttpAttemptError::terminal_response(
-                        error,
+                    AttemptError::terminal_response(
+                        error.with_context("OpenAI HTTP"),
                         upstream_request_id,
-                    ))
+                    )
                 },
-            ),
+            );
         }
+        let ws = &mut ctx.openai.responses_transport.ws;
+        ws.pending_done_response_id = (!done).then(|| response_id.clone());
+        ws.touch();
+        let response = finalize_native_response(&ctx.openai.profile, ctx.state, usage).map_err(|error| {
+            let reason = error.reason();
+            ws.invalidate_continuation(reason);
+            let error = error.with_context("OpenAI");
+            tracing::warn!(reason, socket_generation = ws.socket_generation, %error, "rejecting OpenAI native output");
+            AttemptError::terminal(error)
+        })?;
+        ws.continuation = Some(crate::connection::ContinuationState::after_response(
+            ctx.prepared,
+            ws.socket_generation,
+            response_id,
+            &response,
+        )?);
+        Ok(response)
     }
 
     fn failed_terminal(
@@ -285,8 +313,8 @@ impl<'a> ResponseDriver<'a> {
         ctx: &mut DriverContext<'_, '_>,
         id: Option<String>,
         done: bool,
-        error: anyhow::Error,
-    ) -> DriverFailure {
+        error: AttemptError,
+    ) -> AttemptError {
         match self.transport {
             DriverTransport::WebSocket { .. } => {
                 if done {
@@ -294,81 +322,65 @@ impl<'a> ResponseDriver<'a> {
                 } else {
                     ctx.state.reset_result();
                 }
-                ctx.openai.ws.invalidate_continuation("response_failed");
+                ctx.openai
+                    .responses_transport
+                    .ws
+                    .invalidate_continuation("response_failed");
                 if !done {
-                    ctx.openai.ws.pending_done_response_id = id;
+                    ctx.openai.responses_transport.ws.pending_done_response_id = id;
                 }
-                DriverFailure::WebSocket(error)
+                error
             }
             DriverTransport::Http {
                 upstream_request_id,
                 ..
             } => {
                 ctx.state.reset_result();
-                ctx.openai.ws.invalidate_continuation("response_failed");
-                DriverFailure::Http(response_attempt_error(error, upstream_request_id))
+                ctx.openai
+                    .responses_transport
+                    .ws
+                    .invalidate_continuation("response_failed");
+                response_attempt_error(error, upstream_request_id)
             }
         }
     }
 
-    fn server_error(&self, ctx: &mut DriverContext<'_, '_>, error: ErrorEvent) -> DriverFailure {
+    fn server_error(&self, ctx: &mut DriverContext<'_, '_>, error: ErrorEvent) -> AttemptError {
+        let code = error.error.code.as_deref();
+        let detail = diagnostic_detail(&error.to_string());
+        // Structured size evidence wins over disconnect prose, connection
+        // limits, stale response IDs, and generic transient classification.
+        if input_size_code(code) {
+            return self.terminal_error(
+                ctx,
+                classify_input_size(true, CompletionError::Provider(detail).into()),
+            );
+        }
+        let category = server_error_category(code, &detail);
         if let DriverTransport::Http {
             upstream_request_id,
             ..
         } = self.transport
         {
-            let message = diagnostic_detail(&error.to_string());
-            let code = error.error.code.as_deref();
-            let category = if input_size_code(code) {
-                None
-            } else if message_reports_upstream_disconnect(&message) {
-                Some("upstream_disconnect")
-            } else if transient_response_code(code) {
-                Some(if code == Some("rate_limit_exceeded") {
-                    "rate_limit_exceeded"
-                } else {
-                    "server_error"
-                })
-            } else {
-                None
-            };
-            let error = classify_input_size(
-                input_size_code(code),
-                CompletionError::Provider(message).into(),
-            );
-            return DriverFailure::Http(match category {
+            let error = CompletionError::Provider(detail);
+            return match category {
                 Some(category) => {
-                    HttpAttemptError::retryable_response(category, error, upstream_request_id)
+                    AttemptError::retryable_response(category, error, upstream_request_id)
                 }
-                None => HttpAttemptError::terminal_response(error, upstream_request_id),
-            });
+                None => AttemptError::terminal_response(error, upstream_request_id),
+            };
         }
-        // Size rejection still wins over disconnect prose, connection limits,
-        // stale IDs and generic transient classifications on WebSocket.
-        if input_size_code(error.error.code.as_deref()) {
-            return self.terminal_error(
-                ctx,
-                classify_input_size(
-                    true,
-                    CompletionError::Provider(diagnostic_detail(&error.to_string())).into(),
-                ),
-            );
-        }
-        if error_reports_websocket_connection_limit(error.error.code.as_deref()) {
-            let message = diagnostic_detail(&error.to_string());
-            ctx.openai
-                .ws
-                .session
-                .terminate(OpenAiWebSocketTerminalCategory::ConnectionLimit);
-            abandon_attempt(ctx.openai, ctx.state);
-            return DriverFailure::WebSocket(
-                WebSocketDisconnected::from_server_reason(
-                    "generating the response (the server reached its websocket connection limit)",
-                    message,
-                    "connection_limit",
-                )
-                .into(),
-            );
+        abandon_attempt(ctx.openai, ctx.state);
+        let ws = &mut ctx.openai.responses_transport.ws;
+        if error_reports_websocket_connection_limit(code) {
+            let terminal = OpenAiWebSocketTerminalCategory::ConnectionLimit;
+            ws.session.terminate(terminal);
+            return WebSocketDisconnected::from_server_reason(
+                "generating the response (the server reached its websocket connection limit)",
+                detail,
+                terminal,
+            )
+            .into();
         }
         if matches!(
             self.transport,
@@ -376,44 +388,25 @@ impl<'a> ResponseDriver<'a> {
                 previous_response: true,
                 ..
             }
-        ) && error_reports_missing_previous_response(
-            error.error.code.as_deref(),
-            error.error.message.as_deref(),
-        ) {
-            ctx.openai.ws.invalidate_continuation("stale_response_id");
-            abandon_attempt(ctx.openai, ctx.state);
-            return DriverFailure::WebSocket(StaleResponseId.into());
+        ) && error_reports_missing_previous_response(code, error.error.message.as_deref())
+        {
+            ws.invalidate_continuation("stale_response_id");
+            return AttemptError::retryable(RetryCategory::StaleResponseId, StaleResponseId);
         }
-        abandon_attempt(ctx.openai, ctx.state);
-        let message = diagnostic_detail(&error.to_string());
-        if message_reports_upstream_disconnect(&message) {
-            ctx.openai
-                .ws
-                .session
-                .terminate(OpenAiWebSocketTerminalCategory::UpstreamDisconnect);
-            return DriverFailure::WebSocket(
+        match category {
+            Some(RetryCategory::UpstreamDisconnect) => {
+                let terminal = OpenAiWebSocketTerminalCategory::UpstreamDisconnect;
+                ws.session.terminate(terminal);
                 WebSocketDisconnected::from_server_reason(
                     "generating the response (the server reported an upstream transport failure)",
-                    message,
-                    "upstream_disconnect",
+                    detail,
+                    terminal,
                 )
-                .into(),
-            );
+                .into()
+            }
+            Some(category) => AttemptError::retryable(category, CompletionError::Provider(detail)),
+            None => AttemptError::terminal(CompletionError::Provider(detail)),
         }
-        if transient_response_code(error.error.code.as_deref()) {
-            return DriverFailure::WebSocket(
-                TransientResponseError {
-                    category: if error.error.code.as_deref() == Some("rate_limit_exceeded") {
-                        "rate_limit_exceeded"
-                    } else {
-                        "server_error"
-                    },
-                    source: CompletionError::Provider(message).into(),
-                }
-                .into(),
-            );
-        }
-        DriverFailure::WebSocket(CompletionError::Provider(message).into())
     }
 
     /// One shared event sequence. Transport loops retain framing, watchdog reads,
@@ -423,7 +416,7 @@ impl<'a> ResponseDriver<'a> {
         mut ctx: DriverContext<'_, '_>,
         mut raw: serde_json::Value,
         _payload_len: usize,
-    ) -> Result<Option<ModelResponse>, DriverFailure> {
+    ) -> Result<Option<ModelResponse>, AttemptError> {
         Diagnostics::observe_value(
             ctx.openai,
             &raw,
@@ -541,7 +534,10 @@ impl<'a> ResponseDriver<'a> {
                                 ),
                             );
                             if matches!(self.transport, DriverTransport::WebSocket { .. }) {
-                                ctx.openai.ws.invalidate_continuation("response_failed");
+                                ctx.openai
+                                    .responses_transport
+                                    .ws
+                                    .invalidate_continuation("response_failed");
                             }
                             return Err(error);
                         };
@@ -593,4 +589,55 @@ impl<'a> ResponseDriver<'a> {
         }
         Ok(None)
     }
+}
+
+fn server_error_category(code: Option<&str>, detail: &str) -> Option<RetryCategory> {
+    if message_reports_upstream_disconnect(detail) {
+        Some(RetryCategory::UpstreamDisconnect)
+    } else if code == Some("rate_limit_exceeded") {
+        Some(RetryCategory::RateLimitExceeded)
+    } else if transient_response_code(code) {
+        Some(RetryCategory::ServerError)
+    } else {
+        None
+    }
+}
+
+enum NativeResponseError {
+    Missing,
+    Invalid(anyhow::Error),
+}
+
+impl NativeResponseError {
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::Missing => "missing_native_output",
+            Self::Invalid(_) => "invalid_native_output",
+        }
+    }
+
+    fn with_context(self, transport: &str) -> anyhow::Error {
+        match self {
+            Self::Missing => {
+                anyhow::anyhow!("{transport} response completed without complete native output")
+            }
+            Self::Invalid(error) => error.context(format!(
+                "failed to convert captured {transport} output into an assistant message"
+            )),
+        }
+    }
+}
+
+fn finalize_native_response(
+    profile: &zevria_foundation::ModelProfileRef,
+    state: &mut AttemptState,
+    usage: Option<TokenUsage>,
+) -> Result<ModelResponse, NativeResponseError> {
+    let output = state
+        .take_native_output()
+        .ok_or(NativeResponseError::Missing)?;
+    let replay = zevria_model::ProviderReplay::openai_responses(profile.clone(), output);
+    ModelResponse::from_replay(replay)
+        .map(|response| response.with_usage(usage))
+        .map_err(NativeResponseError::Invalid)
 }

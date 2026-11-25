@@ -1,6 +1,7 @@
 //! Removable integration tests. Permanent fixtures make no diagnostic assertions.
 use super::*;
 use crate::cache_diagnostics::{dispatch, inspect};
+use zevria_session_api::TurnEvent;
 
 #[path = "partial_tests.rs"]
 mod partial;
@@ -69,7 +70,7 @@ async fn instructions_change_only_for_same_tool_workflow_switch_not_activation()
             }
             let instructions = set.render();
             let request = ModelRequest { input_identity: None, tools: &[], forbid_tool_calls: false, instructions: &instructions, input: history.iter().map(zevria_model::OwnedModelRequestItem::as_borrowed).collect(), model_role: ModelRole::Build, allowed_tool_names: None };
-            let prepared = crate::turn::prepare_turn_request(&request, &mut provider).await.unwrap();
+            let prepared = crate::responses::prepare_turn_request(&request, &mut provider).await.unwrap();
             let prepared = dispatch(prepared, &mut provider);
             let response = zevria_model::ModelResponse::from_replay(ProviderReplay::openai_responses(provider.profile.clone(), vec![json!({"type":"message", "id":format!("reply-{index}"), "role":"assistant", "status":"completed", "content":[{"type":"output_text", "text":"done"}]})])).unwrap();
             crate::cache_diagnostics::finish(&prepared, &mut provider, Some(&response));
@@ -289,6 +290,54 @@ async fn high_low_high_mock_usage_keeps_matching_prefix_after_reconnect() {
 }
 
 #[tokio::test]
+async fn attempt_finished_is_logged_even_when_the_failed_attempt_cannot_be_checkpointed() {
+    if isolated("attempt_finished_is_logged_even_when_the_failed_attempt_cannot_be_checkpointed") {
+        return;
+    }
+    let _lock = CAPTURED_LOG_TEST_LOCK.lock().await;
+    let (logs, subscriber) = capture();
+    async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/responses", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            receive_http_json(&mut stream).await;
+            send_http_response(
+                &mut stream,
+                "200 OK",
+                "text/event-stream",
+                sse_data(output_text_delta("partial never completed", 0).to_string()),
+            )
+            .await;
+        });
+        let mut provider = connect_http_test_provider(url).await;
+        let (checkpoint_tx, checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(checkpoint_rx);
+        let progress = discard_updates().with_checkpoints(checkpoint_tx);
+        let prompt = Message::user("synthetic prompt");
+        let error = provider
+            .complete(request(vec![ModelRequestItem::message(&prompt)]), progress)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("attempt checkpoint receiver closed"),
+            "{error:#}"
+        );
+        server.await.unwrap();
+    }
+    .with_subscriber(subscriber)
+    .await;
+    let text = logs.contents();
+    let finished: Vec<_> = diagnostic_lines(&text)
+        .into_iter()
+        .filter(|line| line.contains("diagnostic_event=\"attempt_finished\""))
+        .collect();
+    assert_eq!(finished.len(), 1, "{text}");
+    assert!(finished[0].contains("validated_completion=false"));
+    assert!(finished[0].contains("baseline_promoted=false"));
+}
+
+#[tokio::test]
 async fn baseline_survives_reconnect_fallback_retry_and_maintenance_but_not_reset() {
     if isolated("baseline_survives_reconnect_fallback_retry_and_maintenance_but_not_reset") {
         return;
@@ -351,17 +400,17 @@ async fn baseline_survives_reconnect_fallback_retry_and_maintenance_but_not_rese
         provider.additional_params.insert("prompt_cache_options".into(), json!({"comparison_response_id":"resp_operator_baseline", "mode":"implicit"}));
         assert!(before.0.is_some());
         assert_eq!(before.1, 2);
-        provider.ws.reconnect().await.unwrap();
+        provider.responses_transport.ws.reconnect().await.unwrap();
         assert_eq!(inspect(&provider), before);
-        assert!(provider.ws.continuation.is_none());
+        assert!(provider.responses_transport.ws.continuation.is_none());
         provider.switch_to_http("websocket_upgrade_required");
-        assert!(matches!(provider.http_fallback, Some(crate::connection::HttpFallback::Sticky(_))));
+        assert!(matches!(provider.responses_transport.fallback(), Some(crate::connection::HttpFallback::Sticky(_))));
         assert_eq!(inspect(&provider), before);
         let next = Message::user("next prompt");
         let replay = first.record().provider_replay().unwrap();
         let owned = zevria_model::OwnedModelRequestItem::replay_backed(replay.clone()).unwrap();
         let next_request = || request(vec![ModelRequestItem::message(&prompt), owned.as_borrowed(), ModelRequestItem::message(&next)]);
-        let prepared = crate::turn::prepare_turn_request(&next_request(), &mut provider).await.unwrap();
+        let prepared = crate::responses::prepare_turn_request(&next_request(), &mut provider).await.unwrap();
         assert!(prepared.cache_diagnostics.is_none());
         assert_eq!(inspect(&provider), before);
         provider.input_token_count_url = Some(format!("http://{address}/input_tokens").parse().unwrap());
@@ -390,7 +439,7 @@ async fn baseline_survives_reconnect_fallback_retry_and_maintenance_but_not_rese
         assert_eq!(inspect(&provider).0, after.0);
         provider.reset();
         assert_eq!(inspect(&provider), (None, 0, 1, None));
-        let prepared = crate::turn::prepare_turn_request(&next_request(), &mut provider).await.unwrap();
+        let prepared = crate::responses::prepare_turn_request(&next_request(), &mut provider).await.unwrap();
         let _ = dispatch(prepared, &mut provider);
         let mut other = connect_http_test_provider(format!("http://{address}/responses")).await;
         crate::cache_diagnostics::configure(&mut other, &crate::CacheDiagnosticContext::new(&transcript_path, "test-session"));
@@ -438,7 +487,7 @@ async fn large_history_logs_are_bounded_and_profiles_do_not_share_baselines() {
         let messages = (0..1000).map(|_| Message::user("PRIVATE_PROMPT_ARGUMENT_CONTENT".repeat(40))).collect::<Vec<_>>();
         for count in [1, 1000] {
             let request = request(messages[..count].iter().map(ModelRequestItem::message).collect());
-            let prepared = crate::turn::prepare_turn_request(&request, &mut provider).await.unwrap();
+            let prepared = crate::responses::prepare_turn_request(&request, &mut provider).await.unwrap();
             let wire_before = serde_json::to_vec(&prepared.full_input).unwrap();
             let prepared = dispatch(prepared, &mut provider);
             assert_eq!(serde_json::to_vec(&prepared.full_input).unwrap(), wire_before, "diagnostic canonicalization cannot rewrite wire values");
@@ -451,7 +500,7 @@ async fn large_history_logs_are_bounded_and_profiles_do_not_share_baselines() {
         assert!(old.0.is_some());
         provider.profile = zevria_foundation::ModelProfileRef::new("another-profile", "another-model");
         let next = request(vec![ModelRequestItem::message(&messages[0])]);
-        let prepared = crate::turn::prepare_turn_request(&next, &mut provider).await.unwrap();
+        let prepared = crate::responses::prepare_turn_request(&next, &mut provider).await.unwrap();
         let _ = dispatch(prepared, &mut provider);
         assert_eq!(inspect(&provider).0, None);
         assert_eq!(inspect(&provider).2, old.2 + 1);
@@ -478,24 +527,33 @@ async fn preflight_observes_pump_failure_without_dequeuing_or_inventing_idle_dea
     });
     let (socket, _) = connect_async(format!("ws://{address}")).await.unwrap();
     let mut provider = test_session(socket, None);
-    provider.ws.last_activity = std::time::Instant::now() - std::time::Duration::from_secs(742);
-    let terminal = wait_for_terminal(&provider.ws.session).await;
+    provider.responses_transport.ws.last_activity =
+        std::time::Instant::now() - std::time::Duration::from_secs(742);
+    let terminal = wait_for_terminal(&provider.responses_transport.ws.session).await;
     assert_eq!(terminal, OpenAiWebSocketTerminalCategory::ReadError);
-    let observed = provider.ws.session.cache_diagnostics.observation().unwrap();
+    let observed = provider
+        .responses_transport
+        .ws
+        .session
+        .cache_diagnostics
+        .observation()
+        .unwrap();
     assert_eq!(observed.category, terminal);
-    assert!(observed.at.unwrap().elapsed() < provider.ws.idle_for());
+    assert!(observed.at.unwrap().elapsed() < provider.responses_transport.ws.idle_for());
     assert!(observed.error_class.is_some());
     provider
+        .responses_transport
         .ws
         .session
         .terminate(OpenAiWebSocketTerminalCategory::LocalCancellation);
     assert_eq!(
-        provider.ws.session.terminal_status(),
+        provider.responses_transport.ws.session.terminal_status(),
         Some(terminal),
         "observed failure precedence stays unchanged"
     );
     assert_eq!(
         provider
+            .responses_transport
             .ws
             .session
             .cache_diagnostics
@@ -505,7 +563,7 @@ async fn preflight_observes_pump_failure_without_dequeuing_or_inventing_idle_dea
         observed.at
     );
     assert!(matches!(
-        provider.ws.session.next().await,
+        provider.responses_transport.ws.session.next().await,
         Some(OpenAiWebSocketInbound::Error(_))
     ));
     server.await.unwrap();
@@ -641,7 +699,7 @@ async fn late_done_has_prior_owner_and_missing_cached_counter_is_not_a_raw_zero(
         while let Ok(update) = updates.try_recv() {
             if matches!(
                 update,
-                SessionUpdate::Lifecycle(SessionEvent::UsageUpdated { .. })
+                SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::UsageUpdated { .. }))
             ) {
                 usage_count += 1;
             }
@@ -798,7 +856,7 @@ async fn wire_and_routing_changes_are_explicit_and_reset_covers_lazy_profiles() 
         let mut provider = OpenAiProvider::connect(&profile, zevria_foundation::ReasoningLevel::Medium, "", "test-session", "cache-key").await.unwrap();
         crate::cache_diagnostics::configure(&mut provider, &context);
         let prompt = Message::user("first prompt");
-        let prepared = crate::turn::prepare_turn_request(&request(vec![ModelRequestItem::message(&prompt)]), &mut provider).await.unwrap();
+        let prepared = crate::responses::prepare_turn_request(&request(vec![ModelRequestItem::message(&prompt)]), &mut provider).await.unwrap();
         let prepared = dispatch(prepared, &mut provider);
         let response = zevria_model::ModelResponse::from_replay(ProviderReplay::openai_responses(provider.profile.clone(), vec![json!({"type":"message","id":"msg_fixture","role":"assistant","status":"completed","content":[{"type":"output_text","text":"reply"}]})])).unwrap();
         crate::cache_diagnostics::finish(&prepared, &mut provider, Some(&response));
@@ -806,10 +864,10 @@ async fn wire_and_routing_changes_are_explicit_and_reset_covers_lazy_profiles() 
         // Load into a new diagnostic state before comparing a mutated wire body.
         let mut provider = OpenAiProvider::connect(&profile, zevria_foundation::ReasoningLevel::Medium, "", "changed-routing-value", "cache-key").await.unwrap();
         crate::cache_diagnostics::configure(&mut provider, &context);
-        assert!(provider.ws.continuation.is_none());
+        assert!(provider.responses_transport.ws.continuation.is_none());
         let reply = response.into_record().into_model_request_item();
         let next = Message::user("ok");
-        let prepared = crate::turn::prepare_turn_request(&request(vec![ModelRequestItem::message(&prompt), reply.as_borrowed(), ModelRequestItem::message(&next)]), &mut provider).await.unwrap();
+        let prepared = crate::responses::prepare_turn_request(&request(vec![ModelRequestItem::message(&prompt), reply.as_borrowed(), ModelRequestItem::message(&next)]), &mut provider).await.unwrap();
         let prepared = dispatch(prepared, &mut provider);
         let mut body = prepared.request_properties.as_ref().clone();
         body["stream"] = json!(true);
@@ -825,7 +883,7 @@ async fn wire_and_routing_changes_are_explicit_and_reset_covers_lazy_profiles() 
         // A later faithful wire must not hide the previous known wire mismatch.
         let second_reply = response.into_record().into_model_request_item();
         let third_prompt = Message::user("after mismatch");
-        let prepared = crate::turn::prepare_turn_request(&request(vec![ModelRequestItem::message(&prompt), reply.as_borrowed(), ModelRequestItem::message(&next), second_reply.as_borrowed(), ModelRequestItem::message(&third_prompt)]), &mut provider).await.unwrap();
+        let prepared = crate::responses::prepare_turn_request(&request(vec![ModelRequestItem::message(&prompt), reply.as_borrowed(), ModelRequestItem::message(&next), second_reply.as_borrowed(), ModelRequestItem::message(&third_prompt)]), &mut provider).await.unwrap();
         let prepared = dispatch(prepared, &mut provider);
         let mut body = prepared.request_properties.as_ref().clone();
         body["stream"] = json!(true);

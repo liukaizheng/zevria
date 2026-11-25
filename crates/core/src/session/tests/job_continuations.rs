@@ -3,6 +3,7 @@ use zevria_foundation::{
     CommandJobMode, CommandJobNoticeKind, CommandJobStatus, TerminationOrigin,
 };
 use zevria_session_api::{CommandJobLimits, CommandJobs, CommandStream, JobHandle};
+use zevria_session_api::{JobEvent, TurnEvent};
 
 fn jobs() -> CommandJobs {
     CommandJobs::new(
@@ -105,7 +106,7 @@ async fn listed_job_with_detached_output_still_delivers_its_note_and_unread_outp
         .lifecycle
         .iter()
         .find_map(|event| match event {
-            SessionEvent::CommandJobsReported { notice, .. } => Some(notice),
+            SessionEvent::Job(JobEvent::Reported { notice, .. }) => Some(notice),
             _ => None,
         })
         .expect("listed completion was not delivered");
@@ -161,7 +162,7 @@ async fn dispatch_boundary_delivers_once_after_complete_tool_batch_with_static_p
         first_request.allowed_tool_names
     );
     assert!(jobs.take_unread(&job.snapshot().id).unwrap().0.is_empty());
-    assert!(run.lifecycle.iter().any(|e| matches!(e, SessionEvent::CommandJobsReported { notice, .. } if notice.kind() == CommandJobNoticeKind::Update)));
+    assert!(run.lifecycle.iter().any(|e| matches!(e, SessionEvent::Job(JobEvent::Reported { notice, .. }) if notice.kind() == CommandJobNoticeKind::Update)));
     answer(second, "done");
     run.completed(TurnId::new(1)).await;
     run.shutdown().await;
@@ -205,9 +206,9 @@ async fn idle_completion_advertises_then_continues_as_a_standard_append_only_req
     run.until(|e| {
         matches!(
             e,
-            SessionEvent::JobContinuationChanged {
+            SessionEvent::Job(JobEvent::ContinuationChanged {
                 mode: Some(SessionMode::Build)
-            }
+            })
         )
     })
     .await;
@@ -233,7 +234,7 @@ async fn idle_completion_advertises_then_continues_as_a_standard_append_only_req
     assert!(
         run.lifecycle
             .iter()
-            .any(|e| matches!(e, SessionEvent::JobContinuationStarted { .. }))
+            .any(|e| matches!(e, SessionEvent::Job(JobEvent::ContinuationStarted { .. })))
     );
     answer(resumed, "job failed");
     run.completed(TurnId::new(2)).await;
@@ -264,24 +265,23 @@ async fn cancelled_and_failed_origins_are_passive_status_only_and_keep_output_un
             run.send(SessionCommand::Control(ControlCommand::CancelTurn {
                 turn_id: None,
             }));
-            run.until(|e| matches!(e, SessionEvent::TurnCancelled { .. }))
+            run.until(|e| matches!(e, SessionEvent::Turn(TurnEvent::Cancelled { .. })))
                 .await;
         } else {
             first
                 .response
                 .send(Err(anyhow::anyhow!("provider failed")))
                 .unwrap();
-            run.until(|e| matches!(e, SessionEvent::TurnFailed { .. }))
+            run.until(|e| matches!(e, SessionEvent::Turn(TurnEvent::Failed { .. })))
                 .await;
         }
         run.until(|e| matches!(e, SessionEvent::EngineIdle)).await;
         finish(&job).await;
         run.idle_fence("after-finish").await;
-        assert!(
-            !run.lifecycle
-                .iter()
-                .any(|e| matches!(e, SessionEvent::JobContinuationChanged { mode: Some(_) }))
-        );
+        assert!(!run.lifecycle.iter().any(|e| matches!(
+            e,
+            SessionEvent::Job(JobEvent::ContinuationChanged { mode: Some(_) })
+        )));
         run.send(submit("new work"));
         let next = run.call(&mut calls).await;
         let input = notice_in(&next.request);
@@ -338,8 +338,8 @@ async fn ready_plan_holds_results_until_implementation_handoff() {
     assert_eq!(jobs.pending_completions().len(), 1);
     assert!(!run.lifecycle.iter().any(|e| matches!(
         e,
-        SessionEvent::CommandJobsReported { .. }
-            | SessionEvent::JobContinuationChanged { mode: Some(_) }
+        SessionEvent::Job(JobEvent::Reported { .. })
+            | SessionEvent::Job(JobEvent::ContinuationChanged { mode: Some(_) })
     )));
     run.send(SessionCommand::Turn(TurnCommand::ResolvePlan {
         expected: artifact.version,
@@ -386,10 +386,10 @@ async fn mode_selection_cannot_implicitly_change_plan_workflow() {
             .unwrap();
         assert_eq!(engine.continuation_offer(), None);
         assert!(
-            !collect_events(&mut receiver)
-                .await
-                .iter()
-                .any(|e| matches!(e, SessionEvent::JobContinuationChanged { mode: Some(_) }))
+            !collect_events(&mut receiver).await.iter().any(|e| matches!(
+                e,
+                SessionEvent::Job(JobEvent::ContinuationChanged { mode: Some(_) })
+            ))
         );
     }
 }
@@ -420,7 +420,10 @@ async fn cap_resets_on_user_work_and_stale_rejection_loses_no_completion() {
             .iter()
             .rev()
             .take_while(|e| !matches!(e, SessionEvent::EngineIdle))
-            .any(|e| matches!(e, SessionEvent::JobContinuationChanged { mode: Some(_) }))
+            .any(|e| matches!(
+                e,
+                SessionEvent::Job(JobEvent::ContinuationChanged { mode: Some(_) })
+            ))
     );
     run.send(submit("user reset"));
     let user = run.call(&mut calls).await;
@@ -431,15 +434,15 @@ async fn cap_resets_on_user_work_and_stale_rejection_loses_no_completion() {
     run.until(|e| {
         matches!(
             e,
-            SessionEvent::JobContinuationChanged {
+            SessionEvent::Job(JobEvent::ContinuationChanged {
                 mode: Some(SessionMode::Build)
-            }
+            })
         )
     })
     .await;
     run.until(|e| matches!(e, SessionEvent::EngineIdle)).await;
     run.send(continue_jobs(SessionMode::Plan));
-    run.until(|e| matches!(e, SessionEvent::TurnRejected { .. }))
+    run.until(|e| matches!(e, SessionEvent::Turn(TurnEvent::Rejected { .. })))
         .await;
     run.until(|e| matches!(e, SessionEvent::EngineIdle)).await;
     assert_eq!(jobs.pending_completions().len(), 1);
@@ -549,8 +552,8 @@ async fn accepted_submit_plan_never_delivers_completions_before_approval() {
     assert_eq!(jobs.pending_completions().len(), 1);
     assert!(!run.lifecycle.iter().any(|e| matches!(
         e,
-        SessionEvent::JobContinuationChanged { mode: Some(_) }
-            | SessionEvent::CommandJobsReported { .. }
+        SessionEvent::Job(JobEvent::ContinuationChanged { mode: Some(_) })
+            | SessionEvent::Job(JobEvent::Reported { .. })
     )));
     run.shutdown().await;
 }
@@ -584,7 +587,7 @@ async fn failed_continuation_commit_preserves_pending_output_and_transcript() {
         collect_events(&mut receiver)
             .await
             .iter()
-            .any(|event| matches!(event, SessionEvent::TurnRejected { .. }))
+            .any(|event| matches!(event, SessionEvent::Turn(TurnEvent::Rejected { .. })))
     );
     blocker.restore().unwrap();
 }

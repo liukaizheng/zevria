@@ -1,13 +1,16 @@
 //! Cross-platform, non-interactive credential helper fixtures.
 use super::*;
+use zevria_session_api::TurnEvent;
 use zevria_session_api::{SessionEvent, SessionEventReceiver, SessionUpdate};
 
 pub(crate) fn retry_events(receiver: &mut SessionEventReceiver) -> Vec<(usize, String)> {
     std::iter::from_fn(|| receiver.try_recv().ok())
         .filter_map(|update| match update {
-            SessionUpdate::Lifecycle(SessionEvent::TurnRetrying { attempt, error, .. }) => {
-                Some((attempt, error))
-            }
+            SessionUpdate::Lifecycle(SessionEvent::Turn(TurnEvent::Retrying {
+                attempt,
+                error,
+                ..
+            })) => Some((attempt, error)),
             _ => None,
         })
         .collect()

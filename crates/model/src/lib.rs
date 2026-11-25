@@ -30,3 +30,6 @@ pub use record::MessageRecord;
 pub use request::*;
 pub use telemetry::*;
 pub use tools::{ToolDeclaration, ToolDeclarations};
+
+mod retry;
+pub use retry::RetryCategory;

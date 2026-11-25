@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::ManagementEvent;
 
 struct ModeSettings;
 impl zevria_model::models::ModelSettingsService for ModeSettings {
@@ -53,8 +54,10 @@ async fn select(
         )
         .await
         .unwrap();
-    let SessionUpdate::Lifecycle(SessionEvent::ModeResult { request_id, result }) =
-        receiver.try_recv().unwrap()
+    let SessionUpdate::Lifecycle(SessionEvent::Manage(ManagementEvent::ModeResult {
+        request_id,
+        result,
+    })) = receiver.try_recv().unwrap()
     else {
         panic!("selection must return only its correlated result");
     };

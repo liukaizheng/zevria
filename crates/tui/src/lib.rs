@@ -3,6 +3,7 @@
 pub(crate) use zevria_presentation::agents as agent_transcript;
 mod app;
 mod clipboard;
+mod fold;
 mod frame_layout;
 mod hints;
 mod input;

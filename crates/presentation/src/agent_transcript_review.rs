@@ -46,7 +46,8 @@ impl AgentTranscriptReducer {
                     return;
                 }
                 self.review_inputs.insert(input.request_id.clone());
-                self.review_prompts
+                self.echo
+                    .review_prompts
                     .insert(input.generation, input.text.clone());
                 let annotation = self.review.inputs.entry(input.generation).or_default();
                 annotation.origin = match input.kind {
@@ -83,19 +84,21 @@ impl AgentTranscriptReducer {
                 ) {
                     return;
                 }
-                if self.review_prompts.contains_key(&generation)
+                if self.echo.review_prompts.contains_key(&generation)
                     && self.review.active.is_none_or(|active| active <= generation)
                 {
                     self.review.active = Some(generation);
                     self.review.publication_enabled = false;
-                    self.image_echoes = self
+                    self.echo.image_echoes = self
+                        .echo
                         .review_prompts
                         .get(&generation)
                         .into_iter()
                         .flat_map(|prompt| prompt.images().cloned())
                         .collect();
-                    self.prompt_echo =
-                        self.review_prompts
+                    self.echo.prompt_echo =
+                        self.echo
+                            .review_prompts
                             .get(&generation)
                             .map(|prompt| PromptEcho {
                                 prompt: prompt.text_projection(),
@@ -560,7 +563,9 @@ impl AgentTranscriptReducer {
             if let Some(location) = self.review.notices.remove(&key)
                 && conversation.remove_block(location.history_index, location.block_id)
             {
-                self.hosted_actions_dirty.insert(location.history_index);
+                self.coverage
+                    .hosted_actions_dirty
+                    .insert(location.history_index);
             }
             return;
         };
@@ -584,61 +589,41 @@ impl AgentTranscriptReducer {
         state: &WorkerReviewState,
     ) {
         if self.review_abandoned
-            || state.accepted_generation < self.review.snapshot_generation
+            || state.inputs.accepted_generation < self.review.snapshot_generation
             || self
                 .review
                 .settlements
                 .keys()
-                .any(|generation| *generation > state.settled_generation)
-            || state.active.as_ref().is_some_and(|input| {
+                .any(|generation| *generation > state.inputs.settled_generation)
+            || state.inputs.active.as_ref().is_some_and(|input| {
                 self.review
                     .inputs
                     .get(&input.generation)
                     .and_then(|input| input.latest_attempt)
-                    .is_some_and(|attempt| attempt > state.attempt)
+                    .is_some_and(|attempt| attempt > state.connection.attempt)
             })
         {
             return;
         }
-        self.review.snapshot_generation = state.accepted_generation;
-        self.review.payload_error = state.synthesis_error.is_some();
+        self.review.snapshot_generation = state.inputs.accepted_generation;
+        self.review.payload_error = state.proposals.synthesis_error.is_some();
         // Snapshots correlate outcomes and receipts, not intermediate attempts:
         // active + attempt cannot distinguish dispatch from recovery. Preserve
         // the ordered journal's input/echo projection rather than inventing
         // transitions that could outrun its mirrors.
-        if let Some(candidate) = &state.candidate {
+        if let Some(candidate) = &state.proposals.candidate {
             self.record_review_publication(candidate.revision.generation, &candidate.plan);
         }
         self.review.retained = state
+            .proposals
             .retained
             .as_ref()
-            .filter(|_| !state.retained_removed)
+            .filter(|_| !state.proposals.retained_removed)
             .map(|snapshot| (snapshot.revision.generation, snapshot.plan.clone()));
-        self.review.publication_floor = state.publication_floor;
-        let generation = state.settled_generation;
-        let settlement_diagnostic = state.diagnostic.as_deref().is_some_and(|text| {
-            text.starts_with("Feedback was not incorporated:")
-                || text.starts_with("Discussion completed.")
-        });
+        self.review.publication_floor = state.proposals.publication_floor;
+        let generation = state.inputs.settled_generation;
         if generation > 0 {
-            // Core advances the publication floor on successful settlement,
-            // including prose-only success. Interrupted snapshots can retain
-            // an older evidence.failure, so prefer this host boundary and the
-            // current outcome diagnostic rather than misattributing that error.
-            let failure = (state.publication_floor < generation).then(|| {
-                state
-                    .diagnostic
-                    .as_deref()
-                    .and_then(|text| text.strip_prefix("Feedback was not incorporated: "))
-                    .map(|text| {
-                        text.split(". The preceding successful plan is retained;")
-                            .next()
-                            .unwrap_or(text)
-                            .to_string()
-                    })
-                    .or_else(|| state.evidence.failure.clone())
-                    .unwrap_or_else(|| "The interaction did not settle successfully".into())
-            });
+            let failure = state.settlement_failure.clone();
             let has_publication = self
                 .review
                 .retained
@@ -659,26 +644,25 @@ impl AgentTranscriptReducer {
             }
             self.refresh_settlement_notice(conversation, generation);
         }
-        if let Some(receipt) = &state.confirmation
+        if let Some(receipt) = &state.proposals.confirmation
             && state
+                .proposals
                 .baseline
                 .as_ref()
                 .is_none_or(|baseline| baseline.request_id != receipt.request_id)
         {
             self.review_receipt(conversation, receipt.clone(), false);
         }
-        if let Some(receipt) = &state.baseline {
+        if let Some(receipt) = &state.proposals.baseline {
             self.review_receipt(conversation, receipt.clone(), true);
         }
-        if state.sealed {
+        if state.is_sealed() {
             self.apply_review_event(conversation, Review::Sealed);
         }
-        if let Some(error) = &state.diagnostic
-            && !settlement_diagnostic
-        {
+        if let Some(error) = &state.connection_diagnostic {
             self.review_independent_error(conversation, "connection", error);
         }
-        if let Some(error) = &state.synthesis_error {
+        if let Some(error) = &state.proposals.synthesis_error {
             self.review_independent_error(conversation, "payload", error);
         }
         self.flush_projection_changes(conversation);

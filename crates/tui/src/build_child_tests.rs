@@ -1,4 +1,5 @@
 use super::*;
+use zevria_session_api::{SubtaskEvent, TurnEvent};
 
 fn build_launch() -> SubtaskLaunchMetadata {
     SubtaskLaunchMetadata {
@@ -26,39 +27,39 @@ fn late_build_descriptor_reconciles_activity_compaction_and_keeps_telemetry_sepa
             ModelRole::Builder,
             ModelProfileRef::new("configured", "builder"),
         )]));
-        views.apply(SessionEvent::TurnStarted {
+        views.apply(SessionEvent::Turn(TurnEvent::Started {
             turn_id: TEST_TURN_ID,
             message: Message::user("launch"),
             mode: SessionMode::Build,
-        });
-        views.apply(SessionEvent::Intermediate {
+        }));
+        views.apply(SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
             turn_id: TEST_TURN_ID,
             message: build_assistant(),
-        });
-        views.apply(SessionEvent::SubtaskSession {
+        }));
+        views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
             id: id.clone(),
-            event: Box::new(SessionEvent::TurnStarted {
+            event: Box::new(SessionEvent::Turn(TurnEvent::Started {
                 turn_id: TEST_TURN_ID,
                 message: Message::user("child"),
                 mode: SessionMode::Build,
-            }),
-        });
+            })),
+        }));
         if compacting {
-            views.apply(SessionEvent::SubtaskSession {
+            views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
                 id: id.clone(),
-                event: Box::new(SessionEvent::CompactionStarted {
+                event: Box::new(SessionEvent::Turn(TurnEvent::CompactionStarted {
                     turn_id: TEST_TURN_ID,
                     trigger: CompactionTrigger::AutomaticMidTurn,
-                }),
-            });
+                })),
+            }));
         }
         for role in [ModelRole::Explore, ModelRole::Builder] {
-            views.apply(SessionEvent::SubtaskSession {
+            views.apply(SessionEvent::Subtask(SubtaskEvent::Session {
                 id: id.clone(),
-                event: Box::new(SessionEvent::ContextUsageUpdated {
+                event: Box::new(SessionEvent::Turn(TurnEvent::ContextUsageUpdated {
                     turn_id: TEST_TURN_ID,
-                    snapshot: ContextTokenSnapshot {
+                    snapshot: Box::new(ContextTokenSnapshot {
                         profile: ModelProfileRef::new("runtime", role.name()),
                         model_role: role,
                         projected_input_tokens: Some(if role == ModelRole::Builder {
@@ -76,32 +77,32 @@ fn late_build_descriptor_reconciles_activity_compaction_and_keeps_telemetry_sepa
                         automatic_trigger: 40000,
                         input_token_limit: 50000,
                         context_window_tokens: 64000,
-                    },
-                }),
-            });
+                    }),
+                })),
+            }));
         }
         assert_eq!(
             views.child(&id).unwrap().in_flight_role(),
             Some(ModelRole::Explore)
         );
-        views.apply(SessionEvent::SubtaskStatus {
+        views.apply(SessionEvent::Subtask(SubtaskEvent::Status {
             turn_id: TEST_TURN_ID,
             id: id.clone(),
             status: SubtaskStatus::Failed,
-        });
-        views.apply(SessionEvent::SubtaskLaunched {
+        }));
+        views.apply(SessionEvent::Subtask(SubtaskEvent::Launched {
             turn_id: TEST_TURN_ID,
             call_id: "build".into(),
             entry_index: 0,
-            descriptor: SubtaskDescriptor {
+            descriptor: Box::new(SubtaskDescriptor {
                 id: id.clone(),
                 title: "Create landing page".into(),
                 kind: SubtaskKind::Build,
                 workspace: Some("pages/book-1".into()),
                 parent_session_id: "root".into(),
                 status: SubtaskStatus::Starting,
-            },
-        });
+            }),
+        }));
         let child = views.child(&id).unwrap();
         assert_eq!(child.in_flight_role(), Some(ModelRole::Builder));
         assert!(
@@ -114,11 +115,11 @@ fn late_build_descriptor_reconciles_activity_compaction_and_keeps_telemetry_sepa
             attached_subtask_status(views.root(), &id),
             Some(SubtaskStatus::Failed)
         );
-        views.apply(SessionEvent::SubtaskStatus {
+        views.apply(SessionEvent::Subtask(SubtaskEvent::Status {
             turn_id: TEST_TURN_ID,
             id: id.clone(),
             status: SubtaskStatus::Running,
-        });
+        }));
         assert_eq!(
             attached_subtask_status(views.root(), &id),
             Some(SubtaskStatus::Failed)

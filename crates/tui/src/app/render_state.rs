@@ -215,7 +215,7 @@ impl App {
             })
         });
         let pending_manual = session.operation_kind() == Some(OperationKind::ManualCompaction)
-            && matches!(session.activity(), SessionActivity::Pending(_));
+            && matches!(session.activity(), SessionActivity::PendingTurn(_));
         let assistant_header = (pane.appearance()
             == crate::presentation::TranscriptAppearance::Native)
             .then(|| session.call_header())
@@ -275,13 +275,13 @@ impl App {
         } else {
             match session.activity() {
                 SessionActivity::Idle => None,
-                SessionActivity::Pending(pending)
-                    if pending.kind == OperationKind::ModeManagement =>
-                {
+                SessionActivity::Managing(_) if session.mode_selection().is_some() => {
                     Some("Selecting mode".to_string())
                 }
-                SessionActivity::Pending(_) => Some(format!("{role_name} · Waiting")),
-                SessionActivity::Active(active) => match &active.phase {
+                SessionActivity::PendingTurn(_) | SessionActivity::Managing(_) => {
+                    Some(format!("{role_name} · Waiting"))
+                }
+                SessionActivity::ActiveTurn(active) => match &active.phase {
                     ActivePhase::Compacting { .. } => Some(format!("{role_name} · Compacting")),
                     ActivePhase::AwaitingStart | ActivePhase::Running(TurnTail::Waiting) => {
                         Some(format!("{role_name} · Waiting"))
@@ -355,16 +355,8 @@ impl App {
         } else {
             pane.model_role_override()
         };
-        let (profile, context, response) = telemetry_role.map_or((None, None, None), |role| {
-            let telemetry = session.telemetry(role);
-            (
-                telemetry
-                    .authoritative_profile()
-                    .or_else(|| model_profiles.get(role))
-                    .cloned(),
-                telemetry.context().cloned(),
-                telemetry.response().map(|response| response.usage()),
-            )
+        let snapshot = telemetry_role.map(|role| {
+            zevria_presentation::status::StatusSnapshot::observe(session, model_profiles, role)
         });
         let status = StatusBarView {
             jobs: running_jobs,
@@ -373,10 +365,10 @@ impl App {
             accent,
             tone,
             detail,
-            profile,
-            reasoning: telemetry_role.and_then(|role| session.reasoning(role)),
-            context,
-            response,
+            profile: snapshot.and_then(|snapshot| snapshot.profile.cloned()),
+            reasoning: snapshot.and_then(|snapshot| snapshot.reasoning),
+            context: snapshot.and_then(|snapshot| snapshot.context.cloned()),
+            response: snapshot.and_then(|snapshot| snapshot.response),
             external_context: pane.external_context(),
             controls,
             compact_controls,
