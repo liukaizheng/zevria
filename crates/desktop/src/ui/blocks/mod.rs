@@ -12,7 +12,7 @@ use crate::{
         Attachment, BlockData, BlockKind, NoticeLevel, Step, StepPosition, ThoughtGroup,
         TimelineRow,
         command::{CommandOutput, is_redundant_input},
-        tools::{self, ToolDetail, ToolPresentation},
+        tools::{self, JobMeta, ToolDetail, ToolPresentation},
     },
 };
 use gpui_kit::component::{
@@ -85,6 +85,19 @@ fn image_preview(image: Arc<Image>, (width, height): (u32, u32), cx: &App) -> Di
 
 type PromptAttachment = (String, (u32, u32), Arc<Image>);
 
+const JOB_ACTION_SIZE: f32 = 20.;
+const JOB_ACTION_GAP: f32 = 2.;
+const LIVE_CONTROLS_RIGHT: f32 = 10. + 14. + 8.; // Trigger padding, status icon, header gap.
+const SHOW_IN_JOBS_ACTION: usize = 3;
+
+fn live_controls_width(job: &JobMeta) -> f32 {
+    if job.foreground {
+        JOB_ACTION_SIZE * 2. + JOB_ACTION_GAP
+    } else {
+        JOB_ACTION_SIZE
+    }
+}
+
 pub struct BlockView {
     row: TimelineRow,
     data: Arc<BlockData>,
@@ -104,6 +117,8 @@ pub struct BlockView {
     block_focus: FocusHandle,
     disclosure_focus: FocusHandle,
     action_focus: [FocusHandle; 4],
+    job_action_focus: [FocusHandle; 2], // Stop, background.
+    open_jobs_focus: FocusHandle,
     focus_subscriptions: Vec<Subscription>,
     controller: Entity<SessionController>,
 }
@@ -123,7 +138,12 @@ impl BlockView {
     pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool {
         self.block_focus.contains_focused(window, cx)
             || self.disclosure_focus.is_focused(window)
-            || self.action_focus.iter().any(|f| f.is_focused(window))
+            || self.open_jobs_focus.is_focused(window)
+            || self
+                .action_focus
+                .iter()
+                .chain(&self.job_action_focus)
+                .any(|f| f.is_focused(window))
     }
     #[cfg(test)]
     pub(super) fn text_id(&self) -> EntityId {
@@ -164,6 +184,8 @@ impl BlockView {
             block_focus: cx.focus_handle(),
             disclosure_focus: cx.focus_handle(),
             action_focus: std::array::from_fn(|_| cx.focus_handle()),
+            job_action_focus: std::array::from_fn(|_| cx.focus_handle()),
+            open_jobs_focus: cx.focus_handle(),
             focus_subscriptions: vec![],
             controller,
         };
@@ -267,16 +289,27 @@ impl BlockView {
         if !row.expanded || content_changed {
             self.clear_preview(cx);
         }
-        if !row.expanded
+        let collapsed_with_panel_focus = !row.expanded
             && self.row.expanded
-            && self.contains_focus(window, cx)
+            && self.block_focus.contains_focused(window, cx)
             && !self.disclosure_focus.is_focused(window)
-            && !self.action_focus.iter().any(|f| f.is_focused(window))
-        {
-            window.focus(&self.disclosure_focus, cx);
-        }
+            && !self
+                .action_focus
+                .iter()
+                .chain(&self.job_action_focus)
+                .any(|f| f.is_focused(window));
         self.data = row.data.clone();
         self.row = row;
+        let job = self.running_job();
+        let lost_job_focus = (job.is_none() && self.job_action_focus[0].is_focused(window))
+            || (!job.is_some_and(|job| job.foreground)
+                && self.job_action_focus[1].is_focused(window))
+            || (self.action_focus[SHOW_IN_JOBS_ACTION].is_focused(window)
+                && self.inspectable_job(cx).is_none())
+            || (self.open_jobs_focus.is_focused(window) && self.waiting_command_job(cx).is_none());
+        if collapsed_with_panel_focus || lost_job_focus {
+            window.focus(&self.disclosure_focus, cx);
+        }
         if !changed {
             return;
         }
@@ -305,6 +338,33 @@ impl BlockView {
         match &self.data.kind {
             BlockKind::Step(Step::Tool(tool)) => Some(tool),
             _ => None,
+        }
+    }
+    fn running_job(&self) -> Option<&JobMeta> {
+        self.tool()?.job.as_ref().filter(|job| job.running)
+    }
+    fn can_inspect_job(&self, job: &JobMeta, cx: &App) -> bool {
+        let root = &self.controller.read(cx).model.root;
+        root.workflow.dialog().is_none() && root.jobs().iter().any(|snapshot| snapshot.id == job.id)
+    }
+    fn inspectable_job(&self, cx: &App) -> Option<&JobMeta> {
+        let tool = self.tool()?;
+        tool.job
+            .as_ref()
+            .filter(|job| (tool.background || job.running) && self.can_inspect_job(job, cx))
+    }
+    fn waiting_command_job(&self, cx: &App) -> Option<&JobMeta> {
+        let tool = self.tool()?;
+        if self.row.expanded
+            && matches!(tool.detail, ToolDetail::Command { .. })
+            && tool.status == StatusIcon::Running
+            && self.data.secondary.is_none()
+        {
+            tool.job
+                .as_ref()
+                .filter(|job| self.can_inspect_job(job, cx))
+        } else {
+            None
         }
     }
     fn prepare_details(&mut self, cx: &mut Context<Self>) {
@@ -492,22 +552,12 @@ impl BlockView {
                     }),
             );
         }
-        let workspace = &self.controller.read(cx).model;
-        if let Some(job) = self
-            .tool()
-            .and_then(|tool| tool.job.as_ref().filter(|_| tool.background))
-            && workspace.root.workflow.dialog().is_none()
-            && workspace
-                .root
-                .jobs()
-                .iter()
-                .any(|snapshot| snapshot.id == job.id)
-        {
+        if let Some(job) = self.inspectable_job(cx) {
             let id = job.id.clone();
             let controller = self.controller.clone();
             actions = actions.child(
                 style::icon_button("show-in-jobs", IconName::ExternalLink, "Show in Jobs")
-                    .track_focus(&self.action_focus[3])
+                    .track_focus(&self.action_focus[SHOW_IN_JOBS_ACTION])
                     .on_click(move |_, _, cx| {
                         controller.update(cx, |c, cx| c.inspect_job(id.clone(), cx))
                     }),
@@ -516,18 +566,32 @@ impl BlockView {
         actions
     }
 
-    fn floating_actions(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn disclosure_overlay(right: f32) -> Div {
         div()
             .absolute()
             .top_0()
             .bottom_0()
-            .right(px(6.))
+            .right(px(right))
             .flex()
             .items_center()
-            // The buttons receive the click first. Don't let it also press or toggle
-            // the disclosure trigger underneath the overlay.
+            // Let the overlay buttons handle the click without also pressing
+            // or toggling the disclosure trigger underneath them.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    }
+
+    fn floating_actions(
+        &self,
+        job: Option<&JobMeta>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let right = job.map_or(6., |job| {
+            LIVE_CONTROLS_RIGHT + live_controls_width(job) + 6.
+        });
+        Self::disclosure_overlay(right)
+            .id("floating-actions")
+            .test_support()
             .child(
                 self.actions(window, cx)
                     .px(px(3.))
@@ -539,6 +603,23 @@ impl BlockView {
             )
     }
 
+    fn live_job_controls(&self, job: &JobMeta) -> Div {
+        Self::disclosure_overlay(LIVE_CONTROLS_RIGHT)
+            .gap(px(JOB_ACTION_GAP))
+            .when(job.foreground, |controls| {
+                controls.child(
+                    jobs::background_button(job.id.clone(), self.controller.clone())
+                        .size(px(JOB_ACTION_SIZE))
+                        .track_focus(&self.job_action_focus[1]),
+                )
+            })
+            .child(
+                jobs::stop_button(job.id.clone(), self.controller.clone())
+                    .size(px(JOB_ACTION_SIZE))
+                    .track_focus(&self.job_action_focus[0]),
+            )
+    }
+
     fn disclosure_header(
         &self,
         label: String,
@@ -546,13 +627,15 @@ impl BlockView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        let job = self.running_job();
         div()
             .relative()
             .flex()
             .items_center()
             .min_w_0()
             .child(self.disclosure(label, contents, window, cx))
-            .child(self.floating_actions(window, cx))
+            .child(self.floating_actions(job, window, cx))
+            .when_some(job, |header, job| header.child(self.live_job_controls(job)))
     }
 
     fn rich_text(&self, document: bool, cx: &App) -> TextView {
@@ -812,6 +895,10 @@ impl BlockView {
                     label,
                     style::glyph_color(status, t.text.muted, cx),
                 ))
+            })
+            .when_some(self.running_job(), |header, job| {
+                // Reserve space for the sibling overlay without moving the status icon.
+                header.child(div().flex_shrink_0().w(px(live_controls_width(job))))
             })
             .child(
                 div()
@@ -1292,7 +1379,27 @@ impl BlockView {
                 );
             }
         } else if tool.status == StatusIcon::Running {
-            detail = detail.child(style::step_badge("Waiting for output…", t.text.muted));
+            detail = detail.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(style::step_badge("Waiting for output…", t.text.muted))
+                    .when_some(self.waiting_command_job(cx), |waiting, job| {
+                        let id = job.id.clone();
+                        let controller = self.controller.clone();
+                        waiting.child(
+                            Button::new("command-open-jobs")
+                                .ghost()
+                                .xsmall()
+                                .label("Show in Jobs")
+                                .track_focus(&self.open_jobs_focus)
+                                .on_click(move |_, _, cx| {
+                                    controller.update(cx, |c, cx| c.inspect_job(id.clone(), cx));
+                                }),
+                        )
+                    }),
+            );
         } else if let Some(diagnostic) = &tool.diagnostic {
             detail = detail.child(
                 style::SECONDARY
@@ -1302,20 +1409,6 @@ impl BlockView {
             );
         } else {
             detail = detail.child(style::step_badge("No output", t.text.muted));
-        }
-        if let Some(job) = tool.job.as_ref().filter(|job| job.running) {
-            detail = detail.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(style::step_badge(job.status.to_string(), t.text.muted))
-                    .child(jobs::control_buttons(
-                        &job.id,
-                        job.foreground,
-                        &self.controller,
-                    )),
-            );
         }
         detail
     }
@@ -1417,7 +1510,12 @@ pub(super) fn code_block_header(code: &CodeBlock, _: &mut Window, cx: &mut App) 
 impl Render for BlockView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.focus_subscriptions.is_empty() {
-            for handle in self.action_focus.iter().chain([&self.disclosure_focus]) {
+            for handle in self
+                .action_focus
+                .iter()
+                .chain(&self.job_action_focus)
+                .chain([&self.disclosure_focus, &self.open_jobs_focus])
+            {
                 self.focus_subscriptions
                     .push(cx.on_focus(handle, window, |_, _, cx| cx.notify()));
                 self.focus_subscriptions

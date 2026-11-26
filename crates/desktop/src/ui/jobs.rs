@@ -5,7 +5,11 @@ use super::{
     window::DesktopWindow,
 };
 use crate::{actions, controller::SessionController};
-use gpui_kit::{component::IconName, prelude::*, *};
+use gpui_kit::{
+    component::{IconName, button::Button},
+    prelude::*,
+    *,
+};
 use std::collections::HashMap;
 use zevria_foundation::CommandJobId;
 use zevria_presentation::jobs::{
@@ -306,42 +310,40 @@ pub(super) fn job_row(row: &JobRow, ink: Hsla, cx: &App) -> Div {
         )
 }
 
-pub(super) fn control_buttons(
+pub(super) fn stop_button(id: CommandJobId, controller: Entity<SessionController>) -> Button {
+    style::icon_button("job-stop", IconName::Square, "Stop command").on_click(move |_, _, cx| {
+        controller.update(cx, |controller, cx| {
+            controller.terminate_job(id.clone(), cx)
+        });
+    })
+}
+
+pub(super) fn background_button(id: CommandJobId, controller: Entity<SessionController>) -> Button {
+    style::icon_button(
+        "job-background",
+        IconName::ArrowDown,
+        "Move command to background",
+    )
+    .on_click(move |_, _, cx| {
+        controller.update(cx, |controller, cx| {
+            controller.background_job(id.clone(), cx)
+        });
+    })
+}
+
+fn control_buttons(
     id: &CommandJobId,
     foreground: bool,
     controller: &Entity<SessionController>,
 ) -> Div {
-    let stop = id.clone();
-    let background = id.clone();
-    let stop_controller = controller.clone();
-    let background_controller = controller.clone();
     div()
         .flex()
         .flex_shrink_0()
         .items_center()
         .gap(px(2.))
-        .child(
-            style::icon_button("job-stop", IconName::Square, "Stop command").on_click(
-                move |_, _, cx| {
-                    stop_controller.update(cx, |controller, cx| {
-                        controller.terminate_job(stop.clone(), cx)
-                    });
-                },
-            ),
-        )
+        .child(stop_button(id.clone(), controller.clone()))
         .when(foreground, |buttons| {
-            buttons.child(
-                style::icon_button(
-                    "job-background",
-                    IconName::ArrowDown,
-                    "Move command to background",
-                )
-                .on_click(move |_, _, cx| {
-                    background_controller.update(cx, |controller, cx| {
-                        controller.background_job(background.clone(), cx)
-                    });
-                }),
-            )
+            buttons.child(background_button(id.clone(), controller.clone()))
         })
 }
 

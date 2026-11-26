@@ -156,12 +156,29 @@ fn tool_call(id: &str, name: &str, args: Value) -> AssistantContent {
     ))
 }
 
+const COMMAND_INPUT: &str = "git status --short";
+const COMMAND_FAILURE: &str = "exit_code: 101\nduration: 1.8s\n<stdout>\n M Cargo.toml\n</stdout>\n<stderr>\npermission denied\n</stderr>";
+
 fn command() -> Message {
     Message::Assistant(AssistantMessage::new(vec![tool_call(
         "cmd",
         "command",
-        json!({"command":"git status --short"}),
+        json!({"command":COMMAND_INPUT}),
     )]))
+}
+
+fn foreground_job(call_id: &str, command: &str) -> CommandJobSnapshot {
+    CommandJobSnapshot {
+        id: CommandJobId::new(format!("job-{call_id}")),
+        call_id: Some(call_id.into()),
+        command: command.into(),
+        mode: CommandJobMode::Foreground,
+        status: CommandJobStatus::Running,
+        started_at: SystemTime::now() - Duration::from_secs(1),
+        finished_at: None,
+        stdout_bytes: 0,
+        stderr_bytes: 0,
+    }
 }
 
 fn command_row(view: &Entity<DesktopWindow>, cx: &TestAppContext) -> TimelineRow {
@@ -189,11 +206,14 @@ fn seed_disclosure_rows(controller: &Entity<SessionController>, cx: &mut TestApp
         message: Message::Assistant(AssistantMessage::new(vec![
             AssistantContent::Reasoning(Reasoning::new(THOUGHT)),
             command_call("running", "cargo check"),
-            command_call("foreground", "git status --short"),
+            command_call("foreground", COMMAND_INPUT),
             command_call("background", "cargo fmt --check"),
             tool_call("launch", "launch_subtasks", json!({})),
         ])),
         attempt_id: None,
+    }));
+    emit(E::Job(JobEvent::Updated {
+        job: Box::new(foreground_job("running", "cargo check")),
     }));
     for (id, name, output) in [
         ("foreground", "command", COMMAND_OUTPUT),
@@ -313,6 +333,19 @@ fn disclosure_tails_align_and_overlay_clicks_do_not_toggle_expansion(cx: &mut Te
             let status = reference.find("step-status").bounds();
             let tolerance = px(0.5);
             assert!((status.right() - (card.right() - px(11.))).abs() <= tolerance);
+            let stop = reference.find("job-stop").bounds();
+            let move_to_background = reference.find("job-background").bounds();
+            let hover = reference.find("floating-actions").bounds();
+            for button in [move_to_background, stop] {
+                assert_eq!(button.size, size(px(20.), px(20.)));
+                assert!(card.contains(&button.center()));
+            }
+            assert!(
+                hover.right() <= move_to_background.left()
+                    && move_to_background.right() <= stop.left()
+                    && stop.right() <= status.left(),
+                "overlapping command controls at {width}px: {hover:?}, {move_to_background:?}, {stop:?}, {status:?}"
+            );
 
             let thought = window.within(thought.data.key.clone());
             let left = thought.find("block-disclosure").bounds().left();
@@ -324,7 +357,7 @@ fn disclosure_tails_align_and_overlay_clicks_do_not_toggle_expansion(cx: &mut Te
             assert!(thought.try_find("copy").is_some());
 
             for (step, expected_actions) in [
-                (running, &["copy"][..]),
+                (running, &["copy", "show-in-jobs"][..]),
                 (foreground, &["copy", "copy-output"][..]),
                 (background, &["copy", "copy-output", "show-in-jobs"][..]),
                 (subtask, &["copy", "inspect"][..]),
@@ -411,29 +444,91 @@ fn assert_overlay_copies(
     }
 }
 
-#[gpui_kit::test]
-fn running_command_collapses_to_status_and_copies_original_input_and_output(
-    cx: &mut TestAppContext,
-) {
-    let (window, view, controller, _) = setup(cx);
-    let id = TurnId::new(20);
+fn begin_command_turn(controller: &Entity<SessionController>, cx: &mut TestAppContext) -> TurnId {
+    let turn_id = TurnId::new(20);
     event(
-        &controller,
+        controller,
         E::Turn(TurnEvent::Started {
-            turn_id: id,
+            turn_id,
             mode: SessionMode::Build,
             message: Message::user("Check the worktree"),
         }),
         cx,
     );
     event(
-        &controller,
-        E::Turn(TurnEvent::ModelCallStarted {
-            turn_id: id,
-            call: 1,
+        controller,
+        E::Turn(TurnEvent::ModelCallStarted { turn_id, call: 1 }),
+        cx,
+    );
+    turn_id
+}
+
+fn finish_command(
+    controller: &Entity<SessionController>,
+    turn_id: TurnId,
+    cx: &mut TestAppContext,
+) {
+    event(
+        controller,
+        E::Turn(TurnEvent::ToolResults {
+            turn_id,
+            metadata: vec![],
+            message: Message::tool_result(
+                CallId::from_wire("cmd"),
+                ToolName::new("command").unwrap(),
+                COMMAND_FAILURE,
+            ),
         }),
         cx,
     );
+}
+
+#[gpui_kit::test]
+fn command_stays_collapsed_at_a_stable_height_and_copies_original_input_and_output(
+    cx: &mut TestAppContext,
+) {
+    let (window, view, controller, _) = setup(cx);
+    restore(
+        &controller,
+        vec![
+            TranscriptItem::Message(Message::user("Summarize the workspace")),
+            TranscriptItem::Message(Message::assistant("Workspace notes.\n\n".repeat(80))),
+        ],
+        cx,
+    );
+    let id = begin_command_turn(&controller, cx);
+    render(window, cx);
+    assert!(
+        top(&view, cx) > (0, px(0.)),
+        "transcript must be scrollable"
+    );
+    assert!(transcript(&view, cx).read_with(cx, |v, cx| v.scroller().read(cx).is_following_tail()));
+    let prompt = rows(&view, cx)
+        .into_iter()
+        .rfind(|row| matches!(row.data.kind, BlockKind::Prompt { .. }))
+        .unwrap();
+    let prompt_top = |cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, _| {
+            window
+                .within(prompt.data.key.clone())
+                .find("prompt-card")
+                .bounds()
+                .top()
+        })
+        .unwrap()
+    };
+    let collapsed_height = |row: &TimelineRow, cx: &mut TestAppContext| {
+        assert!(!row.expanded);
+        cx.update_window(window.into(), |_, window, _| {
+            let step = window.within(row.data.key.clone());
+            let header = step.find("block-disclosure");
+            assert_eq!(header.expanded(), Some(false));
+            assert_eq!(header.bounds().size.height, px(32.));
+            step.find("timeline-step").bounds().size.height
+        })
+        .unwrap()
+    };
+    let before_start = prompt_top(cx);
     event(
         &controller,
         E::Turn(TurnEvent::Intermediate {
@@ -445,25 +540,74 @@ fn running_command_collapses_to_status_and_copies_original_input_and_output(
     );
     render(window, cx);
     let running = command_row(&view, cx);
-    assert!(running.expanded);
-    let payload = "exit_code: 101\nduration: 1.8s\n<stdout>\n M Cargo.toml\n</stdout>\n<stderr>\npermission denied\n</stderr>";
+    let height = collapsed_height(&running, cx);
+    let after_start = prompt_top(cx);
+    assert!(
+        after_start <= before_start,
+        "the prompt moved down as the command started"
+    );
+    let mut job = foreground_job("cmd", COMMAND_INPUT);
     event(
         &controller,
-        E::Turn(TurnEvent::ToolResults {
-            turn_id: id,
-            metadata: vec![],
-            message: Message::tool_result(
-                CallId::from_wire("cmd"),
-                ToolName::new("command").unwrap(),
-                payload,
-            ),
+        E::Job(JobEvent::Updated {
+            job: Box::new(job.clone()),
         }),
         cx,
     );
     render(window, cx);
+    assert_eq!(collapsed_height(&command_row(&view, cx), cx), height);
+    assert_eq!(prompt_top(cx), after_start);
+    cx.update_window(window.into(), |_, window, cx| {
+        let focus = view
+            .read(cx)
+            .transcript
+            .read(cx)
+            .test_focus(&running.data.key, cx);
+        window.focus(&focus, cx);
+        let mut step = window.within(running.data.key.clone());
+        for action in ["copy", "show-in-jobs"] {
+            step.press("tab", cx);
+            assert_eq!(step.find(action).focused(), Some(true));
+        }
+    })
+    .unwrap();
+
+    job.status = CommandJobStatus::Exited {
+        code: Some(101),
+        success: false,
+        signal: None,
+    };
+    job.finished_at = Some(SystemTime::now());
+    event(
+        &controller,
+        E::Job(JobEvent::Updated { job: Box::new(job) }),
+        cx,
+    );
+    render(window, cx);
+    assert_eq!(collapsed_height(&command_row(&view, cx), cx), height);
+    assert_eq!(prompt_top(cx), after_start);
+    cx.update_window(window.into(), |_, window, _| {
+        let step = window.within(running.data.key.clone());
+        assert!(step.try_find("show-in-jobs").is_none());
+        assert_eq!(
+            step.find("block-disclosure").focused(),
+            Some(true),
+            "focus after the foreground job exits"
+        );
+    })
+    .unwrap();
+
+    finish_command(&controller, id, cx);
+    render(window, cx);
     let finished = command_row(&view, cx);
     assert_eq!(running.data.key, finished.data.key);
-    assert!(!finished.expanded);
+    assert_eq!(collapsed_height(&finished, cx), height);
+    // The waiting tip may return, but the command itself must not shrink and
+    // pull the preceding content down as it finishes.
+    assert!(
+        prompt_top(cx) <= after_start,
+        "the prompt rebounded downward"
+    );
     let BlockKind::Step(Step::Tool(tool)) = &finished.data.kind else {
         unreachable!()
     };
@@ -503,14 +647,14 @@ fn running_command_collapses_to_status_and_copies_original_input_and_output(
         window.press(Shortcut::COPY_DISCLOSURE.0, cx);
         assert_eq!(
             cx.read_from_clipboard().and_then(|i| i.text()).as_deref(),
-            Some(finished.data.primary_copy().as_str())
+            Some(json!({"command":COMMAND_INPUT}).to_string().as_str())
         );
         let mut row = window.within(finished.data.key.clone());
         row.hover("block-disclosure", cx);
         row.click("copy-output", cx);
         assert_eq!(
             cx.read_from_clipboard().and_then(|i| i.text()).as_deref(),
-            Some(payload)
+            Some(COMMAND_FAILURE)
         );
     })
     .unwrap();
@@ -561,6 +705,77 @@ fn running_command_collapses_to_status_and_copies_original_input_and_output(
         !command_row(&view, cx).expanded,
         "replacement clears disclosure overrides"
     );
+}
+
+#[gpui_kit::test]
+fn opening_a_running_command_keeps_its_details_open_after_results(cx: &mut TestAppContext) {
+    let (window, view, controller, _) = setup(cx);
+    let turn_id = begin_command_turn(&controller, cx);
+    event(
+        &controller,
+        E::Turn(TurnEvent::Intermediate {
+            turn_id,
+            message: command(),
+            attempt_id: None,
+        }),
+        cx,
+    );
+    event(
+        &controller,
+        E::Job(JobEvent::Updated {
+            job: Box::new(foreground_job("cmd", COMMAND_INPUT)),
+        }),
+        cx,
+    );
+    render(window, cx);
+    let running = command_row(&view, cx);
+    assert!(!running.expanded);
+    cx.update_window(window.into(), |_, window, cx| {
+        window
+            .within(running.data.key.clone())
+            .click("block-disclosure", cx);
+    })
+    .unwrap();
+    render(window, cx);
+    assert!(command_row(&view, cx).expanded);
+    cx.update_window(window.into(), |_, window, cx| {
+        let mut row = window.within(running.data.key.clone());
+        assert_eq!(row.find("command-open-jobs").label(), Some("Show in Jobs"));
+        assert_eq!(row.find_all("job-stop").len(), 1);
+        assert_eq!(row.find_all("job-background").len(), 1);
+        assert!(row.try_find("command-stdout").is_none());
+        for action in [
+            "copy",
+            "show-in-jobs",
+            "job-background",
+            "job-stop",
+            "command-open-jobs",
+        ] {
+            row.press("tab", cx);
+            assert_eq!(row.find(action).focused(), Some(true));
+        }
+    })
+    .unwrap();
+
+    finish_command(&controller, turn_id, cx);
+    render(window, cx);
+    let finished = command_row(&view, cx);
+    assert_eq!(finished.data.key, running.data.key);
+    assert!(finished.expanded);
+    cx.update_window(window.into(), |_, window, _| {
+        let row = window.within(finished.data.key.clone());
+        let disclosure = row.find("block-disclosure");
+        assert_eq!(disclosure.expanded(), Some(true));
+        assert!(row.try_find("command-open-jobs").is_none());
+        assert!(row.try_find("command-stdout").is_some());
+        assert!(row.try_find("command-stderr").is_some());
+        assert_eq!(
+            disclosure.focused(),
+            Some(true),
+            "focus after output replaces the details link"
+        );
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]

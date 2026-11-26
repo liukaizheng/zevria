@@ -196,8 +196,22 @@ impl BlockData {
     pub fn default_expanded(&self) -> bool {
         match &self.kind {
             BlockKind::ThoughtGroup(thought) => thought.is_live,
-            BlockKind::Step(step) => step.status() == StatusIcon::Running,
+            BlockKind::Step(Step::Web(web)) => web.status() == StatusIcon::Running,
+            BlockKind::Step(Step::Tool(tool))
+                if matches!(tool.detail, tools::ToolDetail::WebSearch { .. }) =>
+            {
+                tool.status == StatusIcon::Running
+            }
+            BlockKind::Step(_) => false,
             _ => true,
+        }
+    }
+
+    pub fn is_active_work(&self) -> bool {
+        match &self.kind {
+            BlockKind::ThoughtGroup(thought) => thought.is_live,
+            BlockKind::Step(step) => step.status() == StatusIcon::Running,
+            _ => false,
         }
     }
 }
@@ -544,12 +558,15 @@ impl Projector {
         }
         timeline.flush_thoughts();
         if let Some(activity) = activity {
-            // The active thought/step already signals work. Reserve the tip for
-            // waiting, switching calls, reconnecting, or otherwise out-of-band work.
-            let active = timeline.turn.rows.last().is_some_and(|row| {
-                matches!(&row.data.kind,
-                    BlockKind::ThoughtGroup(_) | BlockKind::Step(_) if row.data.default_expanded())
-            });
+            // An active thought or any running step in the trailing run already
+            // signals work, whether or not its details are open.
+            let rows = &timeline.turn.rows;
+            let active = rows.last().is_some_and(|row| row.data.is_active_work())
+                || rows
+                    .iter()
+                    .rev()
+                    .take_while(|row| matches!(row.data.kind, BlockKind::Step(_)))
+                    .any(|row| row.data.is_active_work());
             if !active || activity.starts_with("Stopping") || activity.starts_with("Reconnecting") {
                 let mut data = BlockData::new(
                     format!("{epoch}-tip"),
@@ -1162,14 +1179,14 @@ mod tests {
     fn thought(text: &str) -> Message {
         assistant([reasoning(text)])
     }
-    fn command(id: &str) -> AssistantContent {
+    fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> AssistantContent {
         AssistantContent::ToolCall(ToolCall::new(
             CallId::from_wire(id),
-            ToolFunction::new(
-                ToolName::new("command").unwrap(),
-                json!({"command":"cargo fmt"}),
-            ),
+            ToolFunction::new(ToolName::new(name).unwrap(), arguments),
         ))
+    }
+    fn command(id: &str) -> AssistantContent {
+        tool_call(id, "command", json!({"command":"cargo fmt"}))
     }
     fn tool(id: &str) -> Message {
         assistant([command(id)])
@@ -1223,6 +1240,105 @@ mod tests {
         assert_eq!(row.data.primary_copy(), texts.join("\n\n"));
         assert_eq!(row.phase, phase);
         assert_eq!(thought.is_live, phase == Phase::Live);
+    }
+
+    #[test]
+    fn only_web_steps_auto_expand_while_running() {
+        let mut conv = ConversationState::default();
+        conv.push_user_turn(Message::user("Check the docs"), DisplayTurn(1));
+        conv.commit_response(
+            assistant([
+                command("cmd"),
+                tool_call("edit", "edit", json!({"path":"README.md"})),
+                tool_call(
+                    "search",
+                    zevria_foundation::WEB_SEARCH_TOOL_NAME,
+                    json!({"query":"cargo fmt docs"}),
+                ),
+            ]),
+            None,
+            ToolCallStatus::Executing,
+            Some(call(1)),
+        );
+        let mut attempt = ResponseAttempt::new(ModelProfileRef::new("fixture", "model"));
+        attempt.hosted_activity.push(HostedActivity {
+            kind: HostedActivityKind::WebSearch,
+            item_id: Some("hosted".into()),
+            output_index: 0,
+            status: HostedActivityStatus::InProgress,
+            action: None,
+        });
+        conv.update_native_attempt(attempt, Some(call(2)));
+        let projection = projected(&mut Projector::default(), &conv, None);
+        let [_, command, edit, search, hosted] = projection.rows.as_slice() else {
+            panic!("expected a prompt and four tool steps");
+        };
+        assert!(matches!(&edit.data.kind, BlockKind::Step(Step::Tool(tool))
+            if matches!(tool.detail, tools::ToolDetail::File)));
+        assert!(
+            matches!(&search.data.kind, BlockKind::Step(Step::Tool(tool))
+            if matches!(tool.detail, tools::ToolDetail::WebSearch { .. }))
+        );
+        assert!(matches!(hosted.data.kind, BlockKind::Step(Step::Web(_))));
+        for (row, expanded) in [
+            (command, false),
+            (edit, false),
+            (search, true),
+            (hosted, true),
+        ] {
+            assert!(row.data.is_active_work(), "{:?}", row.data.kind);
+            assert_eq!(row.data.default_expanded(), expanded, "{:?}", row.data.kind);
+        }
+    }
+
+    #[test]
+    fn running_steps_suppress_the_live_tip_until_the_trailing_run_settles() {
+        for parallel in [false, true] {
+            let mut conv = ConversationState::default();
+            conv.push_user_turn(Message::user("Check the workspace"), DisplayTurn(1));
+            let mut calls = vec![command("first")];
+            if parallel {
+                calls.push(command("last"));
+            }
+            conv.commit_response(
+                assistant(calls),
+                None,
+                ToolCallStatus::Executing,
+                Some(call(1)),
+            );
+            let mut projector = Projector::default();
+            let mut tip_visible = |conv: &ConversationState| {
+                projector
+                    .project(
+                        conv,
+                        "epoch",
+                        Some(call(1)),
+                        true,
+                        None,
+                        None,
+                        &HashSet::new(),
+                        Some("Working"),
+                        None,
+                    )
+                    .rows
+                    .iter()
+                    .any(|row| matches!(row.data.kind, BlockKind::Live))
+            };
+            let result = |id| {
+                Message::tool_result(
+                    CallId::from_wire(id),
+                    ToolName::new("command").unwrap(),
+                    "exit_code: 0",
+                )
+            };
+            assert!(!tip_visible(&conv));
+            if parallel {
+                conv.finish_tool_results(&result("last"), &[]);
+                assert!(!tip_visible(&conv), "an earlier step is still running");
+            }
+            conv.finish_tool_results(&result("first"), &[]);
+            assert!(tip_visible(&conv), "all steps have settled");
+        }
     }
 
     #[test]

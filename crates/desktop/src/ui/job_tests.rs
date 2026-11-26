@@ -239,7 +239,7 @@ fn jobs_shortcut_keeps_draft_and_slash_opens_during_a_turn(cx: &mut TestAppConte
 
 #[gpui_kit::test]
 fn command_row_controls_background_then_stop_without_cancelling_the_turn(cx: &mut TestAppContext) {
-    let (window, _, controller, mut receiver) = setup(cx);
+    let (window, view, controller, mut receiver) = setup(cx);
     event(
         &controller,
         E::Turn(TurnEvent::Started {
@@ -283,12 +283,37 @@ fn command_row_controls_background_then_stop_without_cancelling_the_turn(cx: &mu
         }),
         cx,
     );
-    cx.update_window(window.into(), |_, window, cx| {
-        window.render_frame(cx);
-        assert!(window.try_find("jobs-panel").is_none());
-        window.click("job-background", cx);
-    })
-    .unwrap();
+    let collapsed_height = |window: &mut gpui_kit::Window| {
+        assert_eq!(window.find("block-disclosure").expanded(), Some(false));
+        window.find("timeline-step").bounds().size.height
+    };
+    let (height, stop_right) = cx
+        .update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("jobs-panel").is_none());
+            let height = collapsed_height(window);
+            let stop_right = window.find("job-stop").bounds().right();
+            let transcript = view.read(cx).transcript.read(cx);
+            let row = transcript
+                .test_data(cx)
+                .into_iter()
+                .find(|r| r.data.is_disclosure())
+                .unwrap();
+            let focus = transcript.test_focus(&row.data.key, cx);
+            window.focus(&focus, cx);
+            for action in ["copy", "show-in-jobs", "job-background"] {
+                window.press("tab", cx);
+                assert_eq!(
+                    window.within("timeline-step").find(action).focused(),
+                    Some(true)
+                );
+            }
+            window.click("job-background", cx);
+            window.render_frame(cx);
+            assert_eq!(collapsed_height(window), height);
+            (height, stop_right)
+        })
+        .unwrap();
     cx.run_until_parked();
     let background = request(&mut receiver);
     assert_eq!(
@@ -307,12 +332,44 @@ fn command_row_controls_background_then_stop_without_cancelling_the_turn(cx: &mu
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
         assert!(window.try_find("job-background").is_none());
+        assert_eq!(collapsed_height(window), height);
+        assert_eq!(window.find("job-stop").bounds().right(), stop_right);
+        assert_eq!(window.find("block-disclosure").focused(), Some(true));
+        for action in ["copy", "show-in-jobs", "job-stop"] {
+            window.press("tab", cx);
+            assert_eq!(
+                window.within("timeline-step").find(action).focused(),
+                Some(true)
+            );
+        }
         window.click("job-stop", cx);
+        window.render_frame(cx);
+        assert_eq!(collapsed_height(window), height);
+        assert_eq!(window.find("job-stop").focused(), Some(true));
     })
     .unwrap();
     cx.run_until_parked();
     let stop = request(&mut receiver);
-    assert_eq!(stop.action, Request::Terminate { id: job.id });
+    assert_eq!(stop.action, Request::Terminate { id: job.id.clone() });
+
+    job.finished_at = Some(SystemTime::now());
+    job.status = CommandJobStatus::Exited {
+        code: Some(0),
+        success: true,
+        signal: None,
+    };
+    event(
+        &controller,
+        E::Job(JobEvent::Updated { job: Box::new(job) }),
+        cx,
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("job-stop").is_none());
+        assert_eq!(collapsed_height(window), height);
+        assert_eq!(window.find("block-disclosure").focused(), Some(true));
+    })
+    .unwrap();
     reply(
         &controller,
         stop,

@@ -6,8 +6,8 @@ use rig_core::message::ToolCall;
 use std::{ops::Range, sync::Arc, time::SystemTime};
 use zevria_content::{ImageReadSummary, readable::sanitize_readable};
 use zevria_foundation::{
-    CommandJobId, CommandJobSnapshot, CommandJobStatus, FileChange, FileChangeOutput,
-    QuestionResponse, READ_IMAGE_TOOL_NAME, WEB_SEARCH_TOOL_NAME, WebSearchResultDetail,
+    CommandJobId, CommandJobSnapshot, FileChange, FileChangeOutput, QuestionResponse,
+    READ_IMAGE_TOOL_NAME, WEB_SEARCH_TOOL_NAME, WebSearchResultDetail,
 };
 use zevria_presentation::{
     blocks::*,
@@ -47,7 +47,6 @@ pub struct JobMeta {
     pub id: CommandJobId,
     pub running: bool,
     pub foreground: bool,
-    pub status: CommandJobStatus,
     pub started_at: SystemTime,
 }
 impl From<&CommandJobSnapshot> for JobMeta {
@@ -56,7 +55,6 @@ impl From<&CommandJobSnapshot> for JobMeta {
             id: job.id.clone(),
             running: JobsInspector::can_terminate(job),
             foreground: job.mode == zevria_foundation::CommandJobMode::Foreground,
-            status: job.status.clone(),
             started_at: job.started_at,
         }
     }
