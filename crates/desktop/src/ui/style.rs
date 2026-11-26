@@ -3,11 +3,14 @@ use super::theme::{palette, tones};
 use crate::actions::Shortcut;
 use gpui_kit::base::text::TextViewStyle;
 use gpui_kit::component::{
-    Sizable,
+    Icon, IconName, Sizable,
     button::{Button, ButtonCustomVariant, ButtonVariants},
 };
 use gpui_kit::{prelude::*, *};
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use zevria_presentation::{shell::ShellToken, status_icon::StatusIcon};
 use zevria_theme::ZevriaTheme;
 
@@ -206,6 +209,132 @@ pub fn icon_button(
         .tooltip(name.clone())
         .accessibility_label(name)
 }
+
+/// Duration that a copy button shows its confirmation checkmark.
+pub const COPY_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
+
+/// Ephemeral confirmation state for mutually exclusive copy targets.
+pub struct CopyFeedback<T = ()> {
+    active: Option<T>,
+    generation: u64,
+    reset: Option<Task<()>>,
+}
+
+impl<T> Default for CopyFeedback<T> {
+    fn default() -> Self {
+        Self {
+            active: None,
+            generation: 0,
+            reset: None,
+        }
+    }
+}
+
+impl<T: Copy + PartialEq + 'static> CopyFeedback<T> {
+    pub fn is_active(&self, target: T) -> bool {
+        self.active == Some(target)
+    }
+
+    pub fn clear(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.active = None;
+        self.reset = None;
+    }
+
+    pub fn trigger<V: 'static>(
+        &mut self,
+        target: T,
+        cx: &mut Context<V>,
+        select: impl Fn(&mut V) -> &mut Self + 'static,
+    ) {
+        self.clear();
+        self.active = Some(target);
+        let generation = self.generation;
+        self.reset = Some(cx.spawn(async move |owner, cx| {
+            cx.background_executor().timer(COPY_FEEDBACK_DURATION).await;
+            let _ = owner.update(cx, |this, cx| {
+                let feedback = select(this);
+                // A stale reset must not clear a newer copy or context.
+                if feedback.generation == generation {
+                    feedback.clear();
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+}
+
+/// Icon button that keeps the same bounds when showing a success-tinted checkmark.
+pub fn copy_button(
+    id: impl Into<ElementId>,
+    copied: bool,
+    idle_label: impl Into<SharedString>,
+    copied_label: impl Into<SharedString>,
+    cx: &App,
+) -> Button {
+    let (icon, name) = if copied {
+        (
+            Icon::new(IconName::Check).text_color(palette(cx).feedback.success),
+            copied_label.into(),
+        )
+    } else {
+        (Icon::new(IconName::Copy), idle_label.into())
+    };
+    Button::new(id)
+        .icon(icon)
+        .ghost()
+        .xsmall()
+        .tooltip(name.clone())
+        .accessibility_label(name)
+}
+
+/// Copy button with state scoped to its enclosing element (e.g. a Markdown code block).
+#[derive(IntoElement)]
+pub struct KeyedCopyButton {
+    id: &'static str,
+    text: SharedString,
+    idle_label: SharedString,
+    copied_label: SharedString,
+}
+
+impl KeyedCopyButton {
+    pub fn new(
+        id: &'static str,
+        text: impl Into<SharedString>,
+        idle_label: impl Into<SharedString>,
+        copied_label: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            id,
+            text: text.into(),
+            idle_label: idle_label.into(),
+            copied_label: copied_label.into(),
+        }
+    }
+}
+
+impl RenderOnce for KeyedCopyButton {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // RenderOnce runs within the enclosing element's ID scope. Use a different
+        // key from the button, which stores its focus handle under self.id.
+        let feedback = window.use_keyed_state(
+            SharedString::from(format!("{}-feedback", self.id)),
+            cx,
+            |_, _| CopyFeedback::default(),
+        );
+        let copied = feedback.read(cx).is_active(());
+        let text = self.text;
+        copy_button(self.id, copied, self.idle_label, self.copied_label, cx).on_click(
+            move |_, _, cx| {
+                cx.stop_propagation();
+                cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                feedback.update(cx, |this, cx| this.trigger((), cx, |this| this));
+            },
+        )
+    }
+}
+
 pub(super) fn inspector_panel(
     id: &'static str,
     width: f32,

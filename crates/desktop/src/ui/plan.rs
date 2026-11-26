@@ -6,18 +6,29 @@ use super::{
 use crate::actions::Shortcut;
 use gpui_kit::base::text::TextView;
 use gpui_kit::component::{
-    Disableable, IconName, Sizable, Theme,
+    Disableable, Sizable, Theme,
     button::{Button, ButtonVariants},
 };
 use gpui_kit::{prelude::*, *};
 use zevria_workflow::PlanDecision;
+
 impl DesktopWindow {
+    fn copy_plan(&mut self, cx: &mut Context<Self>) {
+        let workflow = &self.controller.read(cx).model.root.workflow;
+        if let Some(artifact) = workflow.dialog_artifact() {
+            cx.write_to_clipboard(ClipboardItem::new_string(artifact.markdown.clone()));
+            self.plan_copy_feedback
+                .trigger((), cx, |this| &mut this.plan_copy_feedback);
+        }
+    }
+
     pub(super) fn plan_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let model = &self.controller.read(cx).model.root;
         let dialog = model.workflow.dialog()?;
         let artifact = model.workflow.dialog_artifact()?;
+        let title = artifact.title.clone();
+        let revision = artifact.version.revision;
         let busy = model.is_busy();
-        let controller = self.controller.clone();
         let recovering = dialog.recovering();
         let (_, text) = self.plan.as_ref()?;
         let t = palette(cx);
@@ -75,20 +86,14 @@ impl DesktopWindow {
                                     }),
                             )
                             .child(
-                                style::icon_button(
+                                style::copy_button(
                                     "plan-copy",
-                                    IconName::Copy,
+                                    self.plan_copy_feedback.is_active(()),
                                     "Copy plan as Markdown",
+                                    "Copied plan",
+                                    cx,
                                 )
-                                .on_click(move |_, _, cx| {
-                                    if let Some(artifact) =
-                                        controller.read(cx).model.root.workflow.dialog_artifact()
-                                    {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            artifact.markdown.clone(),
-                                        ));
-                                    }
-                                }),
+                                .on_click(cx.listener(|this, _, _, cx| this.copy_plan(cx))),
                             ),
                     )
                     .child(
@@ -98,10 +103,10 @@ impl DesktopWindow {
                             .text_size(px(18.))
                             .line_height(px(24.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(artifact.title.clone()),
+                            .child(title),
                     )
                     .child(style::tag(
-                        format!("Revision {}", artifact.version.revision),
+                        format!("Revision {revision}"),
                         t.text.secondary,
                         cx,
                     )),

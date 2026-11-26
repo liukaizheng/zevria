@@ -62,6 +62,67 @@ fn reply(
 }
 
 #[gpui_kit::test]
+fn job_copy_feedback_times_out_and_clears_on_selection_change(cx: &mut TestAppContext) {
+    let (window, _, controller, mut receiver) = setup(cx);
+    let first = job("copy-first", CommandJobMode::Background);
+    let second = job("copy-second", CommandJobMode::Background);
+    controller.update(cx, |c, cx| c.inspect_job(first.id.clone(), cx));
+    cx.run_until_parked();
+    let list = request(&mut receiver);
+    assert_eq!(list.action, Request::Inspect { id: None });
+    reply(
+        &controller,
+        list,
+        Reply::Inspected(vec![view(first.clone()), view(second.clone())]),
+        cx,
+    );
+    let mut load_output = |snapshot: CommandJobSnapshot, stdout: &str, cx: &mut TestAppContext| {
+        let inspect = request(&mut receiver);
+        assert_eq!(
+            inspect.action,
+            Request::Inspect {
+                id: Some(snapshot.id.clone())
+            }
+        );
+        let mut output = view(snapshot);
+        output.stdout_tail = stdout.into();
+        output.stderr_tail = "stderr".into();
+        reply(&controller, inspect, Reply::Inspected(vec![output]), cx);
+    };
+    let copy_output = |expected: &str, cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_copy_label(&window.find("job-copy-output"), "Copy output");
+            window.click("job-copy-output", cx);
+            assert_copy_label(&window.find("job-copy-output"), "Copied output");
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some(expected)
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    load_output(first, "first output", cx);
+    copy_output("first output\nstderr", cx);
+    cx.executor().advance_clock(COPY_FEEDBACK_DURATION);
+    cx.run_until_parked();
+    copy_output("first output\nstderr", cx);
+
+    cx.update_window(window.into(), |_, window, cx| {
+        window
+            .within(format!("job-row-{}", second.id))
+            .click("select-job", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    load_output(second, "second output", cx);
+    copy_output("second output\nstderr", cx);
+}
+
+#[gpui_kit::test]
 fn compact_jobs_chip_toggles_a_panel_that_starts_closed_and_hides_under_plan(
     cx: &mut TestAppContext,
 ) {

@@ -18,7 +18,6 @@ use crate::{
 use gpui_kit::component::{
     IconName, Sizable,
     button::{Button, ButtonVariants},
-    clipboard::Clipboard,
     diff::{Diff, DiffState},
     text::TextViewState,
 };
@@ -98,6 +97,12 @@ fn live_controls_width(job: &JobMeta) -> f32 {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum CopyTarget {
+    Primary,
+    Output,
+}
+
 pub struct BlockView {
     row: TimelineRow,
     data: Arc<BlockData>,
@@ -117,6 +122,7 @@ pub struct BlockView {
     block_focus: FocusHandle,
     disclosure_focus: FocusHandle,
     action_focus: [FocusHandle; 4],
+    copy_feedback: style::CopyFeedback<CopyTarget>,
     job_action_focus: [FocusHandle; 2], // Stop, background.
     open_jobs_focus: FocusHandle,
     focus_subscriptions: Vec<Subscription>,
@@ -184,6 +190,7 @@ impl BlockView {
             block_focus: cx.focus_handle(),
             disclosure_focus: cx.focus_handle(),
             action_focus: std::array::from_fn(|_| cx.focus_handle()),
+            copy_feedback: style::CopyFeedback::default(),
             job_action_focus: std::array::from_fn(|_| cx.focus_handle()),
             open_jobs_focus: cx.focus_handle(),
             focus_subscriptions: vec![],
@@ -509,12 +516,30 @@ impl BlockView {
             })
     }
 
+    fn has_copy_feedback(&self) -> bool {
+        self.copy_feedback.is_active(CopyTarget::Primary)
+            || (self.copy_feedback.is_active(CopyTarget::Output) && self.data.secondary.is_some())
+    }
+
+    fn copy_primary(&mut self, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(self.data.primary_copy()));
+        self.copy_feedback
+            .trigger(CopyTarget::Primary, cx, |this| &mut this.copy_feedback);
+    }
+
+    fn copy_output(&mut self, cx: &mut Context<Self>) {
+        if let Some(output) = &self.data.secondary {
+            cx.write_to_clipboard(ClipboardItem::new_string(output.to_string()));
+            self.copy_feedback
+                .trigger(CopyTarget::Output, cx, |this| &mut this.copy_feedback);
+        }
+    }
+
     fn actions(&self, window: &Window, cx: &mut Context<Self>) -> Div {
-        let data = self.data.clone();
-        let name = match data.kind {
-            BlockKind::Step(Step::Tool(_)) => "Copy input",
-            BlockKind::Step(Step::Web(_)) => "Copy web activity",
-            _ => "Copy text",
+        let (idle_label, copied_label) = match &self.data.kind {
+            BlockKind::Step(Step::Tool(_)) => ("Copy input", "Copied input"),
+            BlockKind::Step(Step::Web(_)) => ("Copy web activity", "Copied web activity"),
+            _ => ("Copy text", "Copied text"),
         };
         let focused = self.action_focus.iter().any(|f| f.is_focused(window));
         let mut actions = div()
@@ -522,23 +547,34 @@ impl BlockView {
             .items_center()
             .flex_shrink_0()
             .gap(px(2.))
-            .opacity(if focused { 1. } else { 0. })
+            .opacity(if focused || self.has_copy_feedback() {
+                1.
+            } else {
+                0.
+            })
             .group_hover("timeline-block", |s| s.opacity(1.))
             .child(
-                style::icon_button("copy", IconName::Copy, name)
-                    .track_focus(&self.action_focus[0])
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(data.primary_copy()))
-                    }),
+                style::copy_button(
+                    "copy",
+                    self.copy_feedback.is_active(CopyTarget::Primary),
+                    idle_label,
+                    copied_label,
+                    cx,
+                )
+                .track_focus(&self.action_focus[0])
+                .on_click(cx.listener(|this, _, _, cx| this.copy_primary(cx))),
             );
-        if let Some(output) = &self.data.secondary {
-            let output = output.clone();
+        if self.data.secondary.is_some() {
             actions = actions.child(
-                style::icon_button("copy-output", IconName::Copy, "Copy output")
-                    .track_focus(&self.action_focus[1])
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(output.to_string()))
-                    }),
+                style::copy_button(
+                    "copy-output",
+                    self.copy_feedback.is_active(CopyTarget::Output),
+                    "Copy output",
+                    "Copied output",
+                    cx,
+                )
+                .track_focus(&self.action_focus[1])
+                .on_click(cx.listener(|this, _, _, cx| this.copy_output(cx))),
             );
         }
         if let BlockKind::Step(Step::Subtask(task)) = &self.data.kind {
@@ -1499,12 +1535,12 @@ pub(super) fn code_block_header(code: &CodeBlock, _: &mut Window, cx: &mut App) 
                 .child(code.lang().unwrap_or_default()),
         )
         .child(div().flex_1())
-        .child(
-            Clipboard::new("copy-code")
-                .value(code.code())
-                .tooltip("Copy code")
-                .accessibility_label("Copy code"),
-        )
+        .child(style::KeyedCopyButton::new(
+            "copy-code",
+            code.code(),
+            "Copy code",
+            "Copied code",
+        ))
 }
 
 impl Render for BlockView {
@@ -1707,7 +1743,7 @@ impl Render for BlockView {
             .on_action(
                 cx.listener(|this, _: &gpui_kit::component::input::Copy, window, cx| {
                     if this.has_disclosure_focus(window) {
-                        cx.write_to_clipboard(ClipboardItem::new_string(this.data.primary_copy()));
+                        this.copy_primary(cx);
                     } else {
                         cx.propagate();
                     }

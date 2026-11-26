@@ -553,6 +553,7 @@ mod tests {
             }
             for surface in [t.surfaces.canvas, t.surfaces.panel, t.surfaces.overlay] {
                 assert!(contrast(tones.pencil, surface) >= 4.5);
+                assert!(contrast(t.feedback.success, surface) >= 4.5);
                 assert!(contrast(tones.focus, surface) >= 3.);
                 for text in [t.text.primary, t.text.secondary] {
                     assert!(contrast(text, surface) >= 4.5);

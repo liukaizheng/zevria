@@ -16,12 +16,12 @@ mod web;
 mod windows;
 #[path = "thread_tests.rs"]
 mod working_thread;
-use super::{theme, window::DesktopWindow};
+use super::{style::COPY_FEEDBACK_DURATION, theme, window::DesktopWindow};
 use crate::{
     actions::{self, Shortcut},
     controller::SessionController,
 };
-use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::test::{ElementSnapshot, TestWindowExt as _};
 use gpui_kit::{
     AppContext as _, Bounds, Context, Entity, Point, TestAppContext, WindowBounds, WindowHandle,
     WindowOptions, px, size,
@@ -89,6 +89,11 @@ fn event(
 ) {
     controller.update(cx, |this, cx| this.fixture_event(event, cx));
     cx.run_until_parked();
+}
+
+fn assert_copy_label(button: &ElementSnapshot, label: &str) {
+    assert_eq!(button.label(), Some(label), "{button:?}");
+    assert_eq!(button.description(), Some(label), "{button:?}");
 }
 
 fn expect_skill_completion_query(receiver: &mut Receiver) {
@@ -573,7 +578,9 @@ fn blank_plan_panel_click_clears_button_focus(cx: &mut TestAppContext) {
         cx.update_window(window.into(), |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(view.read(cx).plan_overlay, width == 1240.);
+            assert_copy_label(&window.find("plan-copy"), "Copy plan as Markdown");
             window.click("plan-copy", cx);
+            assert_copy_label(&window.find("plan-copy"), "Copied plan");
             assert_eq!(
                 cx.read_from_clipboard().and_then(|item| item.text()),
                 Some("Review the source".to_owned())
@@ -587,7 +594,22 @@ fn blank_plan_panel_click_clears_button_focus(cx: &mut TestAppContext) {
                 window.render_frame(cx);
             }
             assert_eq!(window.find("plan-copy").focused(), Some(true));
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()));
             window.click("plan-copy", cx);
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some("Review the source".to_owned())
+            );
+            assert_copy_label(&window.find("plan-copy"), "Copied plan");
+            assert_eq!(window.find("plan-copy").focused(), Some(true));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(COPY_FEEDBACK_DURATION);
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_copy_label(&window.find("plan-copy"), "Copy plan as Markdown");
             assert_eq!(window.find("plan-copy").focused(), Some(true));
             assert!(!view.read(cx).window_focus.is_focused(window));
             window.click_at("plan-review", gpui_kit::point(px(6.), px(6.)), cx);
@@ -596,6 +618,63 @@ fn blank_plan_panel_click_clears_button_focus(cx: &mut TestAppContext) {
         })
         .unwrap();
     }
+}
+
+#[gpui_kit::test]
+fn plan_copy_feedback_clears_on_revision_change_and_reopen(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (window, _, controller, _) = setup(cx);
+    let id = PlanId::new();
+    let publish = |revision, markdown: &str, cx: &mut TestAppContext| {
+        event(
+            &controller,
+            E::Plan(PlanEvent::StateChanged {
+                state: Box::new(PlanWorkflowState::Ready {
+                    artifact: PlanArtifact {
+                        version: PlanVersion { id, revision },
+                        title: "Plan".into(),
+                        markdown: markdown.into(),
+                        source_turn_id: TurnId::new(1),
+                    },
+                }),
+            }),
+            cx,
+        );
+    };
+    let copy_plan = |markdown: &str, cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_copy_label(&window.find("plan-copy"), "Copy plan as Markdown");
+            window.click("plan-copy", cx);
+            assert_copy_label(&window.find("plan-copy"), "Copied plan");
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some(markdown)
+            );
+        })
+        .unwrap();
+    };
+    publish(1, "First revision", cx);
+    copy_plan("First revision", cx);
+    publish(2, "Second revision", cx);
+    copy_plan("Second revision", cx);
+
+    controller.update(cx, |c, cx| {
+        c.model.root.workflow.hide();
+        cx.notify();
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("plan-copy").is_none());
+    })
+    .unwrap();
+    controller.update(cx, |c, cx| {
+        assert!(c.model.root.workflow.open_review());
+        cx.notify();
+    });
+    copy_plan("Second revision", cx);
 }
 
 #[gpui_kit::test]
@@ -1599,6 +1678,72 @@ fn completion_keyboard_selection_has_a_rendered_selected_state(cx: &mut TestAppC
     assert!(receiver.try_recv().is_err());
 }
 
+#[gpui_kit::test]
+fn code_copy_feedback_is_reclickable_and_scoped_to_each_block(cx: &mut TestAppContext) {
+    let (window, _, controller, _) = setup(cx);
+    controller.update(cx, |c, cx| {
+        c.model.root.conversation.restore(vec![
+            zevria_transcript::transcript::TranscriptItem::Message(Message::assistant(
+                "```text\nfirst line\n```\n\n```text\nsecond line\n```",
+            )),
+        ]);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let scopes = cx
+        .update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let buttons: [ElementSnapshot; 2] = window.find_all("copy-code").try_into().unwrap();
+            buttons.map(|button| {
+                assert_copy_label(&button, "Copy code");
+                // Find the Kit's code block ancestor, outside the RenderOnce wrappers.
+                button
+                    .path()
+                    .iter()
+                    .find(|id| matches!(id, gpui_kit::ElementId::NamedInteger(name, _) if name.as_ref() == "codeblock"))
+                    .unwrap_or_else(|| panic!("missing code block scope in {button:?}"))
+                    .clone()
+            })
+        })
+        .unwrap();
+    let copy_code = |index: usize, expected: &str, cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, cx| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()));
+            window.within(scopes[index].clone()).click("copy-code", cx);
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref()
+                    .map(str::trim_end),
+                Some(expected)
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    let assert_labels = |labels: [&str; 2], cx: &mut TestAppContext| {
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            for (scope, label) in scopes.iter().zip(labels) {
+                assert_copy_label(&window.within(scope.clone()).find("copy-code"), label);
+            }
+        })
+        .unwrap();
+    };
+    copy_code(0, "first line", cx);
+    assert_labels(["Copied code", "Copy code"], cx);
+    let half = COPY_FEEDBACK_DURATION / 2;
+    cx.executor().advance_clock(half);
+    copy_code(1, "second line", cx);
+    assert_labels(["Copied code", "Copied code"], cx);
+    copy_code(1, "second line", cx);
+    cx.executor().advance_clock(half);
+    assert_labels(["Copy code", "Copied code"], cx);
+    cx.executor().advance_clock(half);
+    assert_labels(["Copy code", "Copy code"], cx);
+}
+
 fn ask_multi_select_with_previews(controller: &Entity<SessionController>, cx: &mut TestAppContext) {
     let turn_id = TurnId::new(21);
     event(
@@ -1677,6 +1822,7 @@ fn preview_button_changes_markdown_without_toggling_multi_select_then_send_retur
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
         window.click("copy-code", cx);
+        assert_copy_label(&window.find("copy-code"), "Copied code");
         assert!(
             cx.read_from_clipboard()
                 .and_then(|item| item.text())

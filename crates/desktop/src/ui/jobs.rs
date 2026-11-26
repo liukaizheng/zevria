@@ -25,6 +25,7 @@ pub(super) struct JobsPanelView {
     list_scroll: ScrollHandle,
     output_scroll: ScrollHandle,
     selected: Option<CommandJobId>,
+    copy_feedback: style::CopyFeedback,
 }
 
 impl JobsPanelView {
@@ -37,19 +38,62 @@ impl JobsPanelView {
             list_scroll: ScrollHandle::new(),
             output_scroll: ScrollHandle::new(),
             selected: None,
+            copy_feedback: style::CopyFeedback::default(),
+        }
+    }
+
+    pub(super) fn sync_selection(&mut self, inspector: Option<&JobsInspector>) {
+        let selected = inspector.and_then(JobsInspector::inspected);
+        if self.selected.as_ref() == selected {
+            return;
+        }
+        self.selected = selected.cloned();
+        self.copy_feedback.clear();
+        self.output_scroll = ScrollHandle::new();
+        if let Some(inspector) = inspector
+            && let Some(index) = inspector
+                .jobs()
+                .iter()
+                .position(|job| Some(&job.id) == selected)
+        {
+            self.list_scroll.scroll_to_item(index);
         }
     }
 }
 
 impl DesktopWindow {
+    fn copy_job_output(&mut self, id: &CommandJobId, cx: &mut Context<Self>) {
+        let model = &self.controller.read(cx).model;
+        let inspector = model.root.jobs_inspector();
+        if !model.jobs_panel_visible() || inspector.inspected() != Some(id) {
+            return;
+        }
+        let Some(output) = inspector.detail() else {
+            return;
+        };
+        let mut copy = output.stdout_tail.clone();
+        if !output.stderr_tail.is_empty() {
+            if !copy.is_empty() && !copy.ends_with('\n') {
+                copy.push('\n');
+            }
+            copy.push_str(&output.stderr_tail);
+        }
+        if !copy.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(copy));
+            self.jobs_ui
+                .copy_feedback
+                .trigger((), cx, |this| &mut this.jobs_ui.copy_feedback);
+        }
+    }
+
     pub(super) fn jobs_panel(
         &mut self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let owner = cx.entity();
         let controller = self.controller.read(cx);
         if !controller.model.jobs_panel_visible() {
-            self.jobs_ui.selected = None;
             return None;
         }
         let inspector = controller.model.root.jobs_inspector();
@@ -67,13 +111,6 @@ impl DesktopWindow {
         let view = &mut self.jobs_ui;
         view.row_focus
             .retain(|id, _| jobs.iter().any(|job| &job.id == id));
-        if view.selected.as_ref() != selected {
-            view.selected = selected.cloned();
-            view.output_scroll = ScrollHandle::new();
-            if let Some(index) = jobs.iter().position(|job| Some(&job.id) == selected) {
-                view.list_scroll.scroll_to_item(index);
-            }
-        }
         let mut list = div()
             .id("job-list")
             .test_support()
@@ -239,6 +276,8 @@ impl DesktopWindow {
                 selected_job.is_some_and(JobsInspector::can_terminate),
                 inspector.detail(),
                 scroll,
+                owner,
+                view.copy_feedback.is_active(()),
                 cx,
             ));
         }
@@ -352,6 +391,8 @@ fn detail(
     running: bool,
     view: Option<&JobOutput>,
     scroll: &ScrollHandle,
+    owner: Entity<DesktopWindow>,
+    copied: bool,
     cx: &App,
 ) -> Div {
     let t = palette(cx);
@@ -378,19 +419,18 @@ fn detail(
     if let Some(view) =
         view.filter(|view| !view.stdout_tail.is_empty() || !view.stderr_tail.is_empty())
     {
-        let mut copy = view.stdout_tail.clone();
-        if !view.stderr_tail.is_empty() {
-            if !copy.is_empty() && !copy.ends_with('\n') {
-                copy.push('\n');
-            }
-            copy.push_str(&view.stderr_tail);
-        }
+        let job_id = id.clone();
         heading = heading.child(
-            style::icon_button("job-copy-output", IconName::Copy, "Copy output").on_click(
-                move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-                },
-            ),
+            style::copy_button(
+                "job-copy-output",
+                copied,
+                "Copy output",
+                "Copied output",
+                cx,
+            )
+            .on_click(move |_, _, cx| {
+                owner.update(cx, |this, cx| this.copy_job_output(&job_id, cx));
+            }),
         );
         for (label, tail, bytes, ink) in [
             (

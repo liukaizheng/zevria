@@ -484,6 +484,117 @@ fn finish_command(
 }
 
 #[gpui_kit::test]
+fn command_copy_feedback_switches_icons_restarts_and_is_exclusive(cx: &mut TestAppContext) {
+    use gpui_kit::component::{IconName, IconNamed, set_icon_resolver};
+    use std::{cell::Cell, rc::Rc};
+
+    let (window, view, controller, _) = setup(cx);
+    let icons = Rc::new(Cell::new((0, 0)));
+    cx.update(|cx| {
+        let icons = icons.clone();
+        let (copy, check) = (IconName::Copy.path(), IconName::Check.path());
+        set_icon_resolver(cx, move |path, _| {
+            let (copies, checks) = icons.get();
+            icons.set((
+                copies + usize::from(path == copy.as_ref()),
+                checks + usize::from(path == check.as_ref()),
+            ));
+            None
+        });
+    });
+    let turn_id = begin_command_turn(&controller, cx);
+    event(
+        &controller,
+        E::Turn(TurnEvent::Intermediate {
+            turn_id,
+            message: command(),
+            attempt_id: None,
+        }),
+        cx,
+    );
+    finish_command(&controller, turn_id, cx);
+    let key = command_row(&view, cx).data.key.clone();
+    let frame = |input: bool, output: bool, cx: &mut TestAppContext| {
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            icons.set((0, 0));
+            window.render_frame(cx);
+            let row = window.within(key.clone());
+            let primary = row.find("copy");
+            let secondary = row.find("copy-output");
+            assert_copy_label(&primary, if input { "Copied input" } else { "Copy input" });
+            assert_copy_label(
+                &secondary,
+                if output {
+                    "Copied output"
+                } else {
+                    "Copy output"
+                },
+            );
+            ([primary.bounds(), secondary.bounds()], icons.get())
+        })
+        .unwrap()
+    };
+    let (bounds, (copies, checks)) = frame(false, false, cx);
+    assert!(copies >= 2, "expected both command copy icons");
+    let assert_feedback = |input, output, cx: &mut TestAppContext| {
+        let active = usize::from(input) + usize::from(output);
+        assert_eq!(
+            frame(input, output, cx),
+            (bounds, (copies - active, checks + active))
+        );
+    };
+    let input = json!({"command": COMMAND_INPUT}).to_string();
+    let click_copy = |id, expected: &str, cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, cx| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()));
+            let mut row = window.within(key.clone());
+            row.hover("block-disclosure", cx);
+            row.click(id, cx);
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some(expected)
+            );
+            window.hover("status-bar", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+
+    click_copy("copy", &input, cx);
+    assert_feedback(true, false, cx);
+    cx.executor().advance_clock(COPY_FEEDBACK_DURATION / 2);
+    click_copy("copy", &input, cx);
+    let last_tick = Duration::from_millis(1);
+    cx.executor()
+        .advance_clock(COPY_FEEDBACK_DURATION - last_tick);
+    assert_feedback(true, false, cx);
+    cx.executor().advance_clock(last_tick);
+    assert_feedback(false, false, cx);
+
+    click_copy("copy", &input, cx);
+    click_copy("copy-output", COMMAND_FAILURE, cx);
+    assert_feedback(false, true, cx);
+    cx.executor().advance_clock(COPY_FEEDBACK_DURATION);
+    assert_feedback(false, false, cx);
+
+    cx.update_window(window.into(), |_, window, cx| {
+        let focus = view.read(cx).transcript.read(cx).test_focus(&key, cx);
+        window.focus(&focus, cx);
+        window.render_frame(cx);
+        window.press(Shortcut::COPY_DISCLOSURE.0, cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(input)
+        );
+    })
+    .unwrap();
+    assert_feedback(true, false, cx);
+}
+
+#[gpui_kit::test]
 fn command_stays_collapsed_at_a_stable_height_and_copies_original_input_and_output(
     cx: &mut TestAppContext,
 ) {
@@ -586,7 +697,7 @@ fn command_stays_collapsed_at_a_stable_height_and_copies_original_input_and_outp
     render(window, cx);
     assert_eq!(collapsed_height(&command_row(&view, cx), cx), height);
     assert_eq!(prompt_top(cx), after_start);
-    cx.update_window(window.into(), |_, window, _| {
+    cx.update_window(window.into(), |_, window, cx| {
         let step = window.within(running.data.key.clone());
         assert!(step.try_find("show-in-jobs").is_none());
         assert_eq!(
@@ -594,6 +705,7 @@ fn command_stays_collapsed_at_a_stable_height_and_copies_original_input_and_outp
             Some(true),
             "focus after the foreground job exits"
         );
+        window.press(Shortcut::COPY_DISCLOSURE.0, cx);
     })
     .unwrap();
 
@@ -602,6 +714,11 @@ fn command_stays_collapsed_at_a_stable_height_and_copies_original_input_and_outp
     let finished = command_row(&view, cx);
     assert_eq!(running.data.key, finished.data.key);
     assert_eq!(collapsed_height(&finished, cx), height);
+    cx.update_window(window.into(), |_, window, _| {
+        let copy = window.within(finished.data.key.clone()).find("copy");
+        assert_copy_label(&copy, "Copied input");
+    })
+    .unwrap();
     // The waiting tip may return, but the command itself must not shrink and
     // pull the preceding content down as it finishes.
     assert!(

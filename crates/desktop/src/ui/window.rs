@@ -29,6 +29,7 @@ pub struct DesktopWindow {
     composer_mode: zevria_foundation::SessionMode,
     pub(super) transcript: Entity<TranscriptView>,
     pub(super) plan: Option<(zevria_workflow::PlanVersion, Entity<TextViewState>)>,
+    pub(super) plan_copy_feedback: style::CopyFeedback,
     pub(super) screen_error: Option<(String, Entity<TextViewState>)>,
     pub(super) question_id: String,
     pub(super) question_inputs: Vec<Entity<TextareaState>>,
@@ -138,6 +139,7 @@ impl DesktopWindow {
             composer_mode: zevria_foundation::SessionMode::Build,
             transcript,
             plan: None,
+            plan_copy_feedback: style::CopyFeedback::default(),
             screen_error: None,
             question_id: String::new(),
             question_inputs: Vec::new(),
@@ -179,18 +181,20 @@ impl DesktopWindow {
         let live = controller.phase == Phase::Live;
         let inspecting = controller.model.controls.selected_child.is_some();
         let jobs_visible = live && controller.model.jobs_panel_visible();
+        self.jobs_ui
+            .sync_selection(jobs_visible.then(|| controller.model.root.jobs_inspector()));
         let subtasks_visible = live && controller.model.subtasks_panel_visible();
-        let plan = controller
-            .model
-            .root
-            .workflow
-            .dialog_artifact()
+        let plan_artifact = controller.model.root.workflow.dialog_artifact();
+        let plan = plan_artifact
             .filter(|a| {
                 self.plan
                     .as_ref()
                     .is_none_or(|(current, _)| *current != a.version)
             })
             .map(|a| (a.version, a.markdown.clone()));
+        if !live || plan_artifact.is_none() || plan.is_some() {
+            self.plan_copy_feedback.clear();
+        }
         let screen_error = controller
             .config_error
             .clone()
@@ -251,12 +255,7 @@ impl DesktopWindow {
                 window.focus(&self.window_focus, cx);
             }
         }
-        if let Some((version, markdown)) = plan
-            && self
-                .plan
-                .as_ref()
-                .is_none_or(|(current, _)| *current != version)
-        {
+        if let Some((version, markdown)) = plan {
             self.plan = Some((version, cx.new(|cx| TextViewState::markdown(&markdown, cx))));
         }
         if let Some(error) = screen_error {
