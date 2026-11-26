@@ -58,6 +58,7 @@ impl Shortcut {
     pub const TOGGLE_MODE: Self = Self::platform("shift-cmd-m", "ctrl-shift-m");
     pub const OPEN_MODELS: Self = Self::platform("ctrl-cmd-m", "ctrl-shift-p");
     pub const STOP: Self = Self::platform("cmd-.", "ctrl-.");
+    pub const ESCAPE: Self = Self("escape");
     pub const CONFIRM: Self = Self::platform("cmd-enter", "ctrl-enter");
     pub const COPY_DISCLOSURE: Self = Self::platform("cmd-c", "ctrl-c");
     pub const PREVIOUS_TURN: Self = Self::platform("alt-cmd-up", "ctrl-k");
@@ -143,7 +144,7 @@ fn bindings() -> impl IntoIterator<Item = KeyBinding> {
             ModelFocusPrevious,
             Some("ZevriaModels > Input"),
         ),
-        KeyBinding::new("escape", Cancel, Some("ZevriaDesktop")),
+        Shortcut::ESCAPE.bind(Cancel, desktop),
         KeyBinding::new("tab", Complete, Some("ZevriaCompletion > Input")),
         KeyBinding::new("up", CompletionUp, Some("ZevriaCompletion > Input")),
         KeyBinding::new("down", CompletionDown, Some("ZevriaCompletion > Input")),

@@ -606,7 +606,15 @@ parser boundary separately from the fully covered proof fixture.
   and handoffs, validated prompt-image thumbnails, errors and compaction dividers.
 - Multiline composer: **Enter** sends, **Shift-Enter** inserts a newline. Shared
   slash/skill completions support click, arrow selection, Tab and Enter. Built-in
-  completion Enter executes the selected built-in; skill completion only inserts.
+  completion Enter executes the selected built-in outside transcript editing.
+- Hover or tab to **Edit and resend** beside Copy on an earlier user message in
+  the main transcript. The composer recalls the prompt and marks the message
+  **Editing**. **Resend** replaces that message and all later turns when the
+  engine accepts it; a rejection keeps the old history and your edited draft.
+  **Cancel** or **Esc** restores your unsent draft and Orchestrate setting. While
+  editing, mode and model changes and built-in commands are unavailable. In
+  Build mode, use `/orchestrate <prompt>` in the recalled text to orchestrate.
+  Any images on the recalled message stay attached unless you remove them.
 - Build/Plan selection, next-Build-prompt Orchestrate subtasks switch, and Stop.
   Esc first belongs to an open model picker, question, review panel or completion. Cancellation
   targets the pending operation or the learned active turn, never a guessed ID.
@@ -652,8 +660,9 @@ Enter sends a draft, Shift+Enter adds a line, and Shift+Tab remains reverse focu
 traversal. Confirm sends the open question answer or implements the open Plan;
 it does not send an ordinary composer draft. Standard text editing still works
 in inputs. Esc belongs first to an open model picker, replacement confirmation,
-dismissible question, completion or Plan sheet. Stop still cancels the active
-root turn, including while a non-dismissible question is open.
+dismissible question, completion, Plan sheet or Subtasks panel. Otherwise Esc
+cancels a recall or stops an edit that is waiting for acceptance. Stop still
+cancels the active root turn, including while a non-dismissible question is open.
 
 Supported shared grammar: ordinary text, `/orchestrate <prompt>`, `$skill [args]`,
 `/compact`, `/implement`, `/implement-fresh`, `/plan`, `/build`, `/new`, `/resume`,
@@ -997,8 +1006,8 @@ No external provider credentials were exercised for this acceptance checklist.
   still requires the TUI; see [ensemble workflows](ensemble.md).
 - No model/reasoning picker or skill-management UI (identity/status and startup
   skill completions only). Unsupported built-ins are explicitly rejected locally.
-- No transcript recall/edit UI, image attachment input or `@` file mentions.
-  The shared model already supports transcript editing; restored images display.
+- No new image attachment input or `@` file mentions. Restored prompt images
+  display in the transcript and can be kept or removed when editing a message.
 - One window and one live session; no tabs or concurrent-session UI.
 - No `.app` packaging, signing or notarization. Windows distribution is an
   unsigned development ZIP only; neither a Desktop installer nor a release asset.

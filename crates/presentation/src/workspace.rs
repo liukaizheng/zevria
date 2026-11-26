@@ -1,9 +1,11 @@
 //! Frontend-neutral workspace ownership, event routing, and command admission.
+use crate::blocks::PresentationBlockId;
 use crate::command::{ClassifiedInput, CommandRegistry, SlashCommand};
 use crate::jobs::JobsInspector;
 use crate::question::QuestionForm;
 use crate::{PaneScope, Reduction, RestorationInput, SessionModel};
 use std::{path::PathBuf, sync::Arc, time::Instant};
+use zevria_content::UserPrompt;
 use zevria_foundation::{
     ModelRole, QuestionRequest, QuestionRequestId, RequestBehavior, SessionMode, SubtaskId,
     SubtaskKind, SubtaskLaunchMetadata, SubtaskStatus, TurnId,
@@ -11,8 +13,11 @@ use zevria_foundation::{
 use zevria_session_api::{
     JobEvent, ManagementEvent, PlanEvent, QuestionEvent, SubtaskEvent, TurnEvent,
 };
-use zevria_session_api::{SessionCommand, SessionEvent, SessionUpdate};
-use zevria_workflow::PlanHandoff;
+use zevria_session_api::{
+    SessionCommand, SessionEvent, SessionUpdate, TranscriptEdit, TranscriptEditReplacement,
+    TranscriptEditTarget,
+};
+use zevria_workflow::{PlanHandoff, PlanWorkflowState};
 
 pub struct ChildPane {
     pub id: SubtaskId,
@@ -510,11 +515,94 @@ impl WorkspaceModel {
         };
         self.controls.models.show(mode, scope)
     }
+    pub fn can_edit_transcript(&self) -> bool {
+        self.controls.selected_child.is_none()
+            && !self.root.is_busy()
+            && !self.root.conversation.has_executing_tool_calls()
+            && !matches!(
+                self.root.workflow.snapshot(),
+                PlanWorkflowState::Ready { .. }
+            )
+            && self.root.workflow.dialog().is_none()
+            && self.controls.question.is_none()
+            && !self.controls.models.is_open()
+    }
+
+    /// Resolve a card's stable block identity to a root user prompt. Ensemble
+    /// invocations are not editable from the native workspace.
+    pub fn recallable_prompt(
+        &self,
+        history_index: usize,
+        block_id: PresentationBlockId,
+    ) -> Option<(UserPrompt, TranscriptEditTarget, usize)> {
+        let conversation = &self.root.conversation;
+        let selection = conversation.selection_for_identity(history_index, block_id)?;
+        let (prompt, target) = conversation.recallable_selection(selection)?;
+        (matches!(target, TranscriptEditTarget::PromptOrdinal(_)) && !prompt.is_blank())
+            .then_some((prompt, target, selection.history_index))
+    }
+
+    pub fn route_edit_input(
+        &mut self,
+        prompt: &UserPrompt,
+        target: TranscriptEditTarget,
+        target_index: usize,
+    ) -> InputRoute {
+        if !self.can_edit_transcript() || prompt.is_blank() {
+            return InputRoute::Retained;
+        }
+        let mode = self.root.next_mode();
+        let replacement = match self.controls.registry.classify_prompt(prompt) {
+            Ok(ClassifiedInput::Message(text)) => TranscriptEditReplacement::Message {
+                text,
+                mode,
+                behavior: RequestBehavior::Standard,
+            },
+            Ok(ClassifiedInput::Orchestrate(_)) if mode != SessionMode::Build => {
+                return InputRoute::Notice(
+                    "Orchestration is available only in Build mode; the draft was retained.".into(),
+                );
+            }
+            Ok(ClassifiedInput::Orchestrate(text)) => TranscriptEditReplacement::Message {
+                text,
+                mode,
+                behavior: RequestBehavior::Orchestrate,
+            },
+            Ok(ClassifiedInput::Skill { name, args }) => {
+                TranscriptEditReplacement::Skill { name, args, mode }
+            }
+            Ok(ClassifiedInput::Ensemble { .. }) => {
+                return InputRoute::Notice(
+                    "This command is not available in this frontend; the draft was retained."
+                        .into(),
+                );
+            }
+            Ok(ClassifiedInput::Builtin(_) | ClassifiedInput::McpPrompt { .. }) => {
+                return InputRoute::Notice(
+                    "Built-in commands cannot replace transcript items; cancel the recall to run the command.".into(),
+                );
+            }
+            Err(error) => return InputRoute::Notice(error.to_string()),
+        };
+        self.root
+            .edit_transcript(
+                TranscriptEdit {
+                    target,
+                    replacement,
+                },
+                target_index,
+            )
+            .map_or(InputRoute::Retained, |command| {
+                InputRoute::Command(Box::new(SessionCommand::Turn(command)))
+            })
+    }
+
     pub fn route_input(&mut self, input: &str, orchestrate: bool) -> InputRoute {
-        let classified = self
-            .controls
-            .registry
-            .classify_prompt(&zevria_content::UserPrompt::from_text(input));
+        self.route_prompt(&UserPrompt::from_text(input), orchestrate)
+    }
+
+    pub fn route_prompt(&mut self, prompt: &UserPrompt, orchestrate: bool) -> InputRoute {
+        let classified = self.controls.registry.classify_prompt(prompt);
         match classified {
             Ok(ClassifiedInput::Builtin(SlashCommand::Jobs)) => return InputRoute::Jobs,
             Ok(ClassifiedInput::Builtin(SlashCommand::Mcp)) => return InputRoute::Mcp,

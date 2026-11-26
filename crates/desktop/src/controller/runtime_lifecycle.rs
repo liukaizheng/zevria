@@ -124,10 +124,13 @@ impl SessionController {
         self.terminal_error = None;
         self.phase = Phase::Starting;
         self.draft.clear();
+        self.draft_images.clear();
+        self.edit.reset();
+        self.recalled_origin = None;
         self.draft_generation = 0;
         self.draft_slot = Default::default();
         self.cancelling = false;
-        self.capturing_dialog = false;
+        self.set_capturing_dialog(false, cx);
         self.orchestrate = false;
         let job = cx.global::<EngineRuntime>().spawn(Self::open(
             config,
@@ -197,7 +200,7 @@ impl SessionController {
         self.pump.take();
         self.tick.take();
         self.command.take();
-        if self.model.root.pending_prompt().is_some() {
+        if self.model.root.pending_prompt().is_some() || self.edit.is_awaiting_acceptance() {
             let reduction = self.model.disconnected();
             self.apply_reduction(reduction);
         }

@@ -403,3 +403,357 @@ fn terminal_subtask_status_does_not_regress_on_late_launch() {
     })));
     assert_eq!(workspace.children[0].status, Some(SubtaskStatus::Completed));
 }
+
+mod transcript_edits {
+    use super::*;
+    use rig_core::message::{AssistantContent, ToolCall, ToolFunction, ToolName, UserContent};
+    use zevria_content::{PromptBlock, PromptImage, UserPrompt};
+    use zevria_desktop::session::DraftContent;
+    use zevria_presentation::{
+        blocks::{NativeToolCallStatus as ToolCallStatus, PresentationBlockKind},
+        conversation::HistoryEntry,
+    };
+    use zevria_session_api::{TranscriptEdit, TranscriptEditReplacement, TranscriptEditTarget};
+    use zevria_workflow::{
+        AgentRunStatus, EnsembleRunId, EnsembleStart, EnsembleWorkflow, PlanWorkflowState,
+    };
+
+    #[test]
+    fn edit_requires_an_idle_root_without_capturing_controls_or_executing_tools() {
+        let mut workspace = WorkspaceModel::default();
+        assert!(workspace.can_edit_transcript());
+        start(&mut workspace);
+        assert!(!workspace.can_edit_transcript());
+        workspace.disconnected();
+
+        let artifact = PlanArtifact {
+            version: PlanVersion {
+                id: PlanId::new(),
+                revision: 1,
+            },
+            title: "Plan".into(),
+            markdown: "Implement later".into(),
+            source_turn_id: TURN,
+        };
+        workspace
+            .root
+            .workflow
+            .apply_snapshot(PlanWorkflowState::Ready {
+                artifact: artifact.clone(),
+            });
+        workspace.root.workflow.hide();
+        assert!(!workspace.can_edit_transcript(), "hidden Ready Plan");
+        workspace
+            .root
+            .workflow
+            .apply_snapshot(PlanWorkflowState::Planning {
+                id: artifact.version.id,
+                previous: Some(artifact),
+                draft: None,
+            });
+        assert!(workspace.can_edit_transcript());
+        assert!(workspace.root.workflow.open_review());
+        assert!(!workspace.can_edit_transcript(), "recovery Plan dialog");
+        workspace.root.workflow.reset();
+
+        workspace.controls.question = Some(QuestionForm::new(
+            TURN,
+            question(QuestionPromptKind::SingleSelect { allow_other: true }),
+        ));
+        assert!(!workspace.can_edit_transcript());
+        workspace.controls.question = None;
+        assert!(workspace.controls.models.show(
+            SessionMode::Build,
+            zevria_model::models::ModelSelectionScope::SessionOnly
+        ));
+        assert!(!workspace.can_edit_transcript());
+        workspace.controls.models.reset();
+        workspace.controls.selected_child = Some(SubtaskId::new("read-only"));
+        assert!(!workspace.can_edit_transcript());
+        workspace.controls.selected_child = None;
+
+        assert!(workspace.can_edit_transcript());
+        workspace.root.conversation.push_message(
+            Message::from(vec![AssistantContent::ToolCall(ToolCall::from_wire(
+                "call-id",
+                ToolFunction::new(ToolName::new("read").unwrap(), serde_json::json!({})),
+            ))]),
+            ToolCallStatus::Executing,
+        );
+        assert!(!workspace.root.is_busy());
+        assert!(!workspace.can_edit_transcript());
+    }
+
+    fn image(red: u8) -> PromptImage {
+        PromptImage::from_rgba(1, 1, &[red, 0, 0, 255]).unwrap()
+    }
+
+    #[test]
+    fn recall_resolves_editable_prompt_blocks_not_placeholders_or_ensembles() {
+        let mut workspace = WorkspaceModel::default();
+        let ordered = UserPrompt::new(vec![
+            PromptBlock::Text("before ".into()),
+            PromptBlock::Image(image(1)),
+            PromptBlock::Text(" after".into()),
+        ])
+        .unwrap();
+        let prompts = [
+            "ordinary".into(),
+            "/orchestrate parallel work".into(),
+            "$review changes".into(),
+            " /new".into(),
+            " $review literal".into(),
+            ordered,
+        ];
+        let mut first_block = None;
+        for (ordinal, prompt) in prompts.into_iter().enumerate() {
+            let conversation = &mut workspace.root.conversation;
+            conversation.push_message(Message::assistant("separator"), ToolCallStatus::Finished);
+            let index = conversation.history().len();
+            conversation.push_message(prompt.to_message(), ToolCallStatus::Finished);
+            let selection = conversation.message_recall_selection(index).unwrap();
+            let block = conversation.selection_identity(selection).unwrap();
+            first_block.get_or_insert(block);
+            assert_eq!(
+                workspace.recallable_prompt(index, block),
+                Some((prompt, TranscriptEditTarget::PromptOrdinal(ordinal), index))
+            );
+        }
+        let conversation = &mut workspace.root.conversation;
+        let unsupported = conversation.history().len();
+        conversation.push_message(
+            Message::User {
+                content: vec![UserContent::image_base64("unsupported", None, None)],
+            },
+            ToolCallStatus::Finished,
+        );
+        let HistoryEntry::Conversation(entry) = &conversation.history()[unsupported] else {
+            panic!()
+        };
+        let block = entry.blocks.first().unwrap();
+        assert!(matches!(block.kind, PresentationBlockKind::Placeholder(_)));
+        let unsupported_block = block.id;
+        let blank = conversation.history().len();
+        conversation.push_message(Message::user("  "), ToolCallStatus::Finished);
+        let ensemble = conversation.history().len();
+        conversation.add_ensemble(
+            EnsembleStart {
+                run_id: EnsembleRunId::from_string("ensemble"),
+                workflow: EnsembleWorkflow::Review,
+                prompt: "review".into(),
+                agents: vec![],
+            },
+            AgentRunStatus::Completed,
+            None,
+        );
+        assert!(
+            workspace
+                .recallable_prompt(unsupported, unsupported_block)
+                .is_none()
+        );
+        assert!(
+            workspace
+                .recallable_prompt(blank, first_block.unwrap())
+                .is_none()
+        );
+        assert!(
+            workspace
+                .recallable_prompt(ensemble, first_block.unwrap())
+                .is_none()
+        );
+    }
+
+    fn route_edit(workspace: &mut WorkspaceModel, prompt: impl Into<UserPrompt>) -> InputRoute {
+        workspace.route_edit_input(&prompt.into(), TranscriptEditTarget::PromptOrdinal(0), 0)
+    }
+
+    #[test]
+    fn edit_grammar_routes_messages_and_skills_without_consuming_unsupported_drafts() {
+        for (input, mode, behavior, expected) in [
+            (
+                "a message",
+                SessionMode::Plan,
+                RequestBehavior::Standard,
+                "a message",
+            ),
+            (
+                " /new",
+                SessionMode::Build,
+                RequestBehavior::Standard,
+                "/new",
+            ),
+            (
+                " $review literal",
+                SessionMode::Build,
+                RequestBehavior::Standard,
+                "$review literal",
+            ),
+            (
+                "/orchestrate independent work",
+                SessionMode::Build,
+                RequestBehavior::Orchestrate,
+                "independent work",
+            ),
+        ] {
+            let mut workspace = WorkspaceModel::default();
+            workspace.root.apply_selected_mode(mode);
+            let InputRoute::Command(command) = route_edit(&mut workspace, input) else {
+                panic!("{input}")
+            };
+            assert!(
+                matches!(*command, SessionCommand::Turn(TurnCommand::EditTranscript(TranscriptEdit {
+                target: TranscriptEditTarget::PromptOrdinal(0),
+                replacement: TranscriptEditReplacement::Message { text, mode: actual, behavior: actual_behavior },
+            })) if text == UserPrompt::from_text(expected) && actual == mode && actual_behavior == behavior)
+            );
+            assert!(matches!(
+                route_edit(&mut workspace, "busy"),
+                InputRoute::Retained
+            ));
+        }
+        let mut workspace = WorkspaceModel::default();
+        workspace.root.apply_selected_mode(SessionMode::Plan);
+        assert!(
+            matches!(route_edit(&mut workspace, "/orchestrate independent work"), InputRoute::Notice(notice) if notice.contains("only in Build mode"))
+        );
+        assert!(matches!(
+            route_edit(&mut workspace, "\n "),
+            InputRoute::Retained
+        ));
+        for builtin in [
+            "/new",
+            "/resume",
+            "/compact",
+            "/build",
+            "/plan",
+            "/model",
+            "/jobs",
+            "/subtasks",
+            "/mcp",
+            "/prompt docs:summary",
+        ] {
+            assert!(
+                matches!(route_edit(&mut workspace, builtin), InputRoute::Notice(notice) if notice.contains("cancel the recall")),
+                "{builtin}"
+            );
+        }
+        for ensemble in [
+            "/ensemble-plan propose options",
+            "/ensemble-review check options",
+        ] {
+            assert!(
+                matches!(route_edit(&mut workspace, ensemble), InputRoute::Notice(notice) if notice.contains("not available in this frontend"))
+            );
+        }
+        assert!(matches!(
+            route_edit(&mut workspace, "/orchestrate"),
+            InputRoute::Notice(_)
+        ));
+        assert!(!workspace.root.is_busy());
+        workspace
+            .controls
+            .registry
+            .set_skills(vec![zevria_instructions::skill::SkillMeta {
+                name: "review".parse().unwrap(),
+                description: "Review my changes".into(),
+            }]);
+        let InputRoute::Command(command) = route_edit(&mut workspace, "$review changes") else {
+            panic!()
+        };
+        assert!(
+            matches!(*command, SessionCommand::Turn(TurnCommand::EditTranscript(TranscriptEdit {
+            replacement: TranscriptEditReplacement::Skill { name, args, mode: SessionMode::Plan }, ..
+        })) if name.as_str() == "review" && args == UserPrompt::from_text("changes"))
+        );
+    }
+
+    #[test]
+    fn image_first_sigils_stay_literal_after_text_or_attachment_edits() {
+        for literal in ["/new", "$review"] {
+            let attachment = image(1);
+            let source = UserPrompt::new(vec![
+                PromptBlock::Image(attachment.clone()),
+                PromptBlock::Text(literal.into()),
+            ])
+            .unwrap();
+            let (draft, origin) = DraftContent::from_user_prompt(&source);
+            assert_eq!(draft.text, format!(" {literal}"));
+            assert_eq!(draft.to_user_prompt(Some(&origin)), source);
+
+            for (remove_image, suffix) in [(true, ""), (false, " edited")] {
+                let mut draft = draft.clone();
+                if remove_image {
+                    draft.images.clear();
+                }
+                draft.text.push_str(suffix);
+                let mut workspace = WorkspaceModel::default();
+                workspace.controls.registry.set_skills(vec![
+                    zevria_instructions::skill::SkillMeta {
+                        name: "review".parse().unwrap(),
+                        description: "Review my changes".into(),
+                    },
+                ]);
+                let InputRoute::Command(command) =
+                    route_edit(&mut workspace, draft.to_user_prompt(Some(&origin)))
+                else {
+                    panic!("{literal}{suffix} should still route as a literal prompt");
+                };
+                let mut expected = vec![PromptBlock::Text(format!("{literal}{suffix}"))];
+                if !remove_image {
+                    expected.push(PromptBlock::Image(attachment.clone()));
+                }
+                assert!(matches!(
+                    *command,
+                    SessionCommand::Turn(TurnCommand::EditTranscript(TranscriptEdit {
+                        replacement: TranscriptEditReplacement::Message { text, behavior: RequestBehavior::Standard, .. }, ..
+                    })) if text.blocks() == expected
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn draft_retains_source_order_until_edits_and_routes_images_on_both_paths() {
+        let first = image(1);
+        let second = image(2);
+        let prompt = UserPrompt::new(vec![
+            PromptBlock::Image(first.clone()),
+            PromptBlock::Text("/literal text because image comes first".into()),
+            PromptBlock::Image(second.clone()),
+            PromptBlock::Text(" plus more".into()),
+        ])
+        .unwrap();
+        let (mut draft, origin) = DraftContent::from_user_prompt(&prompt);
+        assert!(!draft.is_blank() && !draft.is_empty());
+        assert_eq!(draft.images, [first, second.clone()]);
+        assert_eq!(draft.to_user_prompt(Some(&origin)), prompt);
+        let InputRoute::Command(command) = route_edit(
+            &mut WorkspaceModel::default(),
+            draft.to_user_prompt(Some(&origin)),
+        ) else {
+            panic!()
+        };
+        assert!(
+            matches!(*command, SessionCommand::Turn(TurnCommand::EditTranscript(TranscriptEdit {
+            replacement: TranscriptEditReplacement::Message { text, .. }, ..
+        })) if text == prompt)
+        );
+
+        draft.text.clear();
+        draft.images.remove(0);
+        assert!(!draft.is_blank() && !draft.is_empty());
+        let recovered = draft.to_user_prompt(Some(&origin));
+        assert_eq!(recovered.blocks(), &[PromptBlock::Image(second)]);
+        let InputRoute::Command(command) =
+            WorkspaceModel::default().route_prompt(&recovered, false)
+        else {
+            panic!()
+        };
+        assert!(
+            matches!(*command, SessionCommand::Turn(TurnCommand::Submit { text, .. }) if text == recovered)
+        );
+        draft.images.clear();
+        draft.text.push(' ');
+        assert!(draft.is_blank() && !draft.is_empty());
+    }
+}

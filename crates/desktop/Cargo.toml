@@ -45,7 +45,7 @@ image = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # Use Kit's locked backend directly for its fallible startup constructor.
-gpui-windows = { package = "gpui-pre-windows", version = "=0.3.11" }
+gpui-windows = { package = "gpui-pre-windows", version = "=0.3.14" }
 windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]

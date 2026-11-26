@@ -28,11 +28,11 @@ it does not constrain Zevria's dependency graph or downgrade its Serde versions.
 
 ## Why a parser patch
 
-GPUI Kit 0.9.0's Markdown plugins receive completed mdast nodes. Upstream's
-backslash delimiters are character escapes, not math nodes, so a renderer alone
-cannot insert math objects into an existing text node or interrupt a paragraph
-with display math. The isolated tokenizer patch creates ordinary `InlineMath`
-and `Math` nodes while retaining the exact original source and spans.
+GPUI Kit's Markdown plugins receive completed mdast nodes. Upstream's backslash
+delimiters are character escapes, not math nodes, so a renderer alone cannot
+insert math objects into an existing text node or interrupt a paragraph with
+display math. The isolated tokenizer patch creates ordinary `InlineMath` and
+`Math` nodes while retaining the exact original source and spans.
 
 No message preprocessing, provider replay rewriting, new parse-option fields,
 Cargo features, AST/serde formats, or AST/HTML compiler changes are involved.

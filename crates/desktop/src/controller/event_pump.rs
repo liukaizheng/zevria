@@ -4,6 +4,7 @@ use super::{
     Context, Duration, Instant, ModeSelectionResult, Phase, Reduction, SessionCommand,
     SessionController, SessionRequest, SessionStart, SessionUpdate,
 };
+use zevria_presentation::session::OperationKind;
 
 impl SessionController {
     pub(super) fn attach(&mut self, cx: &mut Context<Self>) {
@@ -144,12 +145,15 @@ impl SessionController {
         }
         if !self.model.root.is_busy() {
             self.cancelling = false;
+            // If busy cleared without a settlement, unlock the recall without
+            // consuming the unaccepted replacement draft.
+            let unaccepted_edit = self.reject_pending_edit();
             if let Some(submitted) = self.draft_slot.take()
+                && !unaccepted_edit
                 && self.draft_generation == submitted.generation
-                && self.draft == submitted.draft
+                && self.matches_draft(&submitted.draft)
             {
-                self.draft.clear();
-                self.draft_generation += 1;
+                self.replace_draft(Default::default());
             }
         }
         if reduction.fresh.is_none() {
@@ -159,7 +163,8 @@ impl SessionController {
     }
     pub(super) fn dispatch_job_continuation(&mut self, cx: &mut Context<Self>) {
         if self.phase == Phase::Live
-            && self.draft.is_empty()
+            && self.edit.is_none()
+            && self.draft_is_empty()
             && !self.draft_slot.has_pending()
             && self.model.controls.question.is_none()
             && let Some(command) = self.model.root.continue_after_jobs()
@@ -167,51 +172,70 @@ impl SessionController {
             self.send(SessionCommand::Turn(command), cx);
         }
     }
-    pub(super) fn apply_reduction(&mut self, reduction: Reduction) {
-        if reduction.accepted == Some(zevria_presentation::session::OperationKind::Submit) {
-            self.orchestrate = false;
+    fn reject_pending_edit(&mut self) -> bool {
+        if !self.edit.reject() {
+            return false;
         }
-        if reduction.accepted.is_some_and(|kind| {
-            !matches!(
-                kind,
-                zevria_presentation::session::OperationKind::JobContinuation
-                    | zevria_presentation::session::OperationKind::AuthoritativeJobContinuation
-            )
-        }) && let Some(submitted) = self.draft_slot.pending_mut()
-        {
-            if self.draft_generation == submitted.generation && self.draft == submitted.draft {
-                self.draft.clear();
-                self.draft_generation += 1;
-                // The empty replacement is a separate editor identity. User
-                // editing and undoing cannot revive this restoration token.
-                submitted.generation = self.draft_generation;
+        // Return focus from Stop without replacing the text or moving its caret.
+        self.rejected_edit_generation += 1;
+        true
+    }
+
+    pub(super) fn apply_reduction(&mut self, reduction: Reduction) {
+        if let Some(kind) = reduction.accepted {
+            if matches!(kind, OperationKind::Submit | OperationKind::TranscriptEdit) {
+                self.orchestrate = false;
             }
-            submitted.accepted = true;
+            if kind.is_transcript_edit() {
+                self.edit.accept();
+                self.recalled_origin = None;
+            }
+            if !matches!(
+                kind,
+                OperationKind::JobContinuation | OperationKind::AuthoritativeJobContinuation
+            ) && let Some(submitted) = self.draft_slot.pending_mut()
+            {
+                if self.draft_generation == submitted.generation
+                    && self.draft == submitted.draft.text
+                    && self.draft_images == submitted.draft.images
+                {
+                    self.draft.clear();
+                    self.draft_images.clear();
+                    self.draft_generation += 1;
+                    // The empty replacement is a separate editor identity. User
+                    // editing and undoing cannot revive this restoration token.
+                    submitted.generation = self.draft_generation;
+                }
+                submitted.accepted = true;
+            }
         }
         if let Some((kind, settlement)) = reduction.settled
             && !matches!(
                 kind,
-                zevria_presentation::session::OperationKind::JobContinuation
-                    | zevria_presentation::session::OperationKind::AuthoritativeJobContinuation
+                OperationKind::JobContinuation | OperationKind::AuthoritativeJobContinuation
             )
         {
             self.cancelling = false;
+            if kind.is_transcript_edit() {
+                self.reject_pending_edit();
+            }
             if let Some(submitted) = self.draft_slot.take()
                 && settlement.restores_draft()
             {
-                let unchanged = self.draft_generation == submitted.generation;
-                if unchanged
-                    && (if submitted.accepted {
-                        self.draft.is_empty()
-                    } else {
-                        self.draft == submitted.draft
-                    })
-                {
-                    if self.draft != submitted.draft {
-                        self.draft = submitted.draft;
-                        self.draft_generation += 1;
+                if submitted.accepted {
+                    if let Some(draft) = self.draft_slot.restore_or_retain(
+                        submitted.draft,
+                        submitted.generation,
+                        self.draft_generation,
+                        self.draft.is_empty() && self.draft_images.is_empty(),
+                    ) {
+                        self.replace_draft(draft);
                     }
-                } else {
+                } else if self.draft_generation != submitted.generation
+                    || !self.matches_draft(&submitted.draft)
+                {
+                    // The submitted text and images never left the composer.
+                    // Retain a recovery copy only if the user changed them.
                     self.draft_slot.retain(submitted.draft);
                 }
             }
@@ -227,12 +251,11 @@ impl SessionController {
                 self.orchestrate = false;
             }
             if let Some(submitted) = self.draft_slot.take() {
-                let unchanged =
-                    self.draft_generation == submitted.generation && self.draft == submitted.draft;
+                let unchanged = self.draft_generation == submitted.generation
+                    && self.matches_draft(&submitted.draft);
                 match mode.result {
                     ModeSelectionResult::Accepted { .. } if unchanged => {
-                        self.draft.clear();
-                        self.draft_generation += 1;
+                        self.replace_draft(Default::default());
                     }
                     ModeSelectionResult::Rejected { .. } if !unchanged => {
                         self.draft_slot.retain(submitted.draft)

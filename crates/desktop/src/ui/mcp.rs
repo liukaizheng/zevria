@@ -228,7 +228,7 @@ impl DesktopWindow {
             body = body.child(
                 Button::new("mcp-run-prompt")
                     .label("Run prompt")
-                    .disabled(busy)
+                    .disabled(busy || self.controller.read(cx).edit.is_active())
                     .on_click(cx.listener(|this, _, _, cx| {
                         let args = this
                             .mcp_ui

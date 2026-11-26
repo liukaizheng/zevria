@@ -203,12 +203,12 @@ pub fn tag(text: impl Into<SharedString>, ink: Hsla, cx: &App) -> Div {
 /// Icon controls always carry both a tooltip and an accessible name.
 pub fn icon_button(
     id: impl Into<ElementId>,
-    icon: gpui_kit::component::IconName,
+    icon: impl Into<Icon>,
     name: impl Into<SharedString>,
 ) -> Button {
     let name = name.into();
     Button::new(id)
-        .icon(icon)
+        .icon(icon.into())
         .ghost()
         .xsmall()
         .tooltip(name.clone())

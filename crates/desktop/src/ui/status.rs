@@ -332,6 +332,11 @@ impl DesktopWindow {
                 _ => "Choosing a model…",
             }
             .into();
+        } else if !status.persistence_failed
+            && controller.model.controls.selected_child.is_none()
+            && controller.edit.is_recalling()
+        {
+            status.activity = "Editing message".into();
         }
         let t = palette(cx);
         let mut row = div()

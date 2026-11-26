@@ -37,7 +37,7 @@ use zevria_foundation::{
     CommandJobId, CommandJobSnapshot, CommandJobStatus, FileChange, READ_IMAGE_TOOL_NAME,
 };
 use zevria_presentation::{
-    blocks::{PresentationBlock, image_facts_label, image_resized_label},
+    blocks::{PresentationBlock, PresentationBlockId, image_facts_label, image_resized_label},
     conversation::HistoryEntry,
     jobs::{JobsInspector, format_job_duration, job_status_icon},
     status_icon::StatusIcon,
@@ -92,6 +92,7 @@ const JOB_ACTION_SIZE: f32 = 20.;
 const JOB_ACTION_GAP: f32 = 2.;
 const LIVE_CONTROLS_RIGHT: f32 = 10. + 14. + 8.; // Trigger padding, status icon, header gap.
 const SHOW_IN_JOBS_ACTION: usize = 3;
+const EDIT_PROMPT_ACTION: usize = 4;
 
 fn live_controls_width(job: &CommandJobSnapshot) -> f32 {
     if JobsInspector::can_background(job) {
@@ -125,7 +126,7 @@ pub struct BlockView {
     _text: Subscription,
     block_focus: FocusHandle,
     disclosure_focus: FocusHandle,
-    action_focus: [FocusHandle; 4],
+    action_focus: [FocusHandle; 5],
     copy_feedback: style::CopyFeedback<CopyTarget>,
     job_action_focus: [FocusHandle; 2], // Stop, background.
     open_jobs_focus: FocusHandle,
@@ -580,6 +581,34 @@ impl BlockView {
         }
     }
 
+    fn editable_prompt_source(&self, cx: &App) -> Option<(usize, PresentationBlockId)> {
+        self.data.source.filter(|&source| {
+            matches!(
+                self.data.kind,
+                BlockKind::Prompt {
+                    preparing: false,
+                    ..
+                }
+            ) && self.controller.read(cx).is_prompt_editable(source)
+        })
+    }
+
+    fn is_active_edit_target(&self, cx: &App) -> bool {
+        matches!(self.data.kind, BlockKind::Prompt { .. })
+            && self.data.source.is_some_and(|(index, _)| {
+                self.controller.read(cx).active_edit_history_index() == Some(index)
+            })
+    }
+
+    pub(super) fn refresh_edit_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.action_focus[EDIT_PROMPT_ACTION].is_focused(window)
+            && (self.is_active_edit_target(cx) || self.editable_prompt_source(cx).is_none())
+        {
+            window.focus(&self.action_focus[0], cx);
+        }
+        cx.notify();
+    }
+
     fn actions(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let (idle_label, copied_label) = match &self.data.kind {
             BlockKind::Step(Step::Tool(_)) => ("Copy input", "Copied input"),
@@ -610,6 +639,20 @@ impl BlockView {
                 .track_focus(&self.action_focus[0])
                 .on_click(cx.listener(|this, _, _, cx| this.copy_primary(cx))),
             );
+        if !self.is_active_edit_target(cx)
+            && let Some(source) = self.editable_prompt_source(cx)
+        {
+            let controller = self.controller.clone();
+            actions = actions.child(
+                style::icon_button("edit-prompt", Lucide::Pencil, "Edit and resend")
+                    .track_focus(&self.action_focus[EDIT_PROMPT_ACTION])
+                    .on_click(move |_, _, cx| {
+                        controller.update(cx, |controller, cx| {
+                            controller.recall_prompt(source, cx);
+                        });
+                    }),
+            );
+        }
         if self.data.secondary.is_some() {
             actions = actions.child(
                 style::copy_button(
@@ -1543,6 +1586,8 @@ impl BlockView {
 
     fn prompt(&self, preparing: bool, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = palette(cx);
+        let tone = tones(cx);
+        let editing = self.is_active_edit_target(cx);
         div()
             .id("prompt-card")
             .test_support()
@@ -1554,7 +1599,7 @@ impl BlockView {
             .py(px(12.))
             .rounded(px(12.))
             .border_1()
-            .border_color(tones(cx).hairline)
+            .border_color(if editing { tone.focus } else { tone.hairline })
             .bg(t.surfaces.panel)
             .child(
                 div()
@@ -1569,6 +1614,16 @@ impl BlockView {
                             .min_w_0()
                             .child(self.data.body.to_string()),
                     )
+                    .when(editing, |row| {
+                        row.child(
+                            style::tag("Editing", t.roles.you, cx)
+                                .id("prompt-editing-badge")
+                                .test_support()
+                                .border_1()
+                                .border_color(tone.hairline)
+                                .flex_shrink_0(),
+                        )
+                    })
                     .child(self.actions(window, cx)),
             )
             .children(self.attachments.iter().map(|(label, dimensions, image)| {

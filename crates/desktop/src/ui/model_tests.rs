@@ -562,13 +562,13 @@ fn slash_scopes_consume_only_accepted_commands_and_channel_failure_does_not_stra
             cx,
         );
         controller.update(cx, |c, cx| {
-            c.capturing_dialog = true;
+            c.set_capturing_dialog(true, cx);
             c.edit_draft(command.into(), cx);
             c.submit(cx);
         });
         assert_eq!(controller.read_with(cx, |c, _| c.draft.clone()), command);
         assert!(receiver.try_recv().is_err());
-        controller.update(cx, |c, _| c.capturing_dialog = false);
+        controller.update(cx, |c, cx| c.set_capturing_dialog(false, cx));
     }
     // /resume only labels the noncapturing Sessions sidebar; it must not
     // permanently disable model selection when the user stays in this session.

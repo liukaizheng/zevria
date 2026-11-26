@@ -43,6 +43,9 @@ struct PaneView {
     live_attempt: Option<NativeHeader>,
     live_rows: HashSet<String>,
     job_rows: HashSet<String>,
+    prompt_rows: HashSet<String>,
+    can_edit_prompts: bool,
+    editing_target: Option<usize>,
     jobs_generation: u64,
     can_inspect_jobs: bool,
     activity: Option<String>,
@@ -67,6 +70,9 @@ impl PaneView {
             live_attempt: None,
             live_rows: HashSet::new(),
             job_rows: HashSet::new(),
+            prompt_rows: HashSet::new(),
+            can_edit_prompts: false,
+            editing_target: None,
             jobs_generation: 0,
             can_inspect_jobs: false,
             activity: None,
@@ -140,7 +146,7 @@ impl TranscriptView {
             .conversation
             .epoch();
         let pane_changed = selected != self.selected;
-        let reset_focus = (pane_changed || Some(epoch) != self.pane.epoch)
+        let mut reset_focus = (pane_changed || Some(epoch) != self.pane.epoch)
             && self
                 .pane
                 .blocks
@@ -194,6 +200,7 @@ impl TranscriptView {
             && self.pane.cancelling == cancelling
         {
             self.sync_live_jobs(window, cx);
+            self.sync_prompt_edit_state(window, cx);
             self.notify_live_rows(cx);
             return;
         }
@@ -253,8 +260,11 @@ impl TranscriptView {
             self.pane.indices.remove(&row.data.key);
             self.pane.live_rows.remove(&row.data.key);
             self.pane.job_rows.remove(&row.data.key);
+            self.pane.prompt_rows.remove(&row.data.key);
             if !valid.contains(row.data.key.as_str()) {
-                self.pane.blocks.remove(&row.data.key);
+                if let Some(block) = self.pane.blocks.remove(&row.data.key) {
+                    reset_focus |= block.view.read(cx).contains_focus(window, cx);
+                }
                 self.pane.disclosures.remove(&row.data.key);
             }
         }
@@ -266,6 +276,9 @@ impl TranscriptView {
             row.apply_disclosure(&self.pane.disclosures);
             if row.data.tracks_live_jobs() {
                 self.pane.job_rows.insert(row.data.key.clone());
+            }
+            if matches!(row.data.kind, BlockKind::Prompt { .. }) && row.data.source.is_some() {
+                self.pane.prompt_rows.insert(row.data.key.clone());
             }
             if row.needs_clock() || jobs.is_some_and(|jobs| row.needs_job_clock(jobs)) {
                 self.pane.live_rows.insert(row.data.key.clone());
@@ -348,8 +361,44 @@ impl TranscriptView {
             }
         }
         self.sync_live_jobs(window, cx);
+        self.sync_prompt_edit_state(window, cx);
         self.notify_live_rows(cx);
         cx.notify();
+    }
+
+    fn sync_prompt_edit_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let controller = self.controller.read(cx);
+        let can_edit = controller.can_begin_transcript_edit();
+        let target = controller.active_edit_history_index();
+        let eligibility_changed =
+            std::mem::replace(&mut self.pane.can_edit_prompts, can_edit) != can_edit;
+        let previous_target = std::mem::replace(&mut self.pane.editing_target, target);
+        if !eligibility_changed && previous_target == target {
+            return;
+        }
+        let mut remeasure = Vec::new();
+        for key in &self.pane.prompt_rows {
+            if let Some(block) = self.pane.blocks.get(key) {
+                let index = self.pane.indices[key];
+                let history_index = Some(self.pane.rows[index].data.history_index);
+                if eligibility_changed
+                    || history_index == target
+                    || history_index == previous_target
+                {
+                    block
+                        .view
+                        .update(cx, |view, cx| view.refresh_edit_state(window, cx));
+                    remeasure.push(index);
+                }
+            }
+        }
+        if !remeasure.is_empty() {
+            self.pane.scroller.update(cx, |list, cx| {
+                for index in remeasure {
+                    list.remeasure_items(index..index + 1, cx);
+                }
+            });
+        }
     }
 
     fn sync_live_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {

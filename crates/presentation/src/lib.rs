@@ -7,6 +7,7 @@ pub mod command;
 pub mod completion;
 pub mod conversation;
 pub mod draft;
+pub mod edit;
 pub mod jobs;
 pub mod mcp;
 pub mod models;

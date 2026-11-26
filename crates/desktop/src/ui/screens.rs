@@ -163,7 +163,11 @@ impl DesktopWindow {
                     .child("Zevria is still working. Switching sessions stops this turn first."))
                 .child(div().flex().justify_end().gap(px(8.))
                     .child(Button::new("cancel-replace").ghost().label("Keep working")
-                        .on_click(cx.listener(|this,_,_,cx| { this.pending_replace = None; this.controller.update(cx, |this, _| this.capturing_dialog = false); cx.notify(); })))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.pending_replace = None;
+                            this.controller.update(cx, |this, cx| this.set_capturing_dialog(false, cx));
+                            cx.notify();
+                        })))
                     .child(Button::new("confirm-replace").danger().label("Stop and switch")
                         .on_click(cx.listener(|this,_,_,cx| {
                             if let Some(replacement) = this.pending_replace.take() { this.perform_replace(replacement,cx); }

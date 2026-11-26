@@ -3,7 +3,7 @@ mod event_pump;
 mod runtime_lifecycle;
 use crate::{
     engine::{EngineRuntime, LOG_FILE, LogGuard},
-    session::{InputRoute, WorkspaceModel},
+    session::{DraftContent, InputRoute, RecalledOrigin, WorkspaceModel},
 };
 use gpui_kit::{Context, Subscription, Task};
 use std::{
@@ -11,12 +11,18 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use zevria_content::PromptImage;
 use zevria_foundation::{CommandJobId, SubtaskId};
 use zevria_host::{
     Config, RunningSession, SessionStart,
     sessions::{self, SessionSummary},
 };
-use zevria_presentation::Reduction;
+use zevria_presentation::{
+    Reduction,
+    blocks::PresentationBlockId,
+    draft::DraftSlot,
+    edit::{EditState, RecallEdit},
+};
 use zevria_session_api::{ControlCommand, ModeSelectionResult, SessionCommand, SessionUpdate};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +37,12 @@ pub struct SessionRequest {
     pub workspace: PathBuf,
     pub start: SessionStart,
 }
+#[derive(Debug)]
+pub struct SavedComposerDraft {
+    draft: DraftContent,
+    orchestrate: bool,
+}
+
 pub struct SessionController {
     pub phase: Phase,
     pub config: Option<Arc<Config>>,
@@ -39,13 +51,18 @@ pub struct SessionController {
     pub model: WorkspaceModel,
     pub sessions: Vec<SessionSummary>,
     pub draft: String,
+    pub draft_images: Vec<PromptImage>,
+    pub edit: EditState<SavedComposerDraft>,
+    recalled_origin: Option<RecalledOrigin>,
+    pub recall_generation: u64,
+    pub(crate) rejected_edit_generation: u64,
     pub orchestrate: bool,
     pub cancelling: bool,
     pub show_sessions: bool,
     /// Native capturing dialogs (for example replacement confirmation).
-    pub capturing_dialog: bool,
+    capturing_dialog: bool,
     draft_generation: u64,
-    pub draft_slot: zevria_presentation::draft::DraftSlot<String>,
+    pub draft_slot: DraftSlot<DraftContent>,
     running: Option<RunningSession>,
     command: Option<tokio::sync::mpsc::UnboundedSender<SessionCommand>>,
     pending: Option<SessionRequest>,
@@ -89,6 +106,11 @@ impl SessionController {
             model: WorkspaceModel::default(),
             sessions: Vec::new(),
             draft: String::new(),
+            draft_images: Vec::new(),
+            edit: EditState::default(),
+            recalled_origin: None,
+            recall_generation: 0,
+            rejected_edit_generation: 0,
             orchestrate: false,
             cancelling: false,
             show_sessions: false,
@@ -107,6 +129,17 @@ impl SessionController {
             _quit: quit,
         }
     }
+    pub(crate) fn capturing_dialog(&self) -> bool {
+        self.capturing_dialog
+    }
+
+    pub(crate) fn set_capturing_dialog(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.capturing_dialog != value {
+            self.capturing_dialog = value;
+            cx.notify();
+        }
+    }
+
     /// An actual editor change, including undo to identical text, retires the
     /// old submitted draft's replacement token. Programmatic sync emits no edit.
     pub fn edit_draft(&mut self, text: String, cx: &mut Context<Self>) {
@@ -117,10 +150,128 @@ impl SessionController {
     // The native editor already owns its redraw. Only an admitted continuation
     // goes through `send`, which notifies session/transcript observers.
     pub fn edit_composer_draft(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.edit.is_awaiting_acceptance() {
+            return;
+        }
         self.draft = text;
         self.draft_generation += 1;
         self.dispatch_job_continuation(cx);
     }
+
+    pub fn can_begin_transcript_edit(&self) -> bool {
+        self.phase == Phase::Live
+            && self.pending.is_none()
+            && !self.quit_requested
+            && !self.capturing_dialog
+            && !self.cancelling
+            && !self.draft_slot.has_pending()
+            && !self.edit.is_awaiting_acceptance()
+            && self.model.can_edit_transcript()
+    }
+
+    pub fn is_prompt_editable(&self, (index, block): (usize, PresentationBlockId)) -> bool {
+        self.can_begin_transcript_edit() && self.model.recallable_prompt(index, block).is_some()
+    }
+
+    pub fn active_edit_history_index(&self) -> Option<usize> {
+        self.model
+            .controls
+            .selected_child
+            .is_none()
+            .then(|| self.edit.active_target_index())
+            .flatten()
+    }
+
+    pub fn recall_prompt(
+        &mut self,
+        (index, block): (usize, PresentationBlockId),
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.can_begin_transcript_edit() {
+            return false;
+        }
+        let Some((prompt, target, target_index)) = self.model.recallable_prompt(index, block)
+        else {
+            return false;
+        };
+        if self.edit.active_target_index() == Some(target_index) {
+            return false;
+        }
+        if self.edit.is_recalling() {
+            self.edit.switch_target(target, target_index);
+        } else {
+            let saved_input = SavedComposerDraft {
+                draft: self.draft_content(),
+                orchestrate: self.orchestrate,
+            };
+            self.edit.recall(RecallEdit {
+                saved_input,
+                target,
+                target_index,
+            });
+        }
+        let (draft, origin) = DraftContent::from_user_prompt(&prompt);
+        self.replace_draft(draft);
+        self.recalled_origin = Some(origin);
+        self.orchestrate = false;
+        self.recall_generation += 1;
+        cx.notify();
+        true
+    }
+
+    pub fn cancel_recall(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(recall) = self.edit.cancel_recall() else {
+            return false;
+        };
+        self.replace_draft(recall.saved_input.draft);
+        self.orchestrate = recall.saved_input.orchestrate;
+        self.recalled_origin = None;
+        self.recall_generation += 1;
+        self.dispatch_job_continuation(cx);
+        cx.notify();
+        true
+    }
+
+    pub fn remove_draft_image(&mut self, index: usize, cx: &mut Context<Self>) {
+        if !self.edit.is_awaiting_acceptance() && index < self.draft_images.len() {
+            self.draft_images.remove(index);
+            self.draft_generation += 1;
+            self.dispatch_job_continuation(cx);
+            cx.notify();
+        }
+    }
+
+    pub fn recover_draft(&mut self, cx: &mut Context<Self>) {
+        if self.edit.is_none()
+            && self.draft_is_empty()
+            && let Some(draft) = self.draft_slot.recover()
+        {
+            self.replace_draft(draft);
+            cx.notify();
+        }
+    }
+
+    fn draft_content(&self) -> DraftContent {
+        DraftContent {
+            text: self.draft.clone(),
+            images: self.draft_images.clone(),
+        }
+    }
+
+    fn draft_is_empty(&self) -> bool {
+        self.draft.is_empty() && self.draft_images.is_empty()
+    }
+
+    fn matches_draft(&self, draft: &DraftContent) -> bool {
+        self.draft == draft.text && self.draft_images == draft.images
+    }
+
+    fn replace_draft(&mut self, draft: DraftContent) {
+        self.draft = draft.text;
+        self.draft_images = draft.images;
+        self.draft_generation += 1;
+    }
+
     pub(crate) fn clock_required(&self) -> bool {
         self.model.root.is_busy()
             || self.model.root.jobs_inspector().is_open()
@@ -181,6 +332,9 @@ impl SessionController {
         }
         if self.capturing_dialog {
             return Err("Close the current dialog before changing models.");
+        }
+        if self.edit.is_active() {
+            return Err("Cancel or finish editing the message before changing models.");
         }
         if self.draft_slot.has_pending() || self.cancelling {
             return Err("Wait for the pending operation before changing models.");
@@ -268,6 +422,9 @@ impl SessionController {
         arguments: std::collections::BTreeMap<String, String>,
         cx: &mut Context<Self>,
     ) {
+        if self.edit.is_active() {
+            return;
+        }
         if let Some(draft) = &mut self.model.controls.mcp.draft {
             draft.values = arguments;
         }
@@ -371,13 +528,23 @@ impl SessionController {
             || self.model.controls.question.is_some()
             || self.capturing_dialog
             || self.model.controls.models.is_open()
+            || self.edit.is_awaiting_acceptance()
         {
             return;
         }
-        match self.model.route_input(&self.draft, self.orchestrate) {
+        let draft = self.draft_content();
+        let prompt = draft.to_user_prompt(self.recalled_origin.as_ref());
+        let route = if let Some((target, target_index)) = self.edit.recalled_target() {
+            self.model.route_edit_input(&prompt, target, target_index)
+        } else {
+            self.model.route_prompt(&prompt, self.orchestrate)
+        };
+        match route {
             InputRoute::Command(command) | InputRoute::McpPrompt(command) => {
-                self.draft_slot
-                    .stage(self.draft.clone(), self.draft_generation);
+                if self.edit.is_recalling() {
+                    self.edit.stage_submission();
+                }
+                self.draft_slot.stage(draft, self.draft_generation);
                 self.send(*command, cx);
             }
             InputRoute::Models(scope) => {
@@ -385,26 +552,22 @@ impl SessionController {
                 // acquire submitted-turn bookkeeping. Only an accepted slash
                 // invocation consumes its own command text.
                 if self.open_model_picker(scope, cx) {
-                    self.draft.clear();
-                    self.draft_generation += 1;
+                    self.replace_draft(DraftContent::default());
                 }
             }
             InputRoute::Mcp => {
                 if self.open_mcp(cx) {
-                    self.draft.clear();
-                    self.draft_generation += 1;
+                    self.replace_draft(DraftContent::default());
                 }
             }
             InputRoute::Jobs => {
                 if self.open_jobs(cx) {
-                    self.draft.clear();
-                    self.draft_generation += 1;
+                    self.replace_draft(DraftContent::default());
                 }
             }
             InputRoute::Subtasks => {
                 if self.open_subtasks(cx) {
-                    self.draft.clear();
-                    self.draft_generation += 1;
+                    self.replace_draft(DraftContent::default());
                 }
             }
             InputRoute::New => self.new_session(cx),
@@ -434,6 +597,7 @@ impl SessionController {
         if self.phase != Phase::Live
             || self.model.controls.models.is_open()
             || self.capturing_dialog
+            || self.edit.is_active()
         {
             return;
         }
@@ -446,7 +610,10 @@ impl SessionController {
         decision: zevria_workflow::PlanDecision,
         cx: &mut Context<Self>,
     ) {
-        if self.phase != Phase::Live || self.model.controls.models.is_open() {
+        if self.phase != Phase::Live
+            || self.edit.is_active()
+            || self.model.controls.models.is_open()
+        {
             return;
         }
         if let Some(artifact) = self.model.root.workflow.dialog_artifact() {

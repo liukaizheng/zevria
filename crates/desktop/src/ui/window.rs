@@ -9,7 +9,7 @@ use crate::{
     controller::{Phase, SessionController, SessionRequest},
 };
 use gpui_kit::component::{
-    IconName, Sizable, TitleBar,
+    Disableable, IconName, Sizable, TitleBar,
     button::{Button, ButtonVariants},
     input::{InputEvent, TextareaState},
     text::TextViewState,
@@ -27,6 +27,8 @@ pub struct DesktopWindow {
     pub controller: Entity<SessionController>,
     pub(super) composer: Entity<TextareaState>,
     composer_mode: zevria_foundation::SessionMode,
+    last_recall_generation: u64,
+    last_rejected_edit_generation: u64,
     pub(super) transcript: Entity<TranscriptView>,
     pub(super) plan: Option<(zevria_workflow::PlanVersion, Entity<TextViewState>)>,
     pub(super) plan_copy_feedback: style::CopyFeedback,
@@ -100,15 +102,14 @@ impl DesktopWindow {
                             let prompt = zevria_content::UserPrompt::from_text(
                                 this.composer.read(cx).value().to_string(),
                             );
-                            if matches!(
-                                this.controller
-                                    .read(cx)
-                                    .model
-                                    .controls
-                                    .registry
-                                    .classify_prompt(&prompt),
-                                Ok(zevria_presentation::command::ClassifiedInput::Builtin(_))
-                            ) {
+                            let controller = this.controller.read(cx);
+                            if controller.edit.is_none()
+                                && controller.draft_images.is_empty()
+                                && matches!(
+                                    controller.model.controls.registry.classify_prompt(&prompt),
+                                    Ok(zevria_presentation::command::ClassifiedInput::Builtin(_))
+                                )
+                            {
                                 this.submit(window, cx);
                             }
                         }
@@ -137,6 +138,8 @@ impl DesktopWindow {
             controller,
             composer,
             composer_mode: zevria_foundation::SessionMode::Build,
+            last_recall_generation: 0,
+            last_rejected_edit_generation: 0,
             transcript,
             plan: None,
             plan_copy_feedback: style::CopyFeedback::default(),
@@ -175,8 +178,14 @@ impl DesktopWindow {
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         super::theme::follow_appearance(window, cx);
         let controller = self.controller.read(cx);
-        let draft = (self.composer.read(cx).value().as_ref() != controller.draft.as_str())
-            .then(|| controller.draft.clone());
+        let recall_changed = self.last_recall_generation != controller.recall_generation;
+        self.last_recall_generation = controller.recall_generation;
+        let edit_rejected =
+            self.last_rejected_edit_generation != controller.rejected_edit_generation;
+        self.last_rejected_edit_generation = controller.rejected_edit_generation;
+        let draft = (recall_changed
+            || self.composer.read(cx).value().as_ref() != controller.draft.as_str())
+        .then(|| controller.draft.clone());
         let mode = controller.model.root.next_mode();
         let live = controller.phase == Phase::Live;
         let inspecting = controller.model.controls.selected_child.is_some();
@@ -217,13 +226,17 @@ impl DesktopWindow {
             });
         }
         if let Some(draft) = draft {
+            let end = draft.len();
+            if recall_changed {
+                self.completion_selected = 0;
+                self.completion_dismissed = Some((draft.clone(), end));
+            }
             self.composer.update(cx, |input, cx| {
-                let end = draft.len();
                 input.set_value(draft, window, cx);
                 input.set_selected_range(end..end, cx);
             });
         }
-        if live && !self.was_live && !inspecting {
+        if live && !inspecting && (!self.was_live || recall_changed || edit_rejected) {
             self.composer
                 .update(cx, |input, cx| input.focus(window, cx));
         } else if (!live && (self.was_live || window.focused(cx).is_none()))
@@ -287,7 +300,7 @@ impl DesktopWindow {
         }
         if self.controller.read(cx).model.root.is_busy() {
             self.controller
-                .update(cx, |this, _| this.capturing_dialog = true);
+                .update(cx, |this, cx| this.set_capturing_dialog(true, cx));
             self.pending_replace = Some(replacement);
             cx.notify();
         } else {
@@ -299,7 +312,7 @@ impl DesktopWindow {
             return;
         }
         self.controller
-            .update(cx, |this, _| this.capturing_dialog = false);
+            .update(cx, |this, cx| this.set_capturing_dialog(false, cx));
         match replacement {
             Replacement::New => self.controller.update(cx, |this, cx| this.new_session(cx)),
             Replacement::Resume(path) => self.controller.update(cx, |this, cx| {
@@ -328,12 +341,12 @@ impl DesktopWindow {
     }
     pub(super) fn open_workspace(&mut self, cx: &mut Context<Self>) {
         if self.controller.read(cx).model.controls.models.is_open()
-            || self.controller.read(cx).capturing_dialog
+            || self.controller.read(cx).capturing_dialog()
         {
             return;
         }
         self.controller
-            .update(cx, |this, _| this.capturing_dialog = true);
+            .update(cx, |this, cx| this.set_capturing_dialog(true, cx));
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -343,10 +356,8 @@ impl DesktopWindow {
         self.picker = Some(cx.spawn(async move |owner, cx| {
             let result = prompt.await;
             let _ = owner.update(cx, |this, cx| {
-                this.controller.update(cx, |this, cx| {
-                    this.capturing_dialog = false;
-                    cx.notify();
-                })
+                this.controller
+                    .update(cx, |this, cx| this.set_capturing_dialog(false, cx))
             });
             match result {
                 Ok(Ok(Some(paths))) => {
@@ -384,7 +395,7 @@ impl DesktopWindow {
         }
         if self.pending_replace.take().is_some() {
             self.controller
-                .update(cx, |this, _| this.capturing_dialog = false);
+                .update(cx, |this, cx| this.set_capturing_dialog(false, cx));
             cx.notify();
             return;
         }
@@ -417,6 +428,12 @@ impl DesktopWindow {
                 .update(cx, |this, cx| this.toggle_subtasks(cx));
             return;
         }
+        if controller.model.controls.selected_child.is_none() && controller.edit.is_recalling() {
+            self.controller.update(cx, |this, cx| {
+                this.cancel_recall(cx);
+            });
+            return;
+        }
         self.controller.update(cx, |this, cx| this.cancel(cx));
     }
 }
@@ -439,7 +456,7 @@ impl DesktopWindow {
     fn confirm_decision(&mut self, cx: &mut Context<Self>) {
         let controller = self.controller.read(cx);
         if self.pending_replace.is_some()
-            || controller.capturing_dialog
+            || controller.capturing_dialog()
             || controller.model.controls.models.is_open()
         {
             return;
@@ -478,7 +495,8 @@ impl DesktopWindow {
             .border_b_1()
             .border_color(tone.hairline);
         let transcript_shown = self.screen(cx).is_none();
-        let model = &self.controller.read(cx).model;
+        let controller = self.controller.read(cx);
+        let model = &controller.model;
         if let Some(child) = model
             .controls
             .selected_child
@@ -544,10 +562,12 @@ impl DesktopWindow {
                     .small()
                     .child(div().size(px(5.)).rounded_full().bg(t.workflow.plan))
                     .label("Review plan")
+                    .disabled(controller.edit.is_active())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.controller.update(cx, |this, cx| {
-                            this.model.root.workflow.open_review();
-                            cx.notify();
+                            if this.edit.is_none() && this.model.root.workflow.open_review() {
+                                cx.notify();
+                            }
                         })
                     })),
             );

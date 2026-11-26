@@ -1,4 +1,6 @@
 //! Headless tests exercise real native controls and production window content.
+#[path = "edit_tests.rs"]
+mod edits;
 #[path = "job_tests.rs"]
 mod jobs;
 #[path = "model_tests.rs"]
@@ -1420,7 +1422,10 @@ fn editing_and_undoing_does_not_revive_a_submitted_draft_token(cx: &mut TestAppC
     assert!(controller.read_with(cx, |this, _| this.draft.is_empty()));
     assert_eq!(
         controller.read_with(cx, |this, _| this.draft_slot.recovery().to_vec()),
-        vec!["original".to_string()]
+        vec![crate::session::DraftContent {
+            text: "original".into(),
+            images: vec![],
+        }]
     );
 }
 
