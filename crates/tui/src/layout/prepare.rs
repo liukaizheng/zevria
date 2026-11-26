@@ -138,22 +138,32 @@ pub(crate) fn render_job_notice(
     let start = lines.len();
     let (finished, running) = zevria_presentation::jobs::notice_rows(notice);
     let muted = Style::new().fg(theme().text.muted);
-    let job_line = |row: zevria_presentation::jobs::JobRow| {
+    let job_line = |row: zevria_presentation::jobs::JobRow, at_notice: bool| {
+        let (icon, status) = if at_notice || row.icon == StatusIcon::Running {
+            (StatusIcon::Pending, "was running")
+        } else {
+            (row.icon, row.status.as_str())
+        };
+        let mut meta = String::new();
+        if let Some(duration) = row.duration {
+            meta.push_str(&format!(" · {duration}"));
+        }
+        meta.push_str(&format!(" · {}", row.command.text));
         Line::from(vec![
             Span::styled(
-                format!("{} {}", row.icon.glyph(0), row.status),
-                Style::new().fg(crate::jobs::job_ink(row.icon)),
+                format!("{} {status}", icon.glyph(0)),
+                Style::new().fg(crate::jobs::job_ink(icon)),
             ),
-            Span::styled(format!(" · {} · {}", row.duration, row.command.text), muted),
+            Span::styled(meta, muted),
         ])
     };
-    lines.extend(finished.into_iter().map(job_line));
+    lines.extend(finished.into_iter().map(|row| job_line(row, false)));
     if !running.is_empty() {
         lines.push(Line::styled(
-            "Still running:",
+            "Also running at the time:",
             Style::new().fg(theme().text.secondary),
         ));
-        lines.extend(running.into_iter().map(job_line));
+        lines.extend(running.into_iter().map(|row| job_line(row, true)));
     }
     fold_body_rows(lines, start, wrap_width, None, None, None, folded);
     if selected_content == Some(0) {

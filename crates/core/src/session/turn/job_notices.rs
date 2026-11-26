@@ -4,6 +4,7 @@ use crate::session::kernel::records::{RecordChange, TurnAnchor, recoverable};
 use crate::session::kernel::state::EnginePhase;
 use crate::session::turn::execution::{AcceptedKind, AcceptedTurn, Failure, Rejection};
 use crate::session::workflow::plan::{PlanSubmissionGate, workflow_transition_for_mode};
+use std::time::SystemTime;
 use zevria_foundation::policy::{SessionMode, TurnId, TurnPolicy};
 use zevria_session_api::JobEvent;
 use zevria_session_api::event::{ProgressReporter, SessionEvent, SessionEventSender};
@@ -14,7 +15,7 @@ use zevria_transcript::transcript::TranscriptItem;
 
 use zevria_foundation::{
     COMMAND_STATUS_TOOL_NAME, CommandJobId, CommandJobNotice, CommandJobNoticeKind,
-    CommandJobSnapshot, CommandJobStatus,
+    CommandJobSnapshot, CommandJobStatus, command_job_line_at,
 };
 use zevria_session_api::{PendingCompletion, command_render};
 
@@ -53,6 +54,7 @@ impl JobFollowState {
         completions: &[PendingCompletion],
         running: Vec<CommandJobSnapshot>,
     ) -> (CommandJobNotice, Vec<(CommandJobId, bool)>) {
+        let reported_at = SystemTime::now();
         let mut text = match kind {
             CommandJobNoticeKind::Update => "Command job update: these background jobs finished.",
             CommandJobNoticeKind::Continuation => "Command job update: no new user message was sent. Zevria resumed this session because background jobs you started have finished.",
@@ -62,7 +64,7 @@ impl JobFollowState {
         let mut acknowledgements = Vec::new();
         for completion in completions {
             text.push_str("\n\n");
-            text.push_str(&command_render::job_line(&completion.snapshot));
+            text.push_str(&command_job_line_at(&completion.snapshot, reported_at));
             if completion.output_detached() {
                 text.push_str("\nnote: ");
                 text.push_str(command_render::DETACHED_OUTPUT_NOTE);
@@ -103,7 +105,7 @@ impl JobFollowState {
             text.push_str("\n\nStill running:");
             for job in &running {
                 text.push('\n');
-                text.push_str(&command_render::job_line(job));
+                text.push_str(&command_job_line_at(job, reported_at));
             }
         }
         if kind == CommandJobNoticeKind::Continuation {
@@ -115,7 +117,8 @@ impl JobFollowState {
                 completions.iter().map(|c| c.snapshot.clone()).collect(),
                 running,
                 text,
-            ),
+            )
+            .with_reported_at(reported_at),
             acknowledgements,
         )
     }

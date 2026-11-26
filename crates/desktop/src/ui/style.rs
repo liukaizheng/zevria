@@ -1,7 +1,7 @@
 //! Desktop design primitives. Geometry and typography are shared by the log and its next line.
 use super::theme::{palette, tones};
 use crate::actions::Shortcut;
-use gpui_kit::base::text::TextViewStyle;
+use gpui_kit::base::{TestTextExt, text::TextViewStyle};
 use gpui_kit::component::{
     Icon, IconName, Sizable,
     button::{Button, ButtonCustomVariant, ButtonVariants},
@@ -152,12 +152,17 @@ pub fn step_status(status: StatusIcon, ink: Hsla, cx: &App) -> gpui_kit::compone
     }
 }
 
+pub fn observed_text(text: impl Into<SharedString>) -> impl IntoElement {
+    let text = text.into();
+    text.clone().test_text(text)
+}
+
 pub fn step_badge(text: impl Into<SharedString>, ink: Hsla) -> Div {
     meta()
         .whitespace_nowrap()
         .flex_shrink_0()
         .text_color(ink)
-        .child(text.into())
+        .child(observed_text(text))
 }
 
 pub(super) fn key_hint(shortcut: Shortcut, label: &'static str, cx: &App) -> Div {

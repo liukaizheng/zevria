@@ -39,8 +39,8 @@ mod native {
     };
     use zevria_model::{ContextTokenSnapshot, ContextTokenSource, TokenUsage};
     use zevria_session_api::{
-        CommandControlAction, CommandControlResult, ControlCommand, SessionCommand,
-        SessionEvent as E,
+        CommandControlAction, CommandControlResult, ControlCommand, JobEvent, SessionCommand,
+        SessionEvent as E, TurnEvent,
     };
     use zevria_workflow::{PlanArtifact, PlanId, PlanVersion, PlanWorkflowState};
 
@@ -977,11 +977,21 @@ mod native {
                 let call = ToolCall::new(CallId::from_wire(&call_id), ToolFunction::new(ToolName::new("command").unwrap(),
                     serde_json::json!({"command": command, "background": mode == CommandJobMode::Background})));
                 c.fixture_event(E::Turn(TurnEvent::Intermediate { turn_id, message: Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(call)])), attempt_id: None }), cx);
-                c.fixture_event(E::Job(JobEvent::Updated { job: snapshot.clone() }), cx);
+                c.fixture_event(E::Job(JobEvent::Updated { job: Box::new(snapshot.clone()) }), cx);
                 snapshots.push(snapshot);
             }
-            c.fixture_event(E::Job(JobEvent::Reported { turn_id, notice: CommandJobNotice::new(CommandJobNoticeKind::Update,
-                vec![snapshots[0].clone()], snapshots[1..].to_vec(), "The UI build finished successfully.".into()) }), cx);
+            let text = format!(
+                "Command job update: these background jobs finished.\n\n{}\n<stdout>\nBuild succeeded (0 warnings)\nBundled the native desktop assets\n</stdout>\n\nStill running:\n{}",
+                zevria_foundation::command_job_line_at(&snapshots[0], now),
+                zevria_foundation::command_job_line_at(&snapshots[1], now),
+            );
+            let notice = CommandJobNotice::new(
+                CommandJobNoticeKind::Update,
+                vec![snapshots[0].clone()],
+                vec![snapshots[1].clone()],
+                text,
+            ).with_reported_at(now);
+            c.fixture_event(E::Job(JobEvent::Reported { turn_id, notice: Box::new(notice) }), cx);
             c.toggle_jobs(cx);
             for _ in 0..2 {
                 let SessionCommand::Control(ControlCommand::Command(request)) = receiver.try_recv()? else {
@@ -995,7 +1005,7 @@ mod native {
                     stdout_tail: id.as_ref().map_or_else(String::new, |_| include_str!("fixtures/jobs-stdout.txt").into()),
                     stderr_tail: id.as_ref().map_or_else(String::new, |_| include_str!("fixtures/jobs-stderr.txt").into()),
                 }).collect();
-                c.fixture_event(E::Job(JobEvent::ControlResult { request_id: request.request_id, result: CommandControlResult::Inspected(views) }), cx);
+                c.fixture_event(E::Job(JobEvent::ControlResult { request_id: request.request_id, result: Box::new(CommandControlResult::Inspected(views)) }), cx);
             }
             Ok(())
         })

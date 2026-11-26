@@ -46,16 +46,18 @@ pub fn tool_label(name: &str) -> std::borrow::Cow<'_, str> {
 pub struct JobMeta {
     pub id: CommandJobId,
     pub running: bool,
-    pub foreground: bool,
     pub started_at: SystemTime,
+    pub finished_at: Option<SystemTime>,
+    pub status: zevria_foundation::CommandJobStatus,
 }
 impl From<&CommandJobSnapshot> for JobMeta {
     fn from(job: &CommandJobSnapshot) -> Self {
         Self {
             id: job.id.clone(),
             running: JobsInspector::can_terminate(job),
-            foreground: job.mode == zevria_foundation::CommandJobMode::Foreground,
             started_at: job.started_at,
+            finished_at: job.finished_at,
+            status: job.status.clone(),
         }
     }
 }
@@ -115,6 +117,7 @@ pub struct ToolPresentation {
     pub removed: usize,
     pub background: bool,
     pub job: Option<JobMeta>,
+    pub job_id: Option<CommandJobId>,
 }
 
 impl ToolPresentation {
@@ -154,6 +157,7 @@ impl ToolPresentation {
                     removed,
                     background: false,
                     job: None,
+                    job_id: None,
                 }
             }
         }
@@ -383,6 +387,12 @@ impl ToolPresentation {
             removed,
             background: state.is_background_command(),
             job: state.command_job.as_ref().map(JobMeta::from),
+            job_id: state
+                .command_job
+                .as_ref()
+                .map(|job| &job.id)
+                .or_else(|| state.metadata.as_ref()?.command_job().map(|job| &job.id))
+                .cloned(),
         }
     }
 }

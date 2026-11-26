@@ -42,6 +42,9 @@ struct PaneView {
     stream_snapshot: Option<zevria_presentation::session::StreamSnapshotId>,
     live_attempt: Option<NativeHeader>,
     live_rows: HashSet<String>,
+    job_rows: HashSet<String>,
+    jobs_generation: u64,
+    can_inspect_jobs: bool,
     activity: Option<String>,
     busy: bool,
     call: Option<NativeHeader>,
@@ -63,6 +66,9 @@ impl PaneView {
             stream_snapshot: None,
             live_attempt: None,
             live_rows: HashSet::new(),
+            job_rows: HashSet::new(),
+            jobs_generation: 0,
+            can_inspect_jobs: false,
             activity: None,
             busy: false,
             call: None,
@@ -187,6 +193,7 @@ impl TranscriptView {
             && self.pane.pending == pending
             && self.pane.cancelling == cancelling
         {
+            self.sync_live_jobs(window, cx);
             self.notify_live_rows(cx);
             return;
         }
@@ -195,6 +202,8 @@ impl TranscriptView {
             self.pane.projector = Projector::default();
             self.pane.disclosures = DisclosureState::default();
             self.pane.blocks.clear();
+            self.pane.jobs_generation = 0;
+            self.pane.can_inspect_jobs = false;
         }
         let mut projection = self.pane.projector.project_timeline(
             model,
@@ -243,14 +252,22 @@ impl TranscriptView {
         for row in &old {
             self.pane.indices.remove(&row.data.key);
             self.pane.live_rows.remove(&row.data.key);
+            self.pane.job_rows.remove(&row.data.key);
             if !valid.contains(row.data.key.as_str()) {
                 self.pane.blocks.remove(&row.data.key);
                 self.pane.disclosures.remove(&row.data.key);
             }
         }
+        let jobs = self
+            .selected
+            .is_none()
+            .then(|| self.controller.read(cx).model.root.jobs_inspector());
         for (i, row) in projection.rows.iter_mut().enumerate() {
             row.apply_disclosure(&self.pane.disclosures);
-            if row.needs_clock() {
+            if row.data.tracks_live_jobs() {
+                self.pane.job_rows.insert(row.data.key.clone());
+            }
+            if row.needs_clock() || jobs.is_some_and(|jobs| row.needs_job_clock(jobs)) {
                 self.pane.live_rows.insert(row.data.key.clone());
             }
             self.pane.indices.insert(row.data.key.clone(), start + i);
@@ -330,8 +347,56 @@ impl TranscriptView {
                     .update(cx, |view, cx| view.sync(row.clone(), window, cx));
             }
         }
+        self.sync_live_jobs(window, cx);
         self.notify_live_rows(cx);
         cx.notify();
+    }
+
+    fn sync_live_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.is_some() {
+            return;
+        }
+        let controller = self.controller.read(cx);
+        let jobs = controller.model.root.jobs_inspector();
+        let generation = jobs.generation();
+        let can_inspect = controller.can_inspect_jobs();
+        let jobs_changed = generation != self.pane.jobs_generation;
+        if !jobs_changed && can_inspect == self.pane.can_inspect_jobs {
+            return;
+        }
+        self.pane.jobs_generation = generation;
+        self.pane.can_inspect_jobs = can_inspect;
+        // Job events and panel availability can change without a history
+        // revision. Update retained actions, including those on static cards.
+        let mut remeasure = Vec::new();
+        for key in &self.pane.job_rows {
+            let index = self.pane.indices[key];
+            if jobs_changed {
+                let row = &self.pane.rows[index];
+                if row.needs_clock() || row.needs_job_clock(jobs) {
+                    self.pane.live_rows.insert(key.clone());
+                } else {
+                    self.pane.live_rows.remove(key);
+                }
+            }
+            if self.pane.blocks.contains_key(key) {
+                remeasure.push(index);
+            }
+        }
+        for &index in &remeasure {
+            self.pane.blocks[&self.pane.rows[index].data.key]
+                .view
+                .update(cx, |view, cx| {
+                    view.refresh_jobs(window, cx);
+                });
+        }
+        if !remeasure.is_empty() {
+            self.pane.scroller.update(cx, |list, cx| {
+                for index in remeasure {
+                    list.remeasure_items(index..index + 1, cx);
+                }
+            });
+        }
     }
 
     fn notify_live_rows(&self, cx: &mut Context<Self>) {
@@ -371,7 +436,7 @@ impl TranscriptView {
                 .rows
                 .iter()
                 .filter(|row| row.data.is_disclosure())
-                .map(|row| (row.data.key.as_str(), row.data.default_expanded())),
+                .map(|row| (row.data.key.as_str(), row.default_expanded())),
         )
     }
     pub fn toggle_all_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -396,7 +461,7 @@ impl TranscriptView {
             self.pane
                 .rows
                 .iter()
-                .filter(|r| r.data.is_disclosure() && r.data.default_expanded())
+                .filter(|r| r.data.is_disclosure() && r.default_expanded())
                 .map(|r| r.data.key.clone()),
         );
         self.update_disclosures(0..self.pane.rows.len(), window, cx);
@@ -572,6 +637,10 @@ impl TranscriptView {
     #[cfg(test)]
     pub(super) fn test_data(&self, _: &App) -> Vec<TimelineRow> {
         self.pane.rows.clone()
+    }
+    #[cfg(test)]
+    pub(super) fn test_row_ticks(&self, key: &str) -> bool {
+        self.pane.live_rows.contains(key)
     }
     #[cfg(test)]
     pub(super) fn test_identity(&self, key: &str, cx: &App) -> Option<(EntityId, EntityId)> {

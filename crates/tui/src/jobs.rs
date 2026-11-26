@@ -350,7 +350,11 @@ fn shell_spans(command: &str, width: usize) -> Vec<Span<'static>> {
 }
 
 fn inspect_title(row: &JobRow, width: usize, spin: usize) -> Line<'static> {
-    let meta = format!(" · {} · {} · {} ", row.mode, row.status, row.duration);
+    let mut meta = format!(" · {} · {}", row.mode, row.status);
+    if let Some(duration) = &row.duration {
+        meta.push_str(&format!(" · {duration}"));
+    }
+    meta.push(' ');
     let meta_width = display_width(&meta).min(width.saturating_sub(10) / 2);
     let mut spans = vec![Span::raw(" "), glyph(row.icon, spin), Span::raw(" ")];
     spans.extend(shell_spans(
@@ -368,7 +372,7 @@ fn list_lines(jobs: &[CommandJobSnapshot], width: usize, spin: usize) -> Vec<Lin
     let rows: Vec<_> = jobs.iter().map(JobRow::from).collect();
     let duration = rows
         .iter()
-        .map(|row| display_width(&row.duration))
+        .filter_map(|row| row.duration.as_deref().map(display_width))
         .max()
         .unwrap_or(0);
     let status = rows
@@ -395,7 +399,7 @@ fn list_lines(jobs: &[CommandJobSnapshot], width: usize, spin: usize) -> Vec<Lin
                         "{}  {}  {:>duration$}  {phrase}",
                         " ".repeat(pad),
                         row.mode,
-                        row.duration
+                        row.duration.as_deref().unwrap_or_default()
                     ),
                     muted,
                 ));

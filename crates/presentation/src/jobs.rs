@@ -1,13 +1,14 @@
 //! Ephemeral root command jobs, never restored from transcript or turn-gated.
 use crate::{shell, status_icon::StatusIcon};
 use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant, SystemTime},
 };
 use zevria_foundation::{
     COMMAND_JOB_FRONTEND_TAIL_BYTES, CommandJobId, CommandJobMode, CommandJobNotice,
-    CommandJobSnapshot, CommandJobStatus, CommandJobView, RETAINED_FINISHED_COMMAND_JOBS,
-    command_job_duration, command_job_line_for,
+    CommandJobNoticeKind, CommandJobSnapshot, CommandJobStatus, CommandJobView,
+    RETAINED_FINISHED_COMMAND_JOBS, command_job_elapsed_at, command_job_line_for,
 };
 use zevria_session_api::JobEvent;
 use zevria_session_api::{
@@ -26,31 +27,57 @@ pub const fn job_status_icon(status: &CommandJobStatus) -> StatusIcon {
     }
 }
 
+pub fn format_job_duration(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    match seconds {
+        0..60 => format!("{:.1}s", elapsed.as_secs_f64()),
+        60..3600 => format!("{}m {:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {:02}m", seconds / 3600, seconds / 60 % 60),
+    }
+}
+
+pub fn job_status_text(status: &CommandJobStatus) -> String {
+    status
+        .to_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobRow {
+    pub id: CommandJobId,
     pub icon: StatusIcon,
     pub command: shell::ShellDisplay,
     pub mode: &'static str,
-    pub duration: String,
+    pub duration: Option<String>,
     pub status: String,
 }
 
 impl From<&CommandJobSnapshot> for JobRow {
     fn from(job: &CommandJobSnapshot) -> Self {
+        Self::from_snapshot_at(job, SystemTime::now())
+    }
+}
+
+impl JobRow {
+    pub fn from_snapshot_at(job: &CommandJobSnapshot, reference: SystemTime) -> Self {
+        let duration = (job.finished_at.is_some() || !job.status.is_terminal())
+            .then(|| format_job_duration(command_job_elapsed_at(job, reference)));
+        Self::with_duration(job, duration)
+    }
+
+    fn with_duration(job: &CommandJobSnapshot, duration: Option<String>) -> Self {
         Self {
+            id: job.id.clone(),
             icon: job_status_icon(&job.status),
             command: compact_command(&job.command),
             mode: match job.mode {
                 CommandJobMode::Foreground => "fg",
                 CommandJobMode::Background => "bg",
             },
-            duration: command_job_duration(job),
-            status: job
-                .status
-                .to_string()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" "),
+            duration,
+            status: job_status_text(&job.status),
         }
     }
 }
@@ -90,11 +117,157 @@ fn compact_command(command: &str) -> shell::ShellDisplay {
     shell::ShellDisplay { text, spans }
 }
 
+fn notice_row(notice: &CommandJobNotice, job: &CommandJobSnapshot) -> JobRow {
+    let elapsed = notice.recorded_elapsed(job).or_else(|| {
+        // Legacy model text uses decimal seconds. Never substitute the wall clock.
+        let duration = notice.recorded_duration_text(job)?;
+        Duration::try_from_secs_f64(duration.strip_suffix('s')?.parse().ok()?).ok()
+    });
+    JobRow::with_duration(job, elapsed.map(format_job_duration))
+}
+
 pub fn notice_rows(notice: &CommandJobNotice) -> (Vec<JobRow>, Vec<JobRow>) {
+    let row = |job| notice_row(notice, job);
     (
-        notice.jobs().iter().map(JobRow::from).collect(),
-        notice.running().iter().map(JobRow::from).collect(),
+        notice.jobs().iter().map(row).collect(),
+        notice.running().iter().map(row).collect(),
     )
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NoticeJobOutput {
+    pub note: Option<String>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoticeJobRow {
+    pub id: CommandJobId,
+    pub icon: StatusIcon,
+    pub command: shell::ShellDisplay,
+    pub mode: &'static str,
+    pub status: String,
+    pub status_kind: CommandJobStatus,
+    pub started_at: SystemTime,
+    pub recorded_duration: Option<String>,
+    pub output: Option<NoticeJobOutput>,
+}
+
+pub fn structured_notice_rows(notice: &CommandJobNotice) -> (Vec<NoticeJobRow>, Vec<NoticeJobRow>) {
+    let mut outputs = notice_outputs(notice);
+    let row = |job: &CommandJobSnapshot, output| {
+        let display = notice_row(notice, job);
+        NoticeJobRow {
+            id: display.id,
+            icon: display.icon,
+            command: display.command,
+            mode: display.mode,
+            status: display.status,
+            status_kind: job.status.clone(),
+            started_at: job.started_at,
+            recorded_duration: display.duration,
+            output,
+        }
+    };
+    (
+        notice
+            .jobs()
+            .iter()
+            .map(|job| row(job, outputs.remove(job.id.as_str())))
+            .collect(),
+        notice.running().iter().map(|job| row(job, None)).collect(),
+    )
+}
+
+// The legacy model footer is only structural at the very end of a continuation.
+const CONTINUATION_FOOTER: &str = "\n\nEvaluate these results against the conversation so far. Continue any work they affect; otherwise report them briefly. Do not start unrelated work.";
+
+fn finished_notice_text(notice: &CommandJobNotice) -> &str {
+    let text = notice.text().trim_end_matches('\n');
+    let text = if notice.kind() == CommandJobNoticeKind::Continuation {
+        text.strip_suffix(CONTINUATION_FOOTER).unwrap_or(text)
+    } else {
+        text
+    };
+    if !notice.running().is_empty()
+        && let Some((finished, tail)) = text.rsplit_once("\n\nStill running:\n")
+    {
+        // A command can print the heading itself. Only remove a trailing
+        // section whose list matches the recorded running jobs.
+        let ids = tail.lines().map(|line| {
+            line.split_once(" · ")
+                .filter(|(_, summary)| summary.starts_with("running · "))
+                .map(|(id, _)| id)
+        });
+        if ids.eq(notice.running().iter().map(|job| Some(job.id.as_str()))) {
+            return finished;
+        }
+    }
+    text
+}
+
+/// The model text is not an escaped format. Read best-effort display sections
+/// only at the start of a paragraph headed by a known finished job ID.
+fn notice_outputs(notice: &CommandJobNotice) -> HashMap<&str, NoticeJobOutput> {
+    let text = finished_notice_text(notice);
+    let mut ids: HashSet<_> = notice.jobs().iter().map(|job| job.id.as_str()).collect();
+    let mut headers = std::iter::once(0)
+        .chain(text.match_indices("\n\n").map(|(i, _)| i + 2))
+        .filter_map(|start| {
+            let (line, body) = text[start..]
+                .split_once('\n')
+                .map_or((&text[start..], text.len()), |(line, _)| {
+                    (line, start + line.len() + 1)
+                });
+            let (id, rest) = line.split_once(" · ")?;
+            (rest.contains(" · ") && ids.remove(id)).then_some((start, body, id))
+        })
+        .peekable();
+    let mut outputs = HashMap::new();
+    while let Some((_, body, id)) = headers.next() {
+        let until = headers.peek().map_or(text.len(), |(start, _, _)| *start);
+        if let Some(output) = notice_output(&text[body..until]) {
+            outputs.insert(id, output);
+        }
+    }
+    outputs
+}
+
+fn notice_output(body: &str) -> Option<NoticeJobOutput> {
+    let mut body = body.trim_end_matches('\n');
+    let mut notes = Vec::new();
+    while let Some(rest) = body.strip_prefix("note: ") {
+        let (note, remaining) = rest.split_once('\n').unwrap_or((rest, ""));
+        notes.push(terminal_tail_text(note));
+        body = remaining;
+    }
+    let (stdout, stderr) = notice_streams(body).unwrap_or_default();
+    let stdout = stdout.map(terminal_tail_text);
+    let stderr = stderr.map(terminal_tail_text);
+    (!notes.is_empty() || stdout.is_some() || stderr.is_some()).then(|| NoticeJobOutput {
+        note: (!notes.is_empty()).then(|| notes.join("\n")),
+        stdout,
+        stderr,
+    })
+}
+
+fn notice_streams(body: &str) -> Option<(Option<&str>, Option<&str>)> {
+    // The actual closing tag is last. A complete stream boundary printed in
+    // stdout must not end a stdout-only stream or steal the real split point.
+    if let Some(stdout) = body.strip_prefix("<stdout>\n") {
+        if let Some(stdout) = stdout.strip_suffix("\n</stdout>") {
+            return Some((Some(stdout), None));
+        }
+        let pair = stdout.strip_suffix("\n</stderr>")?;
+        let (stdout, stderr) = pair.rsplit_once("\n</stdout>\n<stderr>\n")?;
+        Some((Some(stdout), Some(stderr)))
+    } else {
+        let stderr = body
+            .strip_prefix("<stderr>\n")?
+            .strip_suffix("\n</stderr>")?;
+        Some((None, Some(stderr)))
+    }
 }
 
 pub fn summary_title(jobs: &[CommandJobSnapshot]) -> String {
@@ -147,6 +320,8 @@ pub struct JobsInspector {
     inspect: Option<CommandJobId>,
     detail: Option<JobOutput>,
     pending: HashMap<String, Purpose>,
+    // Correlate replies against newer runtime events independently of list invalidation.
+    event_generation: u64,
     generation: u64,
     last_refresh: Option<Instant>,
     refresh_again: bool,
@@ -169,6 +344,7 @@ impl JobsInspector {
             inspect: None,
             detail: None,
             pending: HashMap::new(),
+            event_generation: 0,
             generation: 0,
             last_refresh: None,
             refresh_again: false,
@@ -183,6 +359,14 @@ impl JobsInspector {
 
     pub fn jobs(&self) -> &[CommandJobSnapshot] {
         &self.jobs
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn job(&self, id: &CommandJobId) -> Option<&CommandJobSnapshot> {
+        self.jobs.iter().find(|job| &job.id == id)
     }
 
     pub fn running_count(&self) -> usize {
@@ -208,7 +392,7 @@ impl JobsInspector {
         self.refresh_again = false;
         self.last_refresh = None;
         self.message = None;
-        self.prune();
+        self.retain_jobs(|_| false);
     }
 
     pub fn inspected(&self) -> Option<&CommandJobId> {
@@ -272,7 +456,7 @@ impl JobsInspector {
     }
 
     fn control(&mut self, action: Request) -> Option<String> {
-        if self.send(action, Purpose::Control(self.generation)) {
+        if self.send(action, Purpose::Control(self.event_generation)) {
             return None;
         }
         self.reject("Too many pending job controls; wait for their results".into())
@@ -321,7 +505,7 @@ impl JobsInspector {
             Request::Inspect {
                 id: self.inspect.clone(),
             },
-            Purpose::Inspect(self.inspect.clone(), self.generation),
+            Purpose::Inspect(self.inspect.clone(), self.event_generation),
         );
     }
 
@@ -339,6 +523,10 @@ impl JobsInspector {
             if old.status.is_terminal() && !job.status.is_terminal() {
                 return;
             }
+            if old == job {
+                observe(job);
+                return;
+            }
             old.clone_from(job);
         } else {
             self.jobs.push(job.clone());
@@ -346,6 +534,15 @@ impl JobsInspector {
         observe(job);
         self.jobs.sort_by_key(|j| j.started_at);
         self.prune();
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn retain_jobs(&mut self, keep: impl FnMut(&CommandJobSnapshot) -> bool) {
+        let before = self.jobs.len();
+        self.jobs.retain(keep);
+        if self.jobs.len() != before {
+            self.generation = self.generation.wrapping_add(1);
+        }
     }
 
     fn inspecting_finished_foreground(&self) -> bool {
@@ -357,10 +554,11 @@ impl JobsInspector {
     }
 
     fn prune(&mut self) {
-        self.jobs.retain(|j| {
+        let inspect = self.inspect.clone();
+        self.retain_jobs(|j| {
             j.mode == CommandJobMode::Background
                 || !j.status.is_terminal()
-                || self.inspect.as_ref() == Some(&j.id)
+                || inspect.as_ref() == Some(&j.id)
         });
         let mut finished: Vec<_> = self
             .jobs
@@ -371,8 +569,7 @@ impl JobsInspector {
         if finished.len() > RETAINED_FINISHED_COMMAND_JOBS {
             finished.sort_unstable();
             let expired = &finished[..finished.len() - RETAINED_FINISHED_COMMAND_JOBS];
-            self.jobs
-                .retain(|job| !expired.iter().any(|(_, id)| id == &job.id));
+            self.retain_jobs(|job| !expired.iter().any(|(_, id)| id == &job.id));
         }
     }
 
@@ -390,7 +587,7 @@ impl JobsInspector {
     ) -> Option<String> {
         match event {
             SessionEvent::Job(JobEvent::Updated { job }) => {
-                self.generation = self.generation.wrapping_add(1);
+                self.event_generation = self.event_generation.wrapping_add(1);
                 self.update(job, &mut observe);
                 self.refresh();
             }
@@ -399,11 +596,10 @@ impl JobsInspector {
                 let mut notice = None;
                 match (&purpose, result.as_ref()) {
                     (Purpose::Inspect(id, generation), Reply::Inspected(views))
-                        if *generation == self.generation =>
+                        if *generation == self.event_generation =>
                     {
                         if id.is_none() {
-                            self.jobs
-                                .retain(|j| views.iter().any(|v| v.snapshot.id == j.id));
+                            self.retain_jobs(|j| views.iter().any(|v| v.snapshot.id == j.id));
                         }
                         for view in views {
                             self.update(&view.snapshot, &mut observe);
@@ -421,8 +617,8 @@ impl JobsInspector {
                         self.refresh_again = true;
                     }
                     (Purpose::Control(generation), Reply::Accepted(job)) => {
-                        if *generation == self.generation {
-                            self.generation = self.generation.wrapping_add(1);
+                        if *generation == self.event_generation {
+                            self.event_generation = self.event_generation.wrapping_add(1);
                             self.update(job, &mut observe);
                         }
                         if self.open {
@@ -439,7 +635,7 @@ impl JobsInspector {
                     {
                         self.message = Some(JobsMessage::Rejected(message.clone()));
                         if let Some(id) = id {
-                            self.jobs.retain(|job| &job.id != id);
+                            self.retain_jobs(|job| &job.id != id);
                             self.back();
                         }
                     }
@@ -456,12 +652,12 @@ impl JobsInspector {
     }
 }
 
-/// Frontend-only compact lines. The notice's text and default ACP summary stay exact.
+/// Frontend-only compact lines; never used for the notice's model message.
 pub fn display_job_line(snapshot: &CommandJobSnapshot) -> String {
     command_job_line_for(snapshot, &crate::shell::display(&snapshot.command).text)
 }
 pub fn display_notice_lines(notice: &CommandJobNotice) -> Vec<String> {
-    notice.summary_lines_with(display_job_line)
+    notice.summary_lines_with(|command| Cow::Owned(shell::display(command).text))
 }
 /// Sanitize a terminal tail for plain frontend display, not as a terminal emulator.
 /// Model output, copies, and persisted transcripts retain their original bytes.
@@ -699,6 +895,178 @@ mod tests {
     }
 
     #[test]
+    fn job_durations_use_human_units() {
+        for (ms, expected) in [
+            (32_200, "32.2s"),
+            (60_000, "1m 00s"),
+            (78_000, "1m 18s"),
+            (8_100_000, "2h 15m"),
+            (75_600_000, "21h 00m"),
+        ] {
+            assert_eq!(format_job_duration(Duration::from_millis(ms)), expected);
+        }
+    }
+
+    #[test]
+    fn notice_rows_keep_captured_output_separate_and_freeze_legacy_times() {
+        let mut done = running(CommandJobMode::Background);
+        done.id = CommandJobId::new("job-done");
+        exited(&mut done, 0);
+        let mut second = done.clone();
+        second.id = CommandJobId::new("job-second");
+        let running = running(CommandJobMode::Background);
+        let text = format!(
+            "Command job update: these background jobs finished.\n\n{}\nnote: capture closed\n<stdout>\n\u{1b}[32mBuild succeeded\u{1b}[0m\n</stdout>\nliteral closing tag above\n</stdout>\n<stderr>\ntrace\n</stderr>\n\n{}\n<stderr>\nsecond job\n</stderr>\n\nStill running:\n{} · running · 78.4s · cargo test",
+            zevria_foundation::command_job_line(&done),
+            zevria_foundation::command_job_line(&second),
+            running.id,
+        );
+        let notice = CommandJobNotice::new(
+            zevria_foundation::CommandJobNoticeKind::Update,
+            vec![done, second],
+            vec![running.clone()],
+            text.clone(),
+        );
+        let (finished, also_running) = structured_notice_rows(&notice);
+        assert_eq!(finished[0].recorded_duration.as_deref(), Some("1.2s"));
+        let first = finished[0].output.as_ref().unwrap();
+        assert_eq!(first.note.as_deref(), Some("capture closed"));
+        assert_eq!(
+            first.stdout.as_deref(),
+            Some("Build succeeded\n</stdout>\nliteral closing tag above")
+        );
+        assert_eq!(first.stderr.as_deref(), Some("trace"));
+        assert_eq!(
+            finished[1].output.as_ref().unwrap().stderr.as_deref(),
+            Some("second job")
+        );
+        assert!(finished[1].output.as_ref().unwrap().stdout.is_none());
+        assert_eq!(also_running[0].recorded_duration.as_deref(), Some("1m 18s"));
+        assert_eq!(
+            notice_rows(&notice).1[0].duration.as_deref(),
+            Some("1m 18s")
+        );
+        assert!(also_running[0].output.is_none());
+        assert_eq!(notice.text(), text);
+        let timed = notice
+            .clone()
+            .with_reported_at(running.started_at + Duration::from_millis(14_200));
+        assert_eq!(
+            structured_notice_rows(&timed).1[0]
+                .recorded_duration
+                .as_deref(),
+            Some("14.2s")
+        );
+        let unstructured = CommandJobNotice::new(
+            notice.kind(),
+            notice.jobs().to_vec(),
+            vec![running],
+            "Exact unstructured notice".into(),
+        );
+        let (finished, running) = structured_notice_rows(&unstructured);
+        assert!(finished.iter().all(|row| row.output.is_none()));
+        assert!(running[0].recorded_duration.is_none());
+        assert!(notice_rows(&unstructured).1[0].duration.is_none());
+    }
+
+    #[test]
+    fn notice_streams_preserve_literal_boundaries_and_exclude_trailing_sections() {
+        use zevria_foundation::{command_job_line, command_job_line_at};
+        use zevria_session_api::{StreamText, command_render::stream_blocks};
+
+        let running = running(CommandJobMode::Background);
+        let mut done = running.clone();
+        done.id = CommandJobId::new("job-finished");
+        exited(&mut done, 0);
+        let mut without_output = done.clone();
+        without_output.id = CommandJobId::new("job-quiet");
+        let running_summary = command_job_line_at(&running, running.started_at);
+        let stdout = format!(
+            "first line\n</stdout>\n<stderr>\nthis is still stdout\n\nStill running:\n{running_summary}{CONTINUATION_FOOTER}"
+        );
+        let stream = |text: &str| StreamText {
+            head: text.into(),
+            ..StreamText::default()
+        };
+        for (kind, stderr, running_section, quiet_job) in [
+            (CommandJobNoticeKind::Update, "", true, false),
+            (
+                CommandJobNoticeKind::Continuation,
+                "real stderr",
+                true,
+                false,
+            ),
+            (CommandJobNoticeKind::Continuation, "", false, false),
+            (CommandJobNoticeKind::Update, "real stderr", false, true),
+        ] {
+            let streams = stream_blocks(&stream(&stdout), &stream(stderr));
+            let mut text = format!(
+                "Command job update: fixture\n\n{}\n{streams}",
+                command_job_line(&done)
+            );
+            let mut finished = vec![done.clone()];
+            if quiet_job {
+                text.push_str("\n\n");
+                text.push_str(&command_job_line(&without_output));
+                finished.push(without_output.clone());
+            }
+            if running_section {
+                text.push_str("\n\nStill running:\n");
+                text.push_str(&running_summary);
+            }
+            if kind == CommandJobNoticeKind::Continuation {
+                text.push_str(CONTINUATION_FOOTER);
+            }
+            let notice = CommandJobNotice::new(
+                kind,
+                finished,
+                running_section
+                    .then(|| running.clone())
+                    .into_iter()
+                    .collect(),
+                text.clone(),
+            );
+            let (finished, _) = structured_notice_rows(&notice);
+            let output = finished[0].output.as_ref().unwrap();
+            assert_eq!(output.stdout.as_deref(), Some(stdout.as_str()));
+            assert_eq!(
+                output.stderr.as_deref(),
+                (!stderr.is_empty()).then_some(stderr)
+            );
+            assert!(finished[1..].iter().all(|row| row.output.is_none()));
+            assert_eq!(notice.text(), text);
+        }
+    }
+
+    #[test]
+    fn inspector_generation_tracks_snapshot_changes_and_removals() {
+        let mut inspector = JobsInspector::default();
+        let mut job = running(CommandJobMode::Background);
+        let update = |job: &CommandJobSnapshot| {
+            SessionEvent::Job(JobEvent::Updated {
+                job: Box::new(job.clone()),
+            })
+        };
+        let generation = inspector.generation();
+        inspector.event(&update(&job));
+        assert_ne!(inspector.generation(), generation);
+        assert_eq!(inspector.job(&job.id), Some(&job));
+        let generation = inspector.generation();
+        inspector.event(&update(&job));
+        assert_eq!(inspector.generation(), generation);
+        exited(&mut job, 0);
+        inspector.event(&update(&job));
+        assert_ne!(inspector.generation(), generation);
+        assert_eq!(inspector.job(&job.id), Some(&job));
+        let generation = inspector.generation();
+        inspector.show();
+        let list = request(&mut inspector);
+        reply(&mut inspector, list, Reply::Inspected(Vec::new()));
+        assert_ne!(inspector.generation(), generation);
+        assert!(inspector.job(&job.id).is_none());
+    }
+
+    #[test]
     fn job_rows_share_shell_spans_and_status_tones() {
         let mut job = running(CommandJobMode::Background);
         job.command = "rtk proxy cargo --release\n echo 'hello  world'".into();
@@ -712,10 +1080,10 @@ mod tests {
             (
                 row.icon,
                 row.mode,
-                row.duration.as_str(),
+                row.duration.as_deref(),
                 row.status.as_str()
             ),
-            (StatusIcon::Failed, "bg", "1.2s", "exited 2")
+            (StatusIcon::Failed, "bg", Some("1.2s"), "exited 2")
         );
         assert_eq!(
             summary_title(&[running(CommandJobMode::Foreground), job]),
@@ -860,7 +1228,7 @@ mod tests {
             lines,
             [
                 "job-display · running · 0.0s · cargo test",
-                "Still running:",
+                "Also running at the time:",
                 "job-display · running · 0.0s · cargo test"
             ]
         );

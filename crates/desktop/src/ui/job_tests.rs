@@ -1,4 +1,9 @@
 use super::*;
+use crate::{
+    disclosure::Phase,
+    timeline::{BlockKind, TimelineRow},
+};
+use gpui_kit::base::test_support;
 use rig_core::message::{
     AssistantContent, AssistantMessage, CallId, ToolCall, ToolFunction, ToolName,
 };
@@ -11,6 +16,7 @@ use zevria_session_api::{
     CommandControl, CommandControlAction as Request, CommandControlResult as Reply,
 };
 use zevria_session_api::{JobEvent, PlanEvent, TurnEvent};
+use zevria_transcript::transcript::TranscriptItem;
 
 const TURN: TurnId = TurnId::new(8);
 
@@ -26,6 +32,47 @@ fn job(key: &str, mode: CommandJobMode) -> CommandJobSnapshot {
         stdout_bytes: 0,
         stderr_bytes: 0,
     }
+}
+
+fn exited(mut job: CommandJobSnapshot, code: i32) -> CommandJobSnapshot {
+    job.status = CommandJobStatus::Exited {
+        code: Some(code),
+        success: code == 0,
+        signal: None,
+    };
+    job.finished_at = Some(job.started_at + Duration::from_millis(32_200));
+    job
+}
+
+fn notice_rows(view: &Entity<DesktopWindow>, cx: &gpui_kit::App) -> Vec<TimelineRow> {
+    view.read(cx)
+        .transcript
+        .read(cx)
+        .test_data(cx)
+        .into_iter()
+        .filter(|row| matches!(&row.data.kind, BlockKind::Jobs { .. }))
+        .collect()
+}
+
+fn painted(window: &gpui_kit::Window, needle: &str) -> bool {
+    test_support::texts(window)
+        .iter()
+        .any(|text| text.visible() && text.text().contains(needle))
+}
+
+fn notice_fixture(done: CommandJobSnapshot, running: CommandJobSnapshot) -> CommandJobNotice {
+    let text = format!(
+        "Command job update: these background jobs finished.\n\n{}\n<stdout>\nBuild succeeded (0 warnings)\n</stdout>\n<stderr>\nBuild trace\n</stderr>\n\nStill running:\n{} · running · 14.2s · {}",
+        zevria_foundation::command_job_line(&done),
+        running.id,
+        running.command,
+    );
+    CommandJobNotice::new(
+        CommandJobNoticeKind::Update,
+        vec![done],
+        vec![running],
+        text,
+    )
 }
 
 fn view(snapshot: CommandJobSnapshot) -> CommandJobView {
@@ -483,29 +530,684 @@ fn job_notice_copies_original_model_visible_text(cx: &mut TestAppContext) {
         }),
         cx,
     );
-    let key = controller.read_with(cx, |c, _| {
-        let conversation = &c.model.root.conversation;
-        let index = conversation
-            .history()
-            .iter()
-            .position(|entry| {
-                matches!(
-                    entry,
-                    zevria_presentation::conversation::HistoryEntry::JobNotice(..)
-                )
-            })
-            .unwrap();
-        format!("{:?}-entry-{index}", conversation.epoch())
-    });
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
-        window.within(key).click("copy", cx);
+        assert_copy_label(
+            &window.within("timeline-jobs-notice").find("copy"),
+            "Copy notice",
+        );
+        window.within("timeline-jobs-notice").click("copy", cx);
         assert_eq!(
             cx.read_from_clipboard()
                 .and_then(|item| item.text())
                 .as_deref(),
             Some(text)
         );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn restored_legacy_notice_has_frozen_output_and_no_live_controls(cx: &mut TestAppContext) {
+    let (window, desktop, controller, _) = setup_at_size(cx, 720., 840.);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let mut running = job("historic", CommandJobMode::Background);
+    running.started_at = SystemTime::now() - Duration::from_secs(21 * 3600);
+    let done = exited(job("historic-done", CommandJobMode::Background), 0);
+    let notice = notice_fixture(done, running);
+    controller.update(cx, |c, cx| {
+        theme::apply(zevria_theme::ZEVRIA_GRAPHITE_LIGHT, cx);
+        c.model
+            .root
+            .restore_transcript(vec![TranscriptItem::CommandJobNotice(Box::new(
+                notice.clone(),
+            ))]);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(!controller.read_with(cx, |c, _| c.clock_required()));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let [row]: [TimelineRow; 1] = notice_rows(&desktop, cx).try_into().unwrap();
+        assert_eq!(row.phase, Phase::Restored);
+        assert!(!row.expanded && !row.needs_clock());
+        assert!(
+            !desktop
+                .read(cx)
+                .transcript
+                .read(cx)
+                .test_row_ticks(&row.data.key)
+        );
+        assert_eq!(window.find("block-disclosure").expanded(), Some(false));
+        assert!(window.try_find("notice-stdout").is_none());
+        window.click("block-disclosure", cx);
+    })
+    .unwrap();
+    for expanded in [true, false] {
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("block-disclosure").expanded(), Some(expanded));
+            window.press("enter", cx);
+        })
+        .unwrap();
+    }
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("notice-also-running").visible());
+        assert!(window.find("notice-snapshot-clock").visible());
+        for id in [
+            "notice-running-icon",
+            "notice-still-running",
+            "notice-live-badge",
+            "job-stop",
+            "notice-show-in-jobs",
+            "show-in-jobs",
+        ] {
+            assert!(window.try_find(id).is_none(), "unexpected {id}");
+        }
+        assert!(painted(window, "14.2s at notice"));
+        assert!(painted(window, "was running"));
+        assert!(!painted(window, "21h"));
+        assert!(painted(window, "Build succeeded (0 warnings)"));
+        assert!(painted(window, "Build trace"));
+        window.click("copy", cx);
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some(notice.text())
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn live_notice_settles_without_history_changes_or_collapsing(cx: &mut TestAppContext) {
+    let (window, desktop, controller, mut receiver) = setup(cx);
+    event(
+        &controller,
+        E::Turn(TurnEvent::Started {
+            turn_id: TURN,
+            mode: SessionMode::Build,
+            message: Message::user("Run both checks"),
+        }),
+        cx,
+    );
+    let running = job("notice-live", CommandJobMode::Background);
+    let done = exited(job("notice-done", CommandJobMode::Background), 0);
+    for job in [&running, &done] {
+        event(
+            &controller,
+            E::Job(JobEvent::Updated {
+                job: Box::new(job.clone()),
+            }),
+            cx,
+        );
+    }
+    event(
+        &controller,
+        E::Job(JobEvent::Reported {
+            turn_id: TURN,
+            notice: Box::new(
+                notice_fixture(done.clone(), running.clone())
+                    .with_reported_at(running.started_at + Duration::from_millis(14_200)),
+            ),
+        }),
+        cx,
+    );
+    let row_id = format!("notice-row-running-{}", running.id);
+    let key = cx
+        .update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let [row]: [TimelineRow; 1] = notice_rows(&desktop, cx).try_into().unwrap();
+            assert!(row.expanded && row.phase != Phase::Restored);
+            assert!(
+                desktop
+                    .read(cx)
+                    .transcript
+                    .read(cx)
+                    .test_row_ticks(&row.data.key)
+            );
+            for id in [
+                "notice-live-badge",
+                "notice-still-running",
+                "notice-running-icon",
+                "job-stop",
+            ] {
+                assert!(window.try_find(id).is_some(), "missing {id}");
+            }
+            assert_eq!(
+                window
+                    .within(row_id.clone())
+                    .find("notice-show-in-jobs")
+                    .label(),
+                Some("Show in Jobs")
+            );
+            window
+                .within(row_id.clone())
+                .click("notice-show-in-jobs", cx);
+            row.data.key.clone()
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let list = request(&mut receiver);
+    assert_eq!(list.action, Request::Inspect { id: None });
+    reply(
+        &controller,
+        list,
+        Reply::Inspected(vec![view(done), view(running.clone())]),
+        cx,
+    );
+    let inspect = request(&mut receiver);
+    assert_eq!(
+        inspect.action,
+        Request::Inspect {
+            id: Some(running.id.clone())
+        }
+    );
+    reply(
+        &controller,
+        inspect,
+        Reply::Inspected(vec![view(running.clone())]),
+        cx,
+    );
+    controller.read_with(cx, |c, _| {
+        assert_eq!(c.model.root.jobs_inspector().inspected(), Some(&running.id))
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("jobs-panel").visible());
+        window.click("status-jobs", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("jobs-panel").is_none());
+        window.within(row_id.clone()).click("job-stop", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let focus = desktop.read(cx).transcript.read(cx).test_focus(&key, cx);
+        window.focus(&focus, cx);
+        for _ in 0..5 {
+            window.press("tab", cx);
+        }
+        assert_eq!(
+            window.within(row_id.clone()).find("job-stop").focused(),
+            Some(true)
+        );
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        request(&mut receiver).action,
+        Request::Terminate {
+            id: running.id.clone()
+        }
+    );
+    let revision = controller.read_with(cx, |c, _| c.model.root.conversation.revision());
+    event(
+        &controller,
+        E::Job(JobEvent::Updated {
+            job: Box::new(exited(running, 0)),
+        }),
+        cx,
+    );
+    controller.read_with(cx, |c, _| {
+        assert!(c.model.root.is_busy());
+        assert_eq!(c.model.root.conversation.revision(), revision);
+    });
+    assert!(receiver.try_recv().is_err());
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(notice_rows(&desktop, cx)[0].expanded);
+        assert!(!desktop.read(cx).transcript.read(cx).test_row_ticks(&key));
+        assert!(window.find("notice-also-running").visible());
+        assert!(painted(window, "14.2s at notice"));
+        assert!(painted(window, "now exited 0"));
+        assert!(window.try_find("notice-live-badge").is_none());
+        assert!(window.try_find("notice-running-icon").is_none());
+        assert!(window.within(row_id.clone()).try_find("job-stop").is_none());
+        assert!(
+            window
+                .within(row_id)
+                .try_find("notice-show-in-jobs")
+                .is_some()
+        );
+        assert_eq!(window.find("block-disclosure").focused(), Some(true));
+        window.press(Shortcut::COLLAPSE_ALL.0, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    desktop.read_with(cx, |_, cx| assert!(!notice_rows(&desktop, cx)[0].expanded));
+}
+
+#[gpui_kit::test]
+fn plan_review_hides_notice_inspection_without_hiding_stop(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (window, desktop, controller, _) = setup(cx);
+    event(
+        &controller,
+        E::Turn(TurnEvent::Started {
+            turn_id: TURN,
+            mode: SessionMode::Build,
+            message: Message::user("Run checks"),
+        }),
+        cx,
+    );
+    let running = job("reused-id", CommandJobMode::Background);
+    let finished_row = format!("notice-row-finished-{}", running.id);
+    let running_row = format!("notice-row-running-{}", running.id);
+    event(
+        &controller,
+        E::Job(JobEvent::Updated {
+            job: Box::new(running.clone()),
+        }),
+        cx,
+    );
+    // Defend against a malformed notice listing the same ID in both sections.
+    event(
+        &controller,
+        E::Job(JobEvent::Reported {
+            turn_id: TURN,
+            notice: Box::new(notice_fixture(exited(running.clone(), 0), running.clone())),
+        }),
+        cx,
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("notice-finished-heading").visible());
+        assert!(
+            window
+                .within(finished_row.clone())
+                .find("notice-show-in-jobs")
+                .visible()
+        );
+        assert!(
+            window
+                .within(finished_row.clone())
+                .try_find("job-stop")
+                .is_none()
+        );
+        assert!(
+            window
+                .within(running_row.clone())
+                .find("job-stop")
+                .visible()
+        );
+    })
+    .unwrap();
+    let plan = |state| {
+        E::Plan(PlanEvent::StateChanged {
+            state: Box::new(state),
+        })
+    };
+    event(
+        &controller,
+        plan(PlanWorkflowState::Ready {
+            artifact: PlanArtifact {
+                version: PlanVersion {
+                    id: PlanId::new(),
+                    revision: 1,
+                },
+                title: "Review checks".into(),
+                markdown: "# Verify results".into(),
+                source_turn_id: TURN,
+            },
+        }),
+        cx,
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("plan-review").visible());
+        assert!(window.try_find("show-in-jobs").is_none());
+        assert!(window.try_find("notice-show-in-jobs").is_none());
+        assert!(
+            window
+                .within(running_row.clone())
+                .find("job-stop")
+                .visible()
+        );
+    })
+    .unwrap();
+
+    event(
+        &controller,
+        E::Job(JobEvent::Updated {
+            job: Box::new(exited(running, 0)),
+        }),
+        cx,
+    );
+    let generation = controller.read_with(cx, |c, _| c.model.root.jobs_inspector().generation());
+    event(&controller, plan(PlanWorkflowState::Idle), cx);
+    assert_eq!(
+        controller.read_with(cx, |c, _| c.model.root.jobs_inspector().generation()),
+        generation
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let row = &notice_rows(&desktop, cx)[0];
+        assert!(
+            !desktop
+                .read(cx)
+                .transcript
+                .read(cx)
+                .test_row_ticks(&row.data.key)
+        );
+        assert!(
+            window
+                .within(finished_row)
+                .find("notice-show-in-jobs")
+                .visible()
+        );
+        assert!(
+            window
+                .within(running_row)
+                .find("notice-show-in-jobs")
+                .visible()
+        );
+        assert!(window.try_find("job-stop").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn continuation_notice_summarizes_multiple_jobs_and_expands_captured_output(
+    cx: &mut TestAppContext,
+) {
+    use zevria_foundation::command_job_line;
+    let (window, _, controller, _) = setup(cx);
+    let done = exited(job("summary-done", CommandJobMode::Background), 0);
+    let failed = exited(job("summary-failed", CommandJobMode::Background), 2);
+    let stdout = (1..=17)
+        .map(|i| format!("progress line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let text = format!(
+        "Command job update: continued after jobs finished.\n\n{}\n<stdout>\n{stdout}\n</stdout>\n\n{}\n<stderr>\nfailed check\n</stderr>",
+        command_job_line(&done),
+        command_job_line(&failed),
+    );
+    let notice = CommandJobNotice::new(
+        CommandJobNoticeKind::Continuation,
+        vec![done, failed],
+        vec![],
+        text,
+    );
+    controller.update(cx, |c, cx| {
+        c.model
+            .root
+            .restore_transcript(vec![TranscriptItem::CommandJobNotice(Box::new(notice))]);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("notice-resumed").visible());
+        assert!(painted(window, "2 finished · 1 failed"));
+        assert_eq!(window.find("block-disclosure").expanded(), Some(false));
+        window.click("block-disclosure", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("notice-finished-heading").is_none());
+        assert!(painted(window, "progress line 16"));
+        assert!(!painted(window, "progress line 17"));
+        assert!(!painted(window, "failed check"));
+        assert_eq!(
+            window.find("show-all-output").label(),
+            Some("Show all 18 lines")
+        );
+        window.click("show-all-output", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(painted(window, "progress line 17"));
+        assert!(painted(window, "failed check"));
+        assert_eq!(window.find("show-all-output").label(), Some("Show less"));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn resumed_session_keeps_old_notice_folded_when_new_notice_arrives(cx: &mut TestAppContext) {
+    let (window, desktop, controller, _) = setup(cx);
+    let fixture = |id: &str| {
+        notice_fixture(
+            exited(job(id, CommandJobMode::Background), 0),
+            job("other", CommandJobMode::Background),
+        )
+    };
+    controller.update(cx, |c, cx| {
+        c.model
+            .root
+            .restore_transcript(vec![TranscriptItem::CommandJobNotice(Box::new(fixture(
+                "old",
+            )))]);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    event(
+        &controller,
+        E::Turn(TurnEvent::Started {
+            turn_id: TURN,
+            mode: SessionMode::Build,
+            message: Message::user("New work after resuming"),
+        }),
+        cx,
+    );
+    event(
+        &controller,
+        E::Job(JobEvent::Reported {
+            turn_id: TURN,
+            notice: Box::new(fixture("new")),
+        }),
+        cx,
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let [old, new]: [TimelineRow; 2] = notice_rows(&desktop, cx).try_into().unwrap();
+        assert_eq!(old.phase, Phase::Restored);
+        assert!(!old.expanded);
+        assert_ne!(new.phase, Phase::Restored);
+        assert!(new.expanded);
+        assert_eq!(
+            window
+                .within(old.data.key.clone())
+                .find("block-disclosure")
+                .expanded(),
+            Some(false)
+        );
+        assert_eq!(
+            window
+                .within(new.data.key.clone())
+                .find("block-disclosure")
+                .expanded(),
+            Some(true)
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn failed_background_request_without_snapshot_keeps_command_badges(cx: &mut TestAppContext) {
+    let (window, _, controller, _) = setup(cx);
+    let call_id = || CallId::from_wire("failed-background");
+    let tool_name = || ToolName::new("command").unwrap();
+    let call = ToolCall::new(
+        call_id(),
+        ToolFunction::new(
+            tool_name(),
+            serde_json::json!({"command": "run checks", "background": true}),
+        ),
+    );
+    let result = Message::tool_result(
+        call_id(),
+        tool_name(),
+        "exit_code: 19\nduration: 0.2s\n<stderr>\npermission denied\ncheck the workspace\n</stderr>",
+    );
+    controller.update(cx, |c, cx| {
+        c.model.root.restore_transcript(vec![
+            TranscriptItem::Message(Message::user("Run checks")),
+            TranscriptItem::Message(Message::Assistant(AssistantMessage::new(vec![
+                AssistantContent::ToolCall(call),
+            ]))),
+            TranscriptItem::ToolResults {
+                message: result,
+                metadata: vec![],
+                skill_applications: vec![],
+            },
+        ]);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(painted(window, "Background"));
+        assert!(painted(window, "exit 19"));
+        assert!(painted(window, "2 lines · 0.2s"));
+        assert!(window.try_find("job-stop").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn returned_background_command_ticks_settles_and_restores_static(cx: &mut TestAppContext) {
+    use zevria_foundation::{
+        CommandJobDetail, CommandJobDisposition, ToolCallOutcome, ToolResultDetail,
+        ToolResultMetadata,
+    };
+    let (window, desktop, controller, _) = setup(cx);
+    let mut background = job("background-tool", CommandJobMode::Background);
+    background.started_at = SystemTime::now() - Duration::from_secs(78);
+    let call_id = background.call_id.as_ref().unwrap();
+    let tool_name = || ToolName::new("command").unwrap();
+    let prompt = Message::user("Start a background command");
+    let call = Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+        ToolCall::new(
+            CallId::from_wire(call_id),
+            ToolFunction::new(
+                tool_name(),
+                serde_json::json!({"command": background.command, "background": true}),
+            ),
+        ),
+    )]));
+    let result = Message::tool_result(
+        CallId::from_wire(call_id),
+        tool_name(),
+        format!(
+            "status: running\nid: {}\nduration: 1.2s\n<stdout>\nBuild staged\n</stdout>",
+            background.id
+        ),
+    );
+    let metadata = vec![ToolResultMetadata {
+        id: call_id.clone(),
+        call_id: None,
+        tool_name: "command".into(),
+        outcome: ToolCallOutcome::Success,
+        diagnostic: None,
+        detail: Some(ToolResultDetail::CommandJob(CommandJobDetail {
+            id: background.id.clone(),
+            disposition: CommandJobDisposition::StartedInBackground,
+        })),
+    }];
+    for update in [
+        E::Turn(TurnEvent::Started {
+            turn_id: TURN,
+            mode: SessionMode::Build,
+            message: prompt.clone(),
+        }),
+        E::Turn(TurnEvent::ModelCallStarted {
+            turn_id: TURN,
+            call: 1,
+        }),
+        E::Turn(TurnEvent::Intermediate {
+            turn_id: TURN,
+            message: call.clone(),
+            attempt_id: None,
+        }),
+        E::Job(JobEvent::Updated {
+            job: Box::new(background.clone()),
+        }),
+        E::Turn(TurnEvent::ToolResults {
+            turn_id: TURN,
+            message: result.clone(),
+            metadata: metadata.clone(),
+        }),
+    ] {
+        event(&controller, update, cx);
+    }
+    let key = cx
+        .update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let transcript = desktop.read(cx).transcript.read(cx);
+            let row = transcript
+                .test_data(cx)
+                .into_iter()
+                .find(|row| matches!(&row.data.kind, BlockKind::Step(_)))
+                .unwrap();
+            assert!(!row.data.is_active_work());
+            assert!(transcript.test_row_ticks(&row.data.key));
+            assert!(painted(window, "Running · 1m"));
+            assert!(window.find("job-stop").visible());
+            row.data.key.clone()
+        })
+        .unwrap();
+    let id = background.id.clone();
+    event(
+        &controller,
+        E::Job(JobEvent::Updated {
+            job: Box::new(exited(background, 1)),
+        }),
+        cx,
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(!desktop.read(cx).transcript.read(cx).test_row_ticks(&key));
+        assert!(painted(window, "Background"));
+        assert!(painted(window, "exit 1 · 32.2s"));
+        assert!(window.try_find("job-stop").is_none());
+    })
+    .unwrap();
+    controller.update(cx, |c, cx| {
+        c.model.root = Default::default();
+        c.model.root.restore_transcript(vec![
+            TranscriptItem::Message(prompt),
+            TranscriptItem::Message(call),
+            TranscriptItem::ToolResults {
+                message: result,
+                metadata,
+                skill_applications: vec![],
+            },
+        ]);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(!controller.read_with(cx, |c, _| c.clock_required()));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(painted(window, "Background"));
+        assert!(!painted(window, "Running ·"));
+        assert!(!painted(window, "exit 1"));
+        assert!(painted(window, "1 line · 1.2s"));
+        assert!(window.try_find("job-stop").is_none());
+        assert!(window.try_find("show-in-jobs").is_none());
+        window.click("block-disclosure", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(painted(window, id.as_str()));
     })
     .unwrap();
 }

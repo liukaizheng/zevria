@@ -188,7 +188,8 @@ stronger draft/paste/undo lock until acceptance or rejection.
 
 Finished jobs reach the model automatically before its next eligible request,
 without polling. A **Background jobs finished** notice shows one glyph, status,
-duration, and command per job, followed by **Still running:** when applicable.
+duration, and command per job. **Also running at the time:** lists jobs that were
+running when the notice arrived, with their recorded duration when available.
 The rows omit stream output, but copying the notice returns the exact model-visible
 text. Use Jobs to inspect bounded output tails. Notice rows cannot be edited or recalled.
 

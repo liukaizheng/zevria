@@ -121,7 +121,7 @@ impl SessionController {
         self.draft_generation += 1;
         self.dispatch_job_continuation(cx);
     }
-    fn clock_required(&self) -> bool {
+    pub(crate) fn clock_required(&self) -> bool {
         self.model.root.is_busy()
             || self.model.root.jobs_inspector().is_open()
             || self
@@ -290,8 +290,12 @@ impl SessionController {
         cx.notify();
     }
 
+    pub(crate) fn can_inspect_jobs(&self) -> bool {
+        self.can_open_session_panel() && self.model.controls.selected_child.is_none()
+    }
+
     fn open_jobs(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.can_open_session_panel() || self.model.controls.selected_child.is_some() {
+        if !self.can_inspect_jobs() {
             return false;
         }
         self.model.controls.subtasks_open = false;

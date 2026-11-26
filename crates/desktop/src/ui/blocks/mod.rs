@@ -1,4 +1,5 @@
 //! Retained renderers for the desktop timeline. Wire data is only used for copy.
+mod job_notice;
 pub(super) mod web;
 
 use super::{
@@ -12,7 +13,7 @@ use crate::{
         Attachment, BlockData, BlockKind, NoticeLevel, Step, StepPosition, ThoughtGroup,
         TimelineRow,
         command::{CommandOutput, is_redundant_input},
-        tools::{self, JobMeta, ToolDetail, ToolPresentation},
+        tools::{self, ToolDetail, ToolPresentation},
     },
 };
 use gpui_kit::component::{
@@ -30,12 +31,15 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, collections::HashMap, sync::Arc};
 use zevria_content::{decode_image_base64, readable::sanitize_readable, tool_result_image};
-use zevria_foundation::{FileChange, READ_IMAGE_TOOL_NAME};
+use zevria_foundation::{
+    CommandJobId, CommandJobSnapshot, CommandJobStatus, FileChange, READ_IMAGE_TOOL_NAME,
+};
 use zevria_presentation::{
     blocks::{PresentationBlock, image_facts_label, image_resized_label},
     conversation::HistoryEntry,
+    jobs::{JobsInspector, format_job_duration, job_status_icon},
     status_icon::StatusIcon,
 };
 
@@ -89,8 +93,8 @@ const JOB_ACTION_GAP: f32 = 2.;
 const LIVE_CONTROLS_RIGHT: f32 = 10. + 14. + 8.; // Trigger padding, status icon, header gap.
 const SHOW_IN_JOBS_ACTION: usize = 3;
 
-fn live_controls_width(job: &JobMeta) -> f32 {
-    if job.foreground {
+fn live_controls_width(job: &CommandJobSnapshot) -> f32 {
+    if JobsInspector::can_background(job) {
         JOB_ACTION_SIZE * 2. + JOB_ACTION_GAP
     } else {
         JOB_ACTION_SIZE
@@ -125,6 +129,7 @@ pub struct BlockView {
     copy_feedback: style::CopyFeedback<CopyTarget>,
     job_action_focus: [FocusHandle; 2], // Stop, background.
     open_jobs_focus: FocusHandle,
+    notice_job_focus: HashMap<(bool, CommandJobId), job_notice::NoticeJobFocus>,
     focus_subscriptions: Vec<Subscription>,
     controller: Entity<SessionController>,
 }
@@ -150,6 +155,7 @@ impl BlockView {
                 .iter()
                 .chain(&self.job_action_focus)
                 .any(|f| f.is_focused(window))
+            || self.notice_job_focus.values().any(|f| f.is_focused(window))
     }
     #[cfg(test)]
     pub(super) fn text_id(&self) -> EntityId {
@@ -193,6 +199,7 @@ impl BlockView {
             copy_feedback: style::CopyFeedback::default(),
             job_action_focus: std::array::from_fn(|_| cx.focus_handle()),
             open_jobs_focus: cx.focus_handle(),
+            notice_job_focus: HashMap::new(),
             focus_subscriptions: vec![],
             controller,
         };
@@ -307,14 +314,8 @@ impl BlockView {
                 .any(|f| f.is_focused(window));
         self.data = row.data.clone();
         self.row = row;
-        let job = self.running_job();
-        let lost_job_focus = (job.is_none() && self.job_action_focus[0].is_focused(window))
-            || (!job.is_some_and(|job| job.foreground)
-                && self.job_action_focus[1].is_focused(window))
-            || (self.action_focus[SHOW_IN_JOBS_ACTION].is_focused(window)
-                && self.inspectable_job(cx).is_none())
-            || (self.open_jobs_focus.is_focused(window) && self.waiting_command_job(cx).is_none());
-        if collapsed_with_panel_focus || lost_job_focus {
+        self.sync_job_focus(window, cx);
+        if collapsed_with_panel_focus {
             window.focus(&self.disclosure_focus, cx);
         }
         if !changed {
@@ -347,32 +348,76 @@ impl BlockView {
             _ => None,
         }
     }
-    fn running_job(&self) -> Option<&JobMeta> {
-        self.tool()?.job.as_ref().filter(|job| job.running)
+    fn jobs_inspector<'a>(&self, cx: &'a App) -> Option<&'a JobsInspector> {
+        let model = &self.controller.read(cx).model;
+        model
+            .controls
+            .selected_child
+            .is_none()
+            .then(|| model.root.jobs_inspector())
     }
-    fn can_inspect_job(&self, job: &JobMeta, cx: &App) -> bool {
-        let root = &self.controller.read(cx).model.root;
-        root.workflow.dialog().is_none() && root.jobs().iter().any(|snapshot| snapshot.id == job.id)
+
+    fn tool_runtime_job<'a>(&self, cx: &'a App) -> Option<&'a CommandJobSnapshot> {
+        self.jobs_inspector(cx)?.job(&self.tool()?.job.as_ref()?.id)
     }
-    fn inspectable_job(&self, cx: &App) -> Option<&JobMeta> {
-        let tool = self.tool()?;
-        tool.job
-            .as_ref()
-            .filter(|job| (tool.background || job.running) && self.can_inspect_job(job, cx))
+
+    fn running_job<'a>(&self, cx: &'a App) -> Option<&'a CommandJobSnapshot> {
+        self.tool_runtime_job(cx)
+            .filter(|job| JobsInspector::can_terminate(job))
     }
-    fn waiting_command_job(&self, cx: &App) -> Option<&JobMeta> {
+
+    fn can_inspect_jobs(&self, cx: &App) -> bool {
+        self.controller.read(cx).can_inspect_jobs()
+    }
+
+    fn inspectable_job<'a>(&self, cx: &'a App) -> Option<&'a CommandJobId> {
+        if !self.can_inspect_jobs(cx) {
+            return None;
+        }
+        match &self.data.kind {
+            BlockKind::Jobs { finished, .. } if finished.len() == 1 => self
+                .notice_inspector(cx)?
+                .job(&finished[0].id)
+                .map(|job| &job.id),
+            BlockKind::Step(Step::Tool(tool)) => {
+                let job = self.tool_runtime_job(cx)?;
+                (tool.background || JobsInspector::can_terminate(job)).then_some(&job.id)
+            }
+            _ => None,
+        }
+    }
+
+    fn waiting_command_job<'a>(&self, cx: &'a App) -> Option<&'a CommandJobSnapshot> {
         let tool = self.tool()?;
         if self.row.expanded
             && matches!(tool.detail, ToolDetail::Command { .. })
             && tool.status == StatusIcon::Running
             && self.data.secondary.is_none()
+            && self.can_inspect_jobs(cx)
         {
-            tool.job
-                .as_ref()
-                .filter(|job| self.can_inspect_job(job, cx))
+            self.tool_runtime_job(cx)
         } else {
             None
         }
+    }
+
+    fn sync_job_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let job = self.running_job(cx);
+        let lost_focus = (job.is_none() && self.job_action_focus[0].is_focused(window))
+            || (!job.is_some_and(JobsInspector::can_background)
+                && self.job_action_focus[1].is_focused(window))
+            || (self.action_focus[SHOW_IN_JOBS_ACTION].is_focused(window)
+                && self.inspectable_job(cx).is_none())
+            || (self.open_jobs_focus.is_focused(window) && self.waiting_command_job(cx).is_none());
+        if lost_focus {
+            window.focus(&self.disclosure_focus, cx);
+        }
+        self.sync_notice_focus(window, cx);
+    }
+
+    pub(super) fn refresh_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_job_focus(window, cx);
+        cx.notify();
     }
     fn prepare_details(&mut self, cx: &mut Context<Self>) {
         if self.row.expanded {
@@ -539,6 +584,7 @@ impl BlockView {
         let (idle_label, copied_label) = match &self.data.kind {
             BlockKind::Step(Step::Tool(_)) => ("Copy input", "Copied input"),
             BlockKind::Step(Step::Web(_)) => ("Copy web activity", "Copied web activity"),
+            BlockKind::Jobs { .. } => ("Copy notice", "Copied notice"),
             _ => ("Copy text", "Copied text"),
         };
         let focused = self.action_focus.iter().any(|f| f.is_focused(window));
@@ -588,8 +634,7 @@ impl BlockView {
                     }),
             );
         }
-        if let Some(job) = self.inspectable_job(cx) {
-            let id = job.id.clone();
+        if let Some(id) = self.inspectable_job(cx).cloned() {
             let controller = self.controller.clone();
             actions = actions.child(
                 style::icon_button("show-in-jobs", IconName::ExternalLink, "Show in Jobs")
@@ -618,13 +663,15 @@ impl BlockView {
 
     fn floating_actions(
         &self,
-        job: Option<&JobMeta>,
+        job_controls_width: Option<f32>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let right = job.map_or(6., |job| {
-            LIVE_CONTROLS_RIGHT + live_controls_width(job) + 6.
-        });
+        let right = if matches!(&self.data.kind, BlockKind::Jobs { .. }) {
+            LIVE_CONTROLS_RIGHT
+        } else {
+            job_controls_width.map_or(6., |width| LIVE_CONTROLS_RIGHT + width + 6.)
+        };
         Self::disclosure_overlay(right)
             .id("floating-actions")
             .test_support()
@@ -639,10 +686,10 @@ impl BlockView {
             )
     }
 
-    fn live_job_controls(&self, job: &JobMeta) -> Div {
+    fn live_job_controls(&self, job: &CommandJobSnapshot) -> Div {
         Self::disclosure_overlay(LIVE_CONTROLS_RIGHT)
             .gap(px(JOB_ACTION_GAP))
-            .when(job.foreground, |controls| {
+            .when(JobsInspector::can_background(job), |controls| {
                 controls.child(
                     jobs::background_button(job.id.clone(), self.controller.clone())
                         .size(px(JOB_ACTION_SIZE))
@@ -663,15 +710,16 @@ impl BlockView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        let job = self.running_job();
+        let controls = self.running_job(cx).map(|job| self.live_job_controls(job));
+        let width = self.running_job(cx).map(live_controls_width);
         div()
             .relative()
             .flex()
             .items_center()
             .min_w_0()
             .child(self.disclosure(label, contents, window, cx))
-            .child(self.floating_actions(job, window, cx))
-            .when_some(job, |header, job| header.child(self.live_job_controls(job)))
+            .child(self.floating_actions(width, window, cx))
+            .children(controls)
     }
 
     fn rich_text(&self, document: bool, cx: &App) -> TextView {
@@ -780,7 +828,9 @@ impl BlockView {
 
     fn step(&self, step: &Step, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = palette(cx);
-        let status = step.status();
+        let tool_status = step.status();
+        let background_status = self.background_job_status(cx);
+        let status = background_status.map_or(tool_status, job_status_icon);
         let (icon, label, target) = match step {
             Step::Tool(tool) => (
                 tool_icon(&tool.name),
@@ -917,7 +967,7 @@ impl BlockView {
         if let Step::Tool(tool) = step {
             header = header.children(self.tool_meta(tool, cx));
         }
-        let status_label = match status {
+        let status_label = match tool_status {
             StatusIcon::Denied => Some("Denied"),
             StatusIcon::Interrupted => Some("Interrupted"),
             StatusIcon::Failed if !matches!(step, Step::Tool(t) if matches!(&t.detail, ToolDetail::Command { exit: Some(_), .. })) => {
@@ -932,7 +982,7 @@ impl BlockView {
                     style::glyph_color(status, t.text.muted, cx),
                 ))
             })
-            .when_some(self.running_job(), |header, job| {
+            .when_some(self.running_job(cx), |header, job| {
                 // Reserve space for the sibling overlay without moving the status icon.
                 header.child(div().flex_shrink_0().w(px(live_controls_width(job))))
             })
@@ -990,6 +1040,20 @@ impl BlockView {
             })
     }
 
+    fn background_job_status<'a>(&'a self, cx: &'a App) -> Option<&'a CommandJobStatus> {
+        let tool = self.tool().filter(|tool| tool.background)?;
+        self.tool_runtime_job(cx)
+            .map(|job| &job.status)
+            .or_else(|| {
+                // Keep a settled tool outcome after eviction, but never treat an
+                // attached snapshot as proof that a process is still running.
+                tool.job
+                    .as_ref()
+                    .filter(|job| !job.running)
+                    .map(|job| &job.status)
+            })
+    }
+
     fn tool_meta(&self, tool: &ToolPresentation, cx: &App) -> Vec<Div> {
         let t = palette(cx);
         let mut badges = vec![];
@@ -1029,7 +1093,33 @@ impl BlockView {
             ));
         }
         if tool.background {
-            badges.push(style::step_badge("Background", t.feedback.info));
+            if let Some(job) = self.running_job(cx) {
+                let elapsed = format_job_duration(job.started_at.elapsed().unwrap_or_default());
+                let ink = super::status::accent(&self.controller.read(cx).model.root, cx);
+                badges.push(style::step_badge(format!("Running · {elapsed}"), ink));
+                return badges;
+            }
+            badges.push(style::step_badge("Background", t.text.muted));
+            if let Some(status) = self.background_job_status(cx)
+                && let Some((label, ink)) = settled_job_badge(status, cx)
+            {
+                let times = self
+                    .tool_runtime_job(cx)
+                    .map(|job| (job.started_at, job.finished_at))
+                    .or_else(|| {
+                        tool.job
+                            .as_ref()
+                            .map(|job| (job.started_at, job.finished_at))
+                    });
+                let elapsed = times.and_then(|(start, end)| {
+                    end.map(|end| {
+                        format_job_duration(end.duration_since(start).unwrap_or_default())
+                    })
+                });
+                let label = elapsed.map_or(label.clone(), |elapsed| format!("{label} · {elapsed}"));
+                badges.push(style::step_badge(label, ink));
+                return badges;
+            }
         }
         if let ToolDetail::Command {
             duration,
@@ -1041,16 +1131,10 @@ impl BlockView {
             if let Some(exit) = exit {
                 badges.push(style::step_badge(exit.clone(), t.feedback.error));
             }
-            let elapsed = tool
-                .job
-                .as_ref()
-                .filter(|job| job.running && tool.status == StatusIcon::Running)
-                .map(|job| {
-                    format!(
-                        "{:.1}s",
-                        job.started_at.elapsed().unwrap_or_default().as_secs_f64()
-                    )
-                });
+            let elapsed = self
+                .running_job(cx)
+                .filter(|_| tool.status == StatusIcon::Running)
+                .map(|job| format_job_duration(job.started_at.elapsed().unwrap_or_default()));
             let metadata = lines
                 .map(|n| format!("{n} {}", if n == 1 { "line" } else { "lines" }))
                 .into_iter()
@@ -1293,6 +1377,10 @@ impl BlockView {
     fn command_details(&self, tool: &ToolPresentation, input: &str, cx: &mut Context<Self>) -> Div {
         let t = palette(cx);
         let mut detail = div().min_w_0().flex().flex_col().gap(px(6.));
+        let background_id = tool.background.then_some(tool.job_id.as_ref()).flatten();
+        if let Some(id) = background_id {
+            detail = detail.child(style::step_badge(id.to_string(), t.text.muted));
+        }
         if !input.is_empty() && (self.command_clipped || !is_redundant_input(&tool.summary, input))
         {
             detail = detail.child(
@@ -1391,28 +1479,14 @@ impl BlockView {
                             .child(sanitize_readable(note)),
                     );
                 }
-                if let Some(id) = result.id.filter(|id| *id != tool.summary) {
+                if let Some(id) = result.id.filter(|id| {
+                    *id != tool.summary && background_id.is_none_or(|job| job.as_str() != *id)
+                }) {
                     detail = detail.child(style::step_badge(id.to_owned(), t.text.muted));
                 }
             }
             if lines > 16 {
-                detail = detail.child(
-                    div().child(
-                        Button::new("show-all-output")
-                            .ghost()
-                            .xsmall()
-                            .label(if self.show_all_output {
-                                "Show less".into()
-                            } else {
-                                format!("Show all {lines} lines")
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_all_output = !this.show_all_output;
-                                cx.emit(DetailResized);
-                                cx.notify();
-                            })),
-                    ),
-                );
+                detail = detail.child(self.output_toggle(lines, cx));
             }
         } else if tool.status == StatusIcon::Running {
             detail = detail.child(
@@ -1447,6 +1521,24 @@ impl BlockView {
             detail = detail.child(style::step_badge("No output", t.text.muted));
         }
         detail
+    }
+
+    fn output_toggle(&self, lines: usize, cx: &mut Context<Self>) -> Div {
+        div().child(
+            Button::new("show-all-output")
+                .ghost()
+                .xsmall()
+                .label(if self.show_all_output {
+                    "Show less".into()
+                } else {
+                    format!("Show all {lines} lines")
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.show_all_output = !this.show_all_output;
+                    cx.emit(DetailResized);
+                    cx.notify();
+                })),
+        )
     }
 
     fn prompt(&self, preparing: bool, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1495,6 +1587,32 @@ impl BlockView {
                 )
             })
     }
+}
+
+fn settled_job_badge(status: &CommandJobStatus, cx: &App) -> Option<(String, Hsla)> {
+    use CommandJobStatus::*;
+    let t = palette(cx);
+    Some(match status {
+        Running => return None,
+        Exited {
+            success: true,
+            code,
+            ..
+        } => (
+            code.map_or_else(|| "exited".into(), |code| format!("exited {code}")),
+            t.text.muted,
+        ),
+        Exited {
+            signal: Some(signal),
+            ..
+        } => (format!("signal {signal}"), t.feedback.error),
+        Exited {
+            code: Some(code), ..
+        } => (format!("exit {code}"), t.feedback.error),
+        Exited { .. } | Failed { .. } => ("failed".into(), t.feedback.error),
+        TimedOut { .. } => ("timed out".into(), t.feedback.error),
+        Terminated { .. } => ("stopped".into(), t.feedback.warning),
+    })
 }
 
 fn phase_label(phase: Phase) -> Option<&'static str> {
@@ -1557,6 +1675,7 @@ impl Render for BlockView {
                 self.focus_subscriptions
                     .push(cx.on_blur(handle, window, |_, _, cx| cx.notify()));
             }
+            self.sync_notice_focus(window, cx);
         }
         let t = palette(cx);
         let data = self.data.clone();
@@ -1630,34 +1749,13 @@ impl Render for BlockView {
                 )
                 .child(self.rich_text(true, cx))
                 .into_any_element(),
-            BlockKind::Jobs { finished, running } => {
-                let ink = super::status::accent(&self.controller.read(cx).model.root, cx);
-                div()
-                    .flex()
-                    .flex_col()
-                    .group("timeline-block")
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(style::step_icon(Lucide::SquareTerminal, t.text.muted))
-                            .child(
-                                style::label()
-                                    .flex_1()
-                                    .text_color(t.text.secondary)
-                                    .child(data.body.to_string()),
-                            )
-                            .child(self.actions(window, cx)),
-                    )
-                    .children(finished.iter().map(|row| jobs::job_row(row, ink, cx)))
-                    .when(!running.is_empty(), |content| {
-                        content
-                            .child(style::step_badge("Still running", t.text.muted))
-                            .children(running.iter().map(|row| jobs::job_row(row, ink, cx)))
-                    })
-                    .into_any_element()
-            }
+            BlockKind::Jobs {
+                kind,
+                finished,
+                running,
+            } => self
+                .jobs_notice(*kind, finished, running, window, cx)
+                .into_any_element(),
             BlockKind::Divider => div()
                 .flex()
                 .items_center()

@@ -10,12 +10,12 @@ use std::{
     time::Instant,
 };
 use zevria_content::{CitedSource, PromptImage};
-use zevria_foundation::SubtaskDescriptor;
+use zevria_foundation::{CommandJobNoticeKind, SubtaskDescriptor};
 use zevria_presentation::{
     ConversationTail, PromptPreview, SessionModel,
     blocks::*,
     conversation::{ConversationState, HistoryEntry, ToolCallStatus},
-    jobs::{JobRow, notice_rows},
+    jobs::{JobsInspector, NoticeJobRow, structured_notice_rows},
     status_icon::StatusIcon,
 };
 
@@ -137,8 +137,9 @@ pub enum BlockKind {
         handoff: bool,
     },
     Jobs {
-        finished: Vec<JobRow>,
-        running: Vec<JobRow>,
+        kind: CommandJobNoticeKind,
+        finished: Vec<NoticeJobRow>,
+        running: Vec<NoticeJobRow>,
     },
     Notice(NoticeLevel),
     Ensemble {
@@ -191,9 +192,16 @@ impl BlockData {
         }
     }
     pub fn is_disclosure(&self) -> bool {
-        self.thought().is_some() || matches!(self.kind, BlockKind::Step(_))
+        self.thought().is_some() || matches!(self.kind, BlockKind::Step(_) | BlockKind::Jobs { .. })
     }
-    pub fn default_expanded(&self) -> bool {
+    pub fn tracks_live_jobs(&self) -> bool {
+        match &self.kind {
+            BlockKind::Jobs { .. } => true,
+            BlockKind::Step(Step::Tool(tool)) => tool.job.is_some(),
+            _ => false,
+        }
+    }
+    fn default_expanded(&self) -> bool {
         match &self.kind {
             BlockKind::ThoughtGroup(thought) => thought.is_live,
             BlockKind::Step(Step::Web(web)) => web.status() == StatusIcon::Running,
@@ -245,9 +253,30 @@ impl TimelineRow {
             || matches!(&self.data.kind, BlockKind::Step(step) if step.status() == StatusIcon::Running)
     }
 
+    pub fn needs_job_clock(&self, jobs: &JobsInspector) -> bool {
+        let is_running = |id| jobs.job(id).is_some_and(JobsInspector::can_terminate);
+        match &self.data.kind {
+            BlockKind::Jobs { running, .. } if self.phase != Phase::Restored => {
+                running.iter().any(|row| is_running(&row.id))
+            }
+            BlockKind::Step(Step::Tool(tool)) => tool
+                .job
+                .as_ref()
+                .is_some_and(|job| job.running && is_running(&job.id)),
+            _ => false,
+        }
+    }
+
+    pub fn default_expanded(&self) -> bool {
+        match &self.data.kind {
+            BlockKind::Jobs { .. } => self.phase != Phase::Restored,
+            _ => self.data.default_expanded(),
+        }
+    }
+
     pub fn apply_disclosure(&mut self, disclosures: &DisclosureState) {
         self.expanded = if self.data.is_disclosure() {
-            disclosures.is_expanded(&self.data.key, self.data.default_expanded())
+            disclosures.is_expanded(&self.data.key, self.default_expanded())
         } else {
             true
         };
@@ -339,6 +368,8 @@ struct Checkpoint {
 pub struct Projector {
     entries: Vec<Entry>,
     restored: HashSet<PresentationBlockId>,
+    restored_entries: HashMap<usize, u64>,
+    initialized: bool,
     live: Vec<Binding>,
     pending: Option<(u64, Arc<BlockData>)>,
     checkpoint: Option<Checkpoint>,
@@ -443,7 +474,14 @@ impl Projector {
     ) -> Projection {
         let history = conversation.history();
         let previous_len = self.entries.len();
-        if self.entries.is_empty() && !busy && self.live.is_empty() {
+        if !self.initialized && !busy {
+            self.restored_entries.extend(
+                history
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| matches!(entry, HistoryEntry::JobNotice(..)))
+                    .map(|(index, _)| (index, rows::fingerprint(conversation, index))),
+            );
             self.restored.extend(
                 history
                     .iter()
@@ -454,6 +492,7 @@ impl Projector {
                     .map(|block| block.id),
             );
         }
+        self.initialized = true;
         self.entries.truncate(history.len());
         let mut timeline = Timeline::new(epoch);
         let from = checkpoint.map_or(0, |checkpoint| checkpoint.history);
@@ -511,7 +550,9 @@ impl Projector {
                     Phase::Unsaved
                 } else if entry.interrupted {
                     Phase::Interrupted
-                } else if source.is_some_and(|id| self.restored.contains(&id)) {
+                } else if source.is_some_and(|id| self.restored.contains(&id))
+                    || self.restored_entries.get(&index) == Some(&stamp)
+                {
                     Phase::Restored
                 } else if working {
                     Phase::Working
@@ -736,11 +777,15 @@ fn project_entry(
             handoff.artifact.markdown.as_str(),
         )],
         HistoryEntry::JobNotice(notice, _) => {
-            let (finished, running) = notice_rows(notice);
+            let (finished, running) = structured_notice_rows(notice);
             let mut data = BlockData::new(
-                key,
+                format!("{key}-jobs-{stamp}"),
                 index,
-                BlockKind::Jobs { finished, running },
+                BlockKind::Jobs {
+                    kind: notice.kind(),
+                    finished,
+                    running,
+                },
                 "Background jobs finished",
             );
             data.primary = notice.text().into();

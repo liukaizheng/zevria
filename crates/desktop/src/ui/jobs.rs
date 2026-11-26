@@ -295,31 +295,40 @@ impl DesktopWindow {
     }
 }
 
-pub(super) fn job_row(row: &JobRow, ink: Hsla, cx: &App) -> Div {
+pub(super) fn job_command(command: &zevria_presentation::shell::ShellDisplay, cx: &App) -> Div {
     let t = palette(cx);
-    let spans: Vec<_> = row
-        .command
-        .spans
-        .iter()
-        .map(|(range, token)| {
-            (
-                range.clone(),
-                HighlightStyle {
-                    color: Some(style::shell_ink(*token, &t)),
-                    ..Default::default()
-                },
-            )
-        })
-        .collect();
+    let spans = command.spans.iter().map(|(range, token)| {
+        (
+            range.clone(),
+            HighlightStyle {
+                color: Some(style::shell_ink(*token, &t)),
+                ..Default::default()
+            },
+        )
+    });
+    style::mono()
+        .min_w_0()
+        .truncate()
+        .child(StyledText::new(command.text.clone()).with_highlights(spans))
+}
+
+fn job_row(row: &JobRow, ink: Hsla, cx: &App) -> Div {
+    let t = palette(cx);
+    let mut meta = format!("{} · {} · ", row.id, row.mode);
+    if let Some(duration) = &row.duration {
+        meta.push_str(&format!("{duration} · "));
+    }
     div()
         .flex()
         .items_start()
         .gap(px(8.))
         .py(px(5.))
         .child(
-            style::status_glyph(row.icon, ink, cx)
-                .w(px(16.))
-                .flex_shrink_0(),
+            div()
+                .flex()
+                .flex_shrink_0()
+                .pt(px(2.))
+                .child(style::step_status(row.icon, ink, cx)),
         )
         .child(
             div()
@@ -327,17 +336,13 @@ pub(super) fn job_row(row: &JobRow, ink: Hsla, cx: &App) -> Div {
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .child(
-                    style::mono()
-                        .truncate()
-                        .child(StyledText::new(row.command.text.clone()).with_highlights(spans)),
-                )
+                .child(job_command(&row.command, cx))
                 .child(
                     style::meta()
                         .flex()
                         .min_w_0()
                         .text_color(t.text.muted)
-                        .child(format!("{} · {} · ", row.mode, row.duration))
+                        .child(meta)
                         .child(
                             div()
                                 .min_w_0()

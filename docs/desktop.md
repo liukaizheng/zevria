@@ -342,19 +342,32 @@ Plan review. It docks on the right when there is room and overlays the thread
 in narrower windows.
 
 The panel selects the first running job on open. Click a row or use the arrow
-keys to inspect another. Rows show the command, `fg`/`bg`, elapsed time, and live
-status. The detail shows the job ID and bounded stdout/stderr tails with byte
-counts. It follows new output while scrolled to the end; scroll up to read
-without jumping. **Copy output** copies the retained tails.
+keys to inspect another. Rows show the command, job ID, `fg`/`bg`, elapsed time,
+and status. The detail shows bounded stdout/stderr tails with byte counts. It
+follows new output while scrolled to the end; scroll up to read without jumping.
+**Copy output** copies the retained tails.
 
 On a running command's transcript row, **Stop command** stops just the job;
 **Move command to background** releases a foreground call so the turn can
 continue. Those controls are also available on the corresponding Jobs row on
-hover or keyboard focus. Background rows show live status and offer **Show in
-Jobs** for retained jobs. **Background jobs finished** notices summarize both
-completed and still-running jobs without showing stream output. Copying the
-notice returns the exact model-visible text. None of these controls stops the
-whole turn or restores processes when you resume a session.
+hover or keyboard focus. Background command rows show elapsed time while the
+job is running, and **Show in Jobs** opens a retained job in the inspector. A
+restored command shows **Background** without implying a process is running.
+
+**Background job** and **Background jobs** cards show finished command outcomes
+and the output captured in the notice. New cards start expanded; restored cards
+start collapsed. Click the header or use **Expand details** / **Collapse details**
+to read the breakdown, and **Show all lines** to expand a long output preview.
+**Copy notice** copies the exact text delivered to the model. A **Resumed** tag
+means Zevria continued a turn after a background job finished.
+
+In an expanded card, **Still running** means at least one listed job is active
+now. On hover or keyboard focus, use **Show in Jobs** to inspect a retained row
+or **Stop command** to stop an active job without cancelling the turn. When none
+are active, **Also running at the time** shows how long the jobs had run when
+the notice arrived, plus their final status if still retained. Background
+processes do not persist across sessions, so restored notices never show live
+controls or a ticking duration.
 
 ### Subtasks: switch between conversation panes
 

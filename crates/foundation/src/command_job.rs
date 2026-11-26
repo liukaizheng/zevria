@@ -1,7 +1,11 @@
 //! Shell command identities, display values, and verbatim completion notices.
 use rig_core::message::Message;
 use serde::{Deserialize, Serialize, de::Error as _};
-use std::{fmt, time::SystemTime};
+use std::{
+    borrow::Cow,
+    fmt,
+    time::{Duration, SystemTime},
+};
 
 pub const RETAINED_FINISHED_COMMAND_JOBS: usize = 8;
 pub const COMMAND_JOB_FRONTEND_TAIL_BYTES: usize = 8 * 1024;
@@ -177,9 +181,25 @@ pub fn command_job_line(snapshot: &CommandJobSnapshot) -> String {
     command_job_line_for(snapshot, &snapshot.command)
 }
 
+pub fn command_job_line_at(snapshot: &CommandJobSnapshot, reference: SystemTime) -> String {
+    command_job_line_with_duration(
+        snapshot,
+        &snapshot.command,
+        Some(&command_job_duration_at(snapshot, reference)),
+    )
+}
+
 /// Format a compact job line using a frontend's display command. The default
 /// formatter above always keeps the original command (including for ACP).
 pub fn command_job_line_for(snapshot: &CommandJobSnapshot, command: &str) -> String {
+    command_job_line_with_duration(snapshot, command, Some(&command_job_duration(snapshot)))
+}
+
+fn command_job_line_with_duration(
+    snapshot: &CommandJobSnapshot,
+    command: &str,
+    duration: Option<&str>,
+) -> String {
     let collapsed = command.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = collapsed.chars();
     let mut preview: String = chars.by_ref().take(120).collect();
@@ -187,20 +207,30 @@ pub fn command_job_line_for(snapshot: &CommandJobSnapshot, command: &str) -> Str
         preview.pop();
         preview.push('…');
     }
-    format!(
-        "{} · {} · {} · {preview}",
-        snapshot.id,
-        snapshot.status,
-        command_job_duration(snapshot)
-    )
+    let header = format!("{} · {}", snapshot.id, snapshot.status);
+    match duration {
+        Some(duration) => format!("{header} · {duration} · {preview}"),
+        None => format!("{header} · {preview}"),
+    }
+}
+
+pub fn command_job_elapsed_at(snapshot: &CommandJobSnapshot, reference: SystemTime) -> Duration {
+    snapshot
+        .finished_at
+        .unwrap_or(reference)
+        .duration_since(snapshot.started_at)
+        .unwrap_or_default()
+}
+
+pub fn command_job_duration_at(snapshot: &CommandJobSnapshot, reference: SystemTime) -> String {
+    format_elapsed(command_job_elapsed_at(snapshot, reference))
 }
 
 pub fn command_job_duration(snapshot: &CommandJobSnapshot) -> String {
-    let elapsed = snapshot
-        .finished_at
-        .unwrap_or_else(SystemTime::now)
-        .duration_since(snapshot.started_at)
-        .unwrap_or_default();
+    command_job_duration_at(snapshot, SystemTime::now())
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
     format!("{:.1}s", elapsed.as_secs_f64())
 }
 
@@ -218,6 +248,7 @@ pub struct CommandJobNotice {
     kind: CommandJobNoticeKind,
     jobs: Vec<CommandJobSnapshot>,
     running: Vec<CommandJobSnapshot>,
+    reported_at: Option<SystemTime>,
     text: String,
     model_message: Message,
 }
@@ -239,6 +270,7 @@ impl CommandJobNotice {
             kind,
             jobs,
             running,
+            reported_at: None,
             text,
             model_message,
         }
@@ -258,13 +290,54 @@ impl CommandJobNotice {
     pub fn model_message(&self) -> &Message {
         &self.model_message
     }
-    pub fn summary_lines(&self) -> Vec<String> {
-        self.summary_lines_with(command_job_line)
+    /// Add display timing without touching the persisted model message.
+    pub fn with_reported_at(mut self, at: SystemTime) -> Self {
+        self.reported_at = Some(at);
+        self
     }
-    pub fn summary_lines_with(&self, line: impl Fn(&CommandJobSnapshot) -> String) -> Vec<String> {
+    pub fn reported_at(&self) -> Option<SystemTime> {
+        self.reported_at
+    }
+    pub fn recorded_elapsed(&self, snapshot: &CommandJobSnapshot) -> Option<Duration> {
+        let at = snapshot.finished_at.or(self.reported_at)?;
+        Some(command_job_elapsed_at(snapshot, at))
+    }
+    pub fn recorded_duration_text(&self, snapshot: &CommandJobSnapshot) -> Option<String> {
+        if let Some(elapsed) = self.recorded_elapsed(snapshot) {
+            return Some(format_elapsed(elapsed));
+        }
+        // Prefer the trailing running section so captured output earlier in a
+        // legacy notice doesn't masquerade as a frozen job duration.
+        let text = self
+            .text
+            .rsplit_once("\n\nStill running:\n")
+            .map_or(self.text.as_str(), |(_, running)| running);
+        text.lines().find_map(|line| {
+            let (id, rest) = line.split_once(" · ")?;
+            if id != snapshot.id.as_str() {
+                return None;
+            }
+            let (duration, _) = rest.strip_prefix("running · ")?.split_once(" · ")?;
+            let seconds = duration.strip_suffix('s')?.parse().ok()?;
+            Duration::try_from_secs_f64(seconds).ok()?;
+            Some(duration.to_owned())
+        })
+    }
+    pub fn summary_lines(&self) -> Vec<String> {
+        self.summary_lines_with(|command| Cow::Borrowed(command))
+    }
+    /// Customize the displayed command, not the snapshot status or recorded timing.
+    pub fn summary_lines_with(&self, command: impl Fn(&str) -> Cow<'_, str>) -> Vec<String> {
+        let line = |job: &CommandJobSnapshot| {
+            command_job_line_with_duration(
+                job,
+                &command(&job.command),
+                self.recorded_duration_text(job).as_deref(),
+            )
+        };
         let mut lines: Vec<_> = self.jobs.iter().map(&line).collect();
         if !self.running.is_empty() {
-            lines.push("Still running:".into());
+            lines.push("Also running at the time:".into());
             lines.extend(self.running.iter().map(line));
         }
         lines
@@ -279,6 +352,8 @@ impl Serialize for CommandJobNotice {
             jobs: &'a [CommandJobSnapshot],
             running: &'a [CommandJobSnapshot],
             text: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reported_at: Option<SystemTime>,
         }
         Fields {
             version: 1,
@@ -286,6 +361,7 @@ impl Serialize for CommandJobNotice {
             jobs: &self.jobs,
             running: &self.running,
             text: &self.text,
+            reported_at: self.reported_at,
         }
         .serialize(serializer)
     }
@@ -300,6 +376,8 @@ impl<'de> Deserialize<'de> for CommandJobNotice {
             jobs: Vec<CommandJobSnapshot>,
             running: Vec<CommandJobSnapshot>,
             text: String,
+            #[serde(default)]
+            reported_at: Option<SystemTime>,
         }
         let fields = Fields::deserialize(deserializer)?;
         if fields.version != 1 {
@@ -313,12 +391,9 @@ impl<'de> Deserialize<'de> for CommandJobNotice {
         if fields.text.trim().is_empty() {
             return Err(D::Error::custom("a command job notice requires text"));
         }
-        Ok(Self::new(
-            fields.kind,
-            fields.jobs,
-            fields.running,
-            fields.text,
-        ))
+        let mut notice = Self::new(fields.kind, fields.jobs, fields.running, fields.text);
+        notice.reported_at = fields.reported_at;
+        Ok(notice)
     }
 }
 
@@ -326,9 +401,8 @@ impl<'de> Deserialize<'de> for CommandJobNotice {
 mod tests {
     use super::*;
 
-    #[test]
-    fn compact_lines_and_default_notices_keep_exact_commands() {
-        let job = CommandJobSnapshot {
+    fn finished_job() -> CommandJobSnapshot {
+        CommandJobSnapshot {
             id: CommandJobId::new("job-line"),
             call_id: None,
             command: "rtk proxy cargo\n test".into(),
@@ -339,10 +413,15 @@ mod tests {
                 signal: None,
             },
             started_at: SystemTime::UNIX_EPOCH,
-            finished_at: Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2)),
+            finished_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(2)),
             stdout_bytes: 0,
             stderr_bytes: 0,
-        };
+        }
+    }
+
+    #[test]
+    fn compact_lines_and_default_notices_keep_exact_commands() {
+        let job = finished_job();
         let exact = "job-line · exited 0 · 2.0s · rtk proxy cargo test";
         assert_eq!(command_job_line(&job), exact);
         assert_eq!(command_job_line_for(&job, &job.command), exact);
@@ -356,15 +435,85 @@ mod tests {
             vec![job],
             "exact model text".into(),
         );
-        assert_eq!(notice.summary_lines(), [exact, "Still running:", exact]);
         assert_eq!(
-            notice.summary_lines_with(|job| format!("custom {}", job.id)),
-            ["custom job-line", "Still running:", "custom job-line"]
+            notice.summary_lines(),
+            [exact, "Also running at the time:", exact]
+        );
+        let display = "job-line · exited 0 · 2.0s · cargo test";
+        assert_eq!(
+            notice.summary_lines_with(|_| Cow::Borrowed("cargo test")),
+            [display, "Also running at the time:", display]
         );
         assert_eq!(notice.text(), "exact model text");
         let mut long = notice.jobs()[0].clone();
         long.command = "🐚".repeat(121);
         assert!(command_job_line(&long).ends_with(&format!("{}…", "🐚".repeat(119))));
+    }
+
+    #[test]
+    fn timed_and_legacy_notices_keep_the_verbatim_model_message() {
+        let finished = finished_job();
+        let mut running = finished.clone();
+        running.id = CommandJobId::new("job-running");
+        running.status = CommandJobStatus::Running;
+        running.finished_at = None;
+        let at = running.started_at + Duration::from_millis(14_200);
+        let line = "job-running · running · 14.2s · rtk proxy cargo test";
+        assert_eq!(command_job_line_at(&running, at), line);
+        assert_eq!(
+            command_job_elapsed_at(&finished, at),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            command_job_elapsed_at(&running, running.started_at),
+            Duration::ZERO
+        );
+        let text = format!(
+            "Command job update: these background jobs finished.\n\n<stdout>\njob-running · running · 999.9s · fake\n</stdout>\n\nStill running:\n{line}\n"
+        );
+        let notice = CommandJobNotice::new(
+            CommandJobNoticeKind::Update,
+            vec![finished],
+            vec![running.clone()],
+            text.clone(),
+        )
+        .with_reported_at(at);
+        let mut json = serde_json::to_value(&notice).unwrap();
+        assert_eq!(json["version"], 1);
+        assert_eq!(
+            serde_json::from_value::<CommandJobNotice>(json.clone()).unwrap(),
+            notice
+        );
+        json.as_object_mut().unwrap().remove("reported_at").unwrap();
+        let legacy: CommandJobNotice = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&legacy).unwrap(), json);
+        assert_eq!(notice.reported_at(), Some(at));
+        assert_eq!(legacy.reported_at(), None);
+        assert_eq!(
+            notice.recorded_elapsed(&running),
+            Some(Duration::from_millis(14_200))
+        );
+        assert_eq!(legacy.recorded_elapsed(&running), None);
+        for restored in [&legacy, &notice] {
+            assert_eq!(restored.text(), text);
+            assert_eq!(restored.model_message(), &Message::user(text.clone()));
+            assert_eq!(
+                restored.recorded_duration_text(&running).as_deref(),
+                Some("14.2s")
+            );
+            assert_eq!(restored.summary_lines().last().unwrap(), line);
+        }
+        let no_duration = CommandJobNotice::new(
+            legacy.kind(),
+            legacy.jobs().to_vec(),
+            vec![running.clone()],
+            "job-running · running · NaNs · invalid".into(),
+        );
+        assert_eq!(no_duration.recorded_duration_text(&running), None);
+        assert_eq!(
+            no_duration.summary_lines().last().unwrap(),
+            "job-running · running · rtk proxy cargo test"
+        );
     }
 
     #[test]
