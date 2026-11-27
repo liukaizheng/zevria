@@ -1,9 +1,8 @@
-//! A staged draft belongs to one admission and one replacement generation.
+//! A staged draft belongs to one unaccepted submission and one replacement generation.
 
 pub struct StagedDraft<D> {
     pub draft: D,
     pub generation: u64,
-    pub accepted: bool,
 }
 
 pub struct DraftSlot<D> {
@@ -26,19 +25,11 @@ impl<D> DraftSlot<D> {
             self.pending.is_none(),
             "work admission must precede draft staging"
         );
-        self.pending = Some(StagedDraft {
-            draft,
-            generation,
-            accepted: false,
-        });
+        self.pending = Some(StagedDraft { draft, generation });
     }
 
     pub fn has_pending(&self) -> bool {
         self.pending.is_some()
-    }
-
-    pub fn pending_mut(&mut self) -> Option<&mut StagedDraft<D>> {
-        self.pending.as_mut()
     }
 
     pub fn take(&mut self) -> Option<StagedDraft<D>> {

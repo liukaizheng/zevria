@@ -312,7 +312,7 @@ fn choice_notes_are_scoped_to_the_selected_radio_and_omitted_for_other_and_skip(
 #[test]
 fn shared_grammar_routes_supported_commands_and_retains_unsupported_drafts() {
     let mut workspace = WorkspaceModel::default();
-    let InputRoute::Command(command) = workspace.route_input("hello", true) else {
+    let InputRoute::Prompt(command) = workspace.route_input("hello", true) else {
         panic!()
     };
     assert!(matches!(
@@ -355,6 +355,62 @@ fn shared_grammar_routes_supported_commands_and_retains_unsupported_drafts() {
         InputRoute::Notice(notice) if notice.contains("only in Build mode")
     ));
     assert!(!workspace.root.is_busy());
+}
+
+#[test]
+fn slash_controls_route_separately_from_authored_turns() {
+    use zevria_session_api::ManagementCommand;
+    use zevria_workflow::{PlanDecision, PlanWorkflowState};
+
+    let InputRoute::Control(command) = WorkspaceModel::default().route_input("/compact", false)
+    else {
+        panic!("/compact must be a control");
+    };
+    assert!(matches!(
+        *command,
+        SessionCommand::Turn(TurnCommand::Compact { .. })
+    ));
+
+    for (slash, mode) in [("/plan", SessionMode::Plan), ("/build", SessionMode::Build)] {
+        let InputRoute::Control(command) = WorkspaceModel::default().route_input(slash, false)
+        else {
+            panic!("{slash} must be a control");
+        };
+        assert!(matches!(
+            *command,
+            SessionCommand::Manage(ManagementCommand::SetMode { mode: requested, .. })
+                if requested == mode
+        ));
+    }
+
+    for (slash, decision) in [
+        ("/implement", PlanDecision::ImplementCurrent),
+        ("/implement-fresh", PlanDecision::ImplementFresh),
+    ] {
+        let mut workspace = WorkspaceModel::default();
+        let version = PlanVersion {
+            id: PlanId::new(),
+            revision: 1,
+        };
+        workspace
+            .root
+            .apply_plan_snapshot(PlanWorkflowState::Ready {
+                artifact: PlanArtifact {
+                    version,
+                    title: "Plan".into(),
+                    markdown: "# Implement".into(),
+                    source_turn_id: TURN,
+                },
+            });
+        let InputRoute::Control(command) = workspace.route_input(slash, false) else {
+            panic!("{slash} must be a control");
+        };
+        assert!(matches!(
+            *command,
+            SessionCommand::Turn(TurnCommand::ResolvePlan { expected, decision: requested })
+                if expected == version && requested == decision
+        ));
+    }
 }
 
 #[test]
@@ -597,7 +653,7 @@ mod transcript_edits {
         ] {
             let mut workspace = WorkspaceModel::default();
             workspace.root.apply_selected_mode(mode);
-            let InputRoute::Command(command) = route_edit(&mut workspace, input) else {
+            let InputRoute::Edit(command) = route_edit(&mut workspace, input) else {
                 panic!("{input}")
             };
             assert!(
@@ -657,7 +713,7 @@ mod transcript_edits {
                 name: "review".parse().unwrap(),
                 description: "Review my changes".into(),
             }]);
-        let InputRoute::Command(command) = route_edit(&mut workspace, "$review changes") else {
+        let InputRoute::Edit(command) = route_edit(&mut workspace, "$review changes") else {
             panic!()
         };
         assert!(
@@ -693,7 +749,7 @@ mod transcript_edits {
                         description: "Review my changes".into(),
                     },
                 ]);
-                let InputRoute::Command(command) =
+                let InputRoute::Edit(command) =
                     route_edit(&mut workspace, draft.to_user_prompt(Some(&origin)))
                 else {
                     panic!("{literal}{suffix} should still route as a literal prompt");
@@ -727,7 +783,7 @@ mod transcript_edits {
         assert!(!draft.is_blank() && !draft.is_empty());
         assert_eq!(draft.images, [first, second.clone()]);
         assert_eq!(draft.to_user_prompt(Some(&origin)), prompt);
-        let InputRoute::Command(command) = route_edit(
+        let InputRoute::Edit(command) = route_edit(
             &mut WorkspaceModel::default(),
             draft.to_user_prompt(Some(&origin)),
         ) else {
@@ -744,8 +800,7 @@ mod transcript_edits {
         assert!(!draft.is_blank() && !draft.is_empty());
         let recovered = draft.to_user_prompt(Some(&origin));
         assert_eq!(recovered.blocks(), &[PromptBlock::Image(second)]);
-        let InputRoute::Command(command) =
-            WorkspaceModel::default().route_prompt(&recovered, false)
+        let InputRoute::Prompt(command) = WorkspaceModel::default().route_prompt(&recovered, false)
         else {
             panic!()
         };

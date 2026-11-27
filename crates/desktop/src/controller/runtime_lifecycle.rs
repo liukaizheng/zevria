@@ -159,31 +159,36 @@ impl SessionController {
         }
         cx.notify();
     }
-    pub fn new_session(&mut self, cx: &mut Context<Self>) {
-        if let Some(workspace) = self.workspace.clone() {
-            let inherited_models = if self.model.session_id.is_empty() {
-                None
-            } else {
-                match self.model.root.session_models() {
-                    Ok(models) => Some(models),
-                    Err(error) => {
-                        self.model
-                            .root
-                            .conversation
-                            .push_error(format!("Cannot replace session: {error:#}"));
-                        cx.notify();
-                        return;
-                    }
-                }
-            };
-            self.replace(
-                SessionRequest {
-                    workspace,
-                    start: SessionStart::New { inherited_models },
-                },
-                cx,
-            );
+    pub fn new_session(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.quit_requested || self.model.controls.models.is_open() || self.config.is_none() {
+            return false;
         }
+        let Some(workspace) = self.workspace.clone() else {
+            return false;
+        };
+        let inherited_models = if self.model.session_id.is_empty() {
+            None
+        } else {
+            match self.model.root.session_models() {
+                Ok(models) => Some(models),
+                Err(error) => {
+                    self.model
+                        .root
+                        .conversation
+                        .push_error(format!("Cannot replace session: {error:#}"));
+                    cx.notify();
+                    return false;
+                }
+            }
+        };
+        self.replace(
+            SessionRequest {
+                workspace,
+                start: SessionStart::New { inherited_models },
+            },
+            cx,
+        );
+        true
     }
     pub fn quit(&mut self, cx: &mut Context<Self>) {
         self.quit_requested = true;
@@ -200,6 +205,9 @@ impl SessionController {
         self.pump.take();
         self.tick.take();
         self.command.take();
+        // Unexpected disconnects have already settled the draft. Clearing the
+        // pending preview during intentional shutdown must not recover it.
+        self.draft_slot.accept();
         if self.model.root.pending_prompt().is_some() || self.edit.is_awaiting_acceptance() {
             let reduction = self.model.disconnected();
             self.apply_reduction(reduction);

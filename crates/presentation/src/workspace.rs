@@ -100,13 +100,17 @@ pub struct WorkspaceReduction {
     pub fresh: Option<PlanHandoff>,
 }
 pub enum InputRoute {
-    Command(Box<SessionCommand>),
+    /// Authored turn input, eligible for draft recovery before acceptance.
+    Prompt(Box<SessionCommand>),
+    /// A slash control command, not a recoverable prompt.
+    Control(Box<SessionCommand>),
+    /// A replacement for an existing transcript item.
+    Edit(Box<SessionCommand>),
     New,
     Resume,
     Models(zevria_model::models::ModelSelectionScope),
     Jobs,
     Mcp,
-    McpPrompt(Box<SessionCommand>),
     Subtasks,
     Notice(String),
     Retained,
@@ -138,7 +142,11 @@ pub fn admit_work(
         ClassifiedInput::Orchestrate(text) => root.submit(text, RequestBehavior::Orchestrate),
         ClassifiedInput::Skill { name, args } => root.invoke_skill(name, args),
         ClassifiedInput::Ensemble { workflow, prompt } => root.run_ensemble(workflow, prompt),
-        ClassifiedInput::Builtin(SlashCommand::Compact) => root.compact(),
+        ClassifiedInput::Builtin(SlashCommand::Compact) => {
+            return root.compact().map_or(InputRoute::Retained, |command| {
+                InputRoute::Control(Box::new(SessionCommand::Turn(command)))
+            });
+        }
         ClassifiedInput::McpPrompt {
             server,
             prompt,
@@ -149,19 +157,17 @@ pub fn admit_work(
                     "Finish reviewing the current Plan before running an MCP prompt.".into(),
                 );
             }
-            return InputRoute::McpPrompt(Box::new(SessionCommand::Turn(
-                TurnCommand::InvokeMcpPrompt {
-                    server,
-                    prompt,
-                    arguments,
-                    mode: mcp_mode,
-                },
-            )));
+            Some(TurnCommand::InvokeMcpPrompt {
+                server,
+                prompt,
+                arguments,
+                mode: mcp_mode,
+            })
         }
         ClassifiedInput::Builtin(_) => return InputRoute::Retained,
     };
     command.map_or(InputRoute::Retained, |command| {
-        InputRoute::Command(Box::new(SessionCommand::Turn(command)))
+        InputRoute::Prompt(Box::new(SessionCommand::Turn(command)))
     })
 }
 
@@ -593,7 +599,7 @@ impl WorkspaceModel {
                 target_index,
             )
             .map_or(InputRoute::Retained, |command| {
-                InputRoute::Command(Box::new(SessionCommand::Turn(command)))
+                InputRoute::Edit(Box::new(SessionCommand::Turn(command)))
             })
     }
 
@@ -674,7 +680,7 @@ impl WorkspaceModel {
             }
         };
         command.map_or(InputRoute::Retained, |command| {
-            InputRoute::Command(Box::new(command))
+            InputRoute::Control(Box::new(command))
         })
     }
 }
@@ -691,7 +697,7 @@ mod mcp_tests {
             InputRoute::Mcp
         ));
         assert!(!workspace.root.is_busy());
-        let InputRoute::McpPrompt(command) =
+        let InputRoute::Prompt(command) =
             workspace.route_input("/prompt docs:summary topic=release", false)
         else {
             panic!("MCP prompt route");

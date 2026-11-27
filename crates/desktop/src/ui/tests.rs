@@ -1,4 +1,6 @@
 //! Headless tests exercise real native controls and production window content.
+#[path = "draft_tests.rs"]
+mod drafts;
 #[path = "edit_tests.rs"]
 mod edits;
 #[path = "job_tests.rs"]
@@ -25,8 +27,8 @@ use crate::{
 };
 use gpui_kit::test::{ElementSnapshot, TestWindowExt as _};
 use gpui_kit::{
-    AppContext as _, Bounds, Context, Entity, Point, TestAppContext, WindowBounds, WindowHandle,
-    WindowOptions, px, size,
+    App, AppContext as _, Bounds, Context, Entity, Point, TestAppContext, Window as NativeWindow,
+    WindowBounds, WindowHandle, WindowOptions, px, size,
 };
 use rig_core::message::Message;
 use zevria_foundation::{
@@ -91,6 +93,29 @@ fn event(
 ) {
     controller.update(cx, |this, cx| this.fixture_event(event, cx));
     cx.run_until_parked();
+}
+
+// Flush controller observers between distinct native input events. Rendering a
+// frame inside the app update does not run deferred entity notifications.
+fn interact(window: Window, cx: &mut TestAppContext, f: impl FnOnce(&mut NativeWindow, &mut App)) {
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        f(window, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+}
+
+#[track_caller]
+fn assert_composer(view: &Entity<DesktopWindow>, text: &str, cx: &mut TestAppContext) {
+    let (draft, composer) = view.read_with(cx, |view, cx| {
+        (
+            view.controller.read(cx).draft.clone(),
+            view.composer.read(cx).value().to_string(),
+        )
+    });
+    assert_eq!(draft, text, "controller draft");
+    assert_eq!(composer, text, "native composer");
 }
 
 fn assert_copy_label(button: &ElementSnapshot, label: &str) {
@@ -465,7 +490,7 @@ fn plan_panel_emits_versioned_resolution(cx: &mut TestAppContext) {
     );
 }
 #[gpui_kit::test]
-fn dismissed_ready_plan_send_revises_and_rejection_restores_the_draft(cx: &mut TestAppContext) {
+fn dismissed_ready_plan_feedback_recovers_only_before_acceptance(cx: &mut TestAppContext) {
     let (window, view, controller, mut receiver) = setup(cx);
     cx.update_window(window.into(), |_, window, cx| {
         window.input("next draft", cx);
@@ -522,15 +547,16 @@ fn dismissed_ready_plan_send_revises_and_rejection_restores_the_draft(cx: &mut T
     })
     .unwrap();
     cx.run_until_parked();
-    assert_eq!(
-        receiver.try_recv().unwrap(),
-        SessionCommand::Turn(TurnCommand::RevisePlanWithMessage {
-            expected: version,
-            text: "next draft".into(),
-        })
-    );
+    let feedback = SessionCommand::Turn(TurnCommand::RevisePlanWithMessage {
+        expected: version,
+        text: "next draft".into(),
+    });
+    assert_eq!(receiver.try_recv().unwrap(), feedback);
     assert!(receiver.try_recv().is_err());
-    assert!(controller.read_with(cx, |this, _| this.model.root.is_busy()));
+    assert_composer(&view, "", cx);
+    assert!(controller.read_with(cx, |this, _| {
+        this.model.root.is_busy() && this.draft_slot.has_pending()
+    }));
     event(
         &controller,
         E::Turn(TurnEvent::Rejected {
@@ -539,20 +565,39 @@ fn dismissed_ready_plan_send_revises_and_rejection_restores_the_draft(cx: &mut T
         }),
         cx,
     );
-    assert_eq!(
-        controller.read_with(cx, |this, _| this.draft.clone()),
-        "next draft"
-    );
-    assert_eq!(
-        view.read_with(cx, |this, cx| this.composer.read(cx).value().to_string()),
-        "next draft"
-    );
+    assert_composer(&view, "next draft", cx);
+    expect_skill_completion_query(&mut receiver);
     assert!(!controller.read_with(cx, |this, _| this.model.root.is_busy()));
     assert!(controller.read_with(cx, |this, _| this.model.root.workflow.dialog().is_none()));
     assert_eq!(
         controller.read_with(cx, |this, _| this.model.root.workflow.snapshot().clone()),
         ready
     );
+
+    interact(window, cx, |window, cx| window.click("send", cx));
+    assert_eq!(receiver.try_recv().unwrap(), feedback);
+    let turn_id = TurnId::new(11);
+    event(
+        &controller,
+        E::Turn(TurnEvent::Started {
+            turn_id,
+            mode: SessionMode::Plan,
+            message: Message::user("next draft"),
+        }),
+        cx,
+    );
+    interact(window, cx, |window, cx| window.click("stop", cx));
+    assert_eq!(
+        receiver.try_recv().unwrap(),
+        SessionCommand::Control(ControlCommand::CancelTurn {
+            turn_id: Some(turn_id)
+        })
+    );
+    event(&controller, E::Turn(TurnEvent::Cancelled { turn_id }), cx);
+    assert_composer(&view, "", cx);
+    assert!(controller.read_with(cx, |this, _| {
+        !this.draft_slot.has_pending() && this.draft_slot.recovery().is_empty()
+    }));
 }
 
 #[gpui_kit::test]
@@ -1384,24 +1429,15 @@ fn completion_arrows_and_tab_use_the_shared_registry_without_extra_turns(cx: &mu
 
 #[gpui_kit::test]
 fn editing_and_undoing_does_not_revive_a_submitted_draft_token(cx: &mut TestAppContext) {
-    let (window, _, controller, mut receiver) = setup(cx);
-    cx.update_window(window.into(), |_, window, cx| {
-        window.input("original", cx);
-        window.press("enter", cx);
-    })
-    .unwrap();
-    cx.run_until_parked();
-    receiver.try_recv().unwrap();
-    let turn_id = TurnId::new(13);
-    event(
-        &controller,
-        E::Turn(TurnEvent::Started {
-            turn_id,
-            mode: SessionMode::Build,
-            message: Message::user("original"),
-        }),
-        cx,
-    );
+    let (window, view, controller, mut receiver) = setup(cx);
+    interact(window, cx, |window, cx| window.input("original", cx));
+    interact(window, cx, |window, cx| window.press("enter", cx));
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        SessionCommand::Turn(TurnCommand::Submit { .. })
+    ));
+    assert_composer(&view, "", cx);
+    assert!(controller.read_with(cx, |this, _| this.draft_slot.has_pending()));
     cx.update_window(window.into(), |_, window, cx| window.input("later", cx))
         .unwrap();
     cx.run_until_parked();
@@ -1410,16 +1446,16 @@ fn editing_and_undoing_does_not_revive_a_submitted_draft_token(cx: &mut TestAppC
     })
     .unwrap();
     cx.run_until_parked();
-    assert!(controller.read_with(cx, |this, _| this.draft.is_empty()));
+    assert_composer(&view, "", cx);
     event(
         &controller,
-        E::Turn(TurnEvent::Failed {
-            turn_id,
-            error: "fixture failure".into(),
+        E::Turn(TurnEvent::Rejected {
+            turn_id: TurnId::new(13),
+            error: "rejected before acceptance".into(),
         }),
         cx,
     );
-    assert!(controller.read_with(cx, |this, _| this.draft.is_empty()));
+    assert_composer(&view, "", cx);
     assert_eq!(
         controller.read_with(cx, |this, _| this.draft_slot.recovery().to_vec()),
         vec![crate::session::DraftContent {

@@ -665,12 +665,26 @@ cancels a recall or stops an edit that is waiting for acceptance. Stop still
 cancels the active root turn, including while a non-dismissible question is open.
 
 Supported shared grammar: ordinary text, `/orchestrate <prompt>`, `$skill [args]`,
-`/compact`, `/implement`, `/implement-fresh`, `/plan`, `/build`, `/new`, `/resume`,
-`/model`, `/model-session`, `/jobs`, `/subtasks`. Skill-management, worker-review and `/ensemble-*` commands retain
+`/prompt <server>:<name>`, `/compact`, `/implement`, `/implement-fresh`, `/plan`,
+`/build`, `/new`, `/resume`, `/model`, `/model-session`, `/jobs`, `/mcp`, and
+`/subtasks`. Skill-management, worker-review, and `/ensemble-*` commands retain
 the draft and show an explicit not-yet-available notice. Input while busy is not
-queued as another turn. A submitted draft stays until acceptance; failures and
-cancellation restore it without replacing a newer draft (Recover draft keeps
-both when necessary).
+queued as another turn.
+
+Submitting an authored prompt clears the composer immediately, including for
+Plan feedback, skills, and MCP prompts. A rejection or failure before acceptance
+restores the draft if the composer is still empty and untouched; otherwise the
+original is available under **Recover draft**. Stopping a turn never restores its
+submitted prompt, even before acceptance. Once the engine accepts a prompt, it
+stays in the transcript and is never recovered into the composer after failure,
+disconnection, or interruption.
+
+Admitted slash controls clear immediately and are never recoverable. `/resume`
+reveals the Sessions sidebar if it is hidden; `/subtasks` reports when the session
+has no subtasks instead of opening an empty panel. **Edit and resend** keeps the
+edited text locked in the composer until acceptance. A pre-acceptance error or
+stop unlocks the edit with its text and caret intact. Acceptance clears the
+composer and commits the replacement to the transcript.
 
 ### Model and thinking-effort sheet
 

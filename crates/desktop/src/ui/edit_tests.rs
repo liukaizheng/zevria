@@ -1,6 +1,5 @@
 //! Native transcript edit interactions, including the durable acceptance boundary.
 use super::*;
-use gpui_kit::{App, Window as NativeWindow};
 use zevria_content::{PromptBlock, PromptImage, UserPrompt};
 use zevria_foundation::{RequestBehavior, SubtaskId};
 use zevria_presentation::blocks::NativeToolCallStatus as ToolCallStatus;
@@ -28,17 +27,6 @@ fn seed(controller: &Entity<SessionController>, prompts: &[UserPrompt], cx: &mut
     cx.run_until_parked();
 }
 
-// Flush controller observers between distinct native input events. Rendering a
-// frame inside the app update does not run deferred entity notifications.
-fn interact(window: Window, cx: &mut TestAppContext, f: impl FnOnce(&mut NativeWindow, &mut App)) {
-    cx.update_window(window.into(), |_, window, cx| {
-        window.render_frame(cx);
-        f(window, cx);
-    })
-    .unwrap();
-    cx.run_until_parked();
-}
-
 fn click_first_edit(window: &mut NativeWindow, cx: &mut App) {
     let button = window
         .find_all("edit-prompt")
@@ -57,13 +45,6 @@ fn replace_text(window: &mut NativeWindow, text: &str, cx: &mut App) {
     } else {
         window.input(text, cx);
     }
-}
-
-fn assert_composer(view: &Entity<DesktopWindow>, text: &str, cx: &mut TestAppContext) {
-    view.read_with(cx, |view, cx| {
-        assert_eq!(view.composer.read(cx).value().as_ref(), text);
-        assert_eq!(view.controller.read(cx).draft, text);
-    });
 }
 
 fn take_edit(receiver: &mut Receiver) -> TranscriptEdit {
@@ -219,6 +200,7 @@ fn resend_locks_until_started_and_truncates_projected_rows_on_acceptance(cx: &mu
     );
     controller.read_with(cx, |controller, _| {
         assert!(controller.edit.is_awaiting_acceptance());
+        assert!(!controller.draft_slot.has_pending());
         assert_eq!(
             controller.model.root.conversation.turn_starts(true).len(),
             2
@@ -452,7 +434,7 @@ fn builtin_completion_only_inserts_when_an_ordinary_draft_has_recovered_images(
 }
 
 #[gpui_kit::test]
-fn restored_image_blocks_resend_in_order_and_failed_edits_recover_attachments(
+fn restored_image_blocks_resend_in_order_and_stay_in_the_transcript_on_failure(
     cx: &mut TestAppContext,
 ) {
     let (window, view, controller, mut receiver) = setup(cx);
@@ -530,7 +512,8 @@ fn restored_image_blocks_resend_in_order_and_failed_edits_recover_attachments(
     assert_composer(&view, "newer draft", cx);
     controller.read_with(cx, |controller, _| {
         assert!(controller.edit.is_none());
-        assert_eq!(controller.draft_slot.recovery()[0].images, [second.clone()]);
+        assert!(controller.draft_slot.recovery().is_empty());
+        assert!(controller.draft_images.is_empty());
         let conversation = &controller.model.root.conversation;
         let selection = conversation.message_recall_selection(0).unwrap();
         assert_eq!(
@@ -544,19 +527,13 @@ fn restored_image_blocks_resend_in_order_and_failed_edits_recover_attachments(
                 .any(|entry| format!("{entry:?}").contains("old reply"))
         );
     });
-    interact(window, cx, |window, cx| replace_text(window, "", cx));
-    interact(window, cx, |window, cx| window.click("recover-draft", cx));
-    interact(window, cx, |window, cx| {
-        assert!(window.find("composer-attachments").visible());
-        window.click("send", cx);
+    interact(window, cx, |window, _| {
+        assert!(window.try_find("recover-draft").is_none());
     });
-    assert!(
-        matches!(receiver.try_recv().unwrap(), SessionCommand::Turn(TurnCommand::Submit { text, .. }) if text == edited)
-    );
 }
 
 #[gpui_kit::test]
-fn cancellation_after_acceptance_restores_the_draft_not_the_discarded_turns(
+fn cancellation_after_acceptance_leaves_composer_empty_and_keeps_edited_turn(
     cx: &mut TestAppContext,
 ) {
     let (window, view, controller, mut receiver) = setup(cx);
@@ -566,6 +543,13 @@ fn cancellation_after_acceptance_restores_the_draft_not_the_discarded_turns(
     interact(window, cx, |window, cx| window.press("enter", cx));
     take_edit(&mut receiver);
     start_replacement(&controller, &"edited".into(), cx);
+    interact(window, cx, |window, cx| window.click("stop", cx));
+    assert_eq!(
+        receiver.try_recv().unwrap(),
+        SessionCommand::Control(ControlCommand::CancelTurn {
+            turn_id: Some(REPLACEMENT)
+        })
+    );
     event(
         &controller,
         E::Turn(TurnEvent::Cancelled {
@@ -573,12 +557,16 @@ fn cancellation_after_acceptance_restores_the_draft_not_the_discarded_turns(
         }),
         cx,
     );
-    assert_composer(&view, "edited", cx);
+    assert_composer(&view, "", cx);
     controller.read_with(cx, |controller, _| {
         assert!(controller.edit.is_none());
+        assert!(controller.draft_slot.recovery().is_empty());
+        let conversation = &controller.model.root.conversation;
+        assert_eq!(conversation.turn_starts(true).len(), 1);
+        let selection = conversation.message_recall_selection(0).unwrap();
         assert_eq!(
-            controller.model.root.conversation.turn_starts(true).len(),
-            1
+            conversation.recallable_selection(selection).unwrap().0,
+            "edited".into()
         );
     });
 }

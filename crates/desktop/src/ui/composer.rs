@@ -25,6 +25,8 @@ impl DesktopWindow {
             }
             this.submit(cx);
         });
+        // Reflect admission before handling any subsequent native editor input.
+        self.sync_composer_draft(false, window, cx);
         if self.controller.read(cx).edit.is_awaiting_acceptance() {
             self.transcript
                 .update(cx, |view, cx| view.jump_to_latest(cx));

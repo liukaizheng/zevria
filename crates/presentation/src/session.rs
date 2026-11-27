@@ -808,6 +808,10 @@ impl SessionState {
             }
             SessionActivity::ActiveTurn(_) => return None,
         };
+        // Manual compaction is a separate operation, not a phase of another turn.
+        if trigger == CompactionTrigger::Manual && kind != OperationKind::ManualCompaction {
+            return None;
+        }
         let (model_call, display_turn, call_header) = match &self.activity {
             SessionActivity::ActiveTurn(active) => {
                 (active.model_call, active.display_turn, active.call_header)

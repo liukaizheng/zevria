@@ -29,6 +29,7 @@ pub struct DesktopWindow {
     composer_mode: zevria_foundation::SessionMode,
     last_recall_generation: u64,
     last_rejected_edit_generation: u64,
+    last_resume_reveal_generation: u64,
     pub(super) transcript: Entity<TranscriptView>,
     pub(super) plan: Option<(zevria_workflow::PlanVersion, Entity<TextViewState>)>,
     pub(super) plan_copy_feedback: style::CopyFeedback,
@@ -140,6 +141,7 @@ impl DesktopWindow {
             composer_mode: zevria_foundation::SessionMode::Build,
             last_recall_generation: 0,
             last_rejected_edit_generation: 0,
+            last_resume_reveal_generation: 0,
             transcript,
             plan: None,
             plan_copy_feedback: style::CopyFeedback::default(),
@@ -183,9 +185,12 @@ impl DesktopWindow {
         let edit_rejected =
             self.last_rejected_edit_generation != controller.rejected_edit_generation;
         self.last_rejected_edit_generation = controller.rejected_edit_generation;
-        let draft = (recall_changed
-            || self.composer.read(cx).value().as_ref() != controller.draft.as_str())
-        .then(|| controller.draft.clone());
+        if self.last_resume_reveal_generation != controller.resume_reveal_generation {
+            self.last_resume_reveal_generation = controller.resume_reveal_generation;
+            if !self.sidebar_visible(f32::from(window.viewport_size().width)) {
+                self.sidebar_override = Some(true);
+            }
+        }
         let mode = controller.model.root.next_mode();
         let live = controller.phase == Phase::Live;
         let inspecting = controller.model.controls.selected_child.is_some();
@@ -225,17 +230,7 @@ impl DesktopWindow {
                 )
             });
         }
-        if let Some(draft) = draft {
-            let end = draft.len();
-            if recall_changed {
-                self.completion_selected = 0;
-                self.completion_dismissed = Some((draft.clone(), end));
-            }
-            self.composer.update(cx, |input, cx| {
-                input.set_value(draft, window, cx);
-                input.set_selected_range(end..end, cx);
-            });
-        }
+        self.sync_composer_draft(recall_changed, window, cx);
         if live && !inspecting && (!self.was_live || recall_changed || edit_rejected) {
             self.composer
                 .update(cx, |input, cx| input.focus(window, cx));
@@ -294,6 +289,31 @@ impl DesktopWindow {
         self.sync_question(window, cx);
         self.sync_model_picker(window, cx);
     }
+    pub(super) fn sync_composer_draft(
+        &mut self,
+        recall_changed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let draft = &self.controller.read(cx).draft;
+        if !recall_changed && self.composer.read(cx).value().as_ref() == draft.as_str() {
+            return;
+        }
+        let draft = draft.clone();
+        let end = draft.len();
+        if draft.is_empty() {
+            self.completion_selected = 0;
+            self.completion_dismissed = None;
+        } else if recall_changed {
+            self.completion_selected = 0;
+            self.completion_dismissed = Some((draft.clone(), end));
+        }
+        self.composer.update(cx, |input, cx| {
+            input.set_value(draft, window, cx);
+            input.set_selected_range(end..end, cx);
+        });
+    }
+
     pub(super) fn request_replace(&mut self, replacement: Replacement, cx: &mut Context<Self>) {
         if self.controller.read(cx).model.controls.models.is_open() {
             return;
@@ -314,7 +334,9 @@ impl DesktopWindow {
         self.controller
             .update(cx, |this, cx| this.set_capturing_dialog(false, cx));
         match replacement {
-            Replacement::New => self.controller.update(cx, |this, cx| this.new_session(cx)),
+            Replacement::New => self.controller.update(cx, |this, cx| {
+                this.new_session(cx);
+            }),
             Replacement::Resume(path) => self.controller.update(cx, |this, cx| {
                 if let Some(workspace) = this.workspace.clone() {
                     this.replace(

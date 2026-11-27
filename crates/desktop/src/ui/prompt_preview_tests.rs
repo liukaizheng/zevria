@@ -124,8 +124,14 @@ fn first_frame_echoes_the_prompt_while_provider_count_is_blocked(cx: &mut TestAp
             );
         }
 
-        controller.update(cx, |this, cx| this.new_session(cx));
-        assert!(controller.read_with(cx, |this, _| this.model.root.pending_prompt().is_none()));
+        controller.update(cx, |this, cx| {
+            assert!(this.new_session(cx));
+            assert_eq!(this.phase, crate::controller::Phase::Stopping);
+            assert!(this.model.root.pending_prompt().is_none());
+            assert!(this.draft.is_empty());
+            assert!(!this.draft_slot.has_pending());
+            assert!(this.draft_slot.recovery().is_empty());
+        });
         until(cx, |cx| {
             controller.read_with(cx, |this, _| {
                 this.phase == crate::controller::Phase::Live && this.model.transcript_path != path

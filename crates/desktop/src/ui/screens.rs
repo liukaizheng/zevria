@@ -126,7 +126,7 @@ impl DesktopWindow {
                             .primary()
                             .label("Start new session")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.controller.update(cx, |this, cx| this.new_session(cx))
+                                this.controller.update(cx, |this, cx| this.new_session(cx));
                             })),
                     )
                 }

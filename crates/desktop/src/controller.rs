@@ -59,6 +59,7 @@ pub struct SessionController {
     pub orchestrate: bool,
     pub cancelling: bool,
     pub show_sessions: bool,
+    pub resume_reveal_generation: u64,
     /// Native capturing dialogs (for example replacement confirmation).
     capturing_dialog: bool,
     draft_generation: u64,
@@ -114,6 +115,7 @@ impl SessionController {
             orchestrate: false,
             cancelling: false,
             show_sessions: false,
+            resume_reveal_generation: 0,
             capturing_dialog: false,
             draft_generation: 0,
             draft_slot: Default::default(),
@@ -262,14 +264,14 @@ impl SessionController {
         self.draft.is_empty() && self.draft_images.is_empty()
     }
 
-    fn matches_draft(&self, draft: &DraftContent) -> bool {
-        self.draft == draft.text && self.draft_images == draft.images
-    }
-
     fn replace_draft(&mut self, draft: DraftContent) {
         self.draft = draft.text;
         self.draft_images = draft.images;
         self.draft_generation += 1;
+    }
+
+    fn clear_draft(&mut self) {
+        self.replace_draft(DraftContent::default());
     }
 
     pub(crate) fn clock_required(&self) -> bool {
@@ -312,11 +314,13 @@ impl SessionController {
         }));
     }
     pub fn send(&mut self, command: SessionCommand, cx: &mut Context<Self>) {
-        if self
+        let disconnected = self
             .command
             .as_ref()
-            .is_none_or(|sender| sender.send(command).is_err())
-        {
+            .is_none_or(|sender| sender.send(command).is_err());
+        // An attached pump observes runtime exit after consuming ready events.
+        // Don't settle ahead of a buffered Started for an already committed prompt.
+        if disconnected && self.pump.is_none() {
             let reduction = self.model.disconnected();
             self.apply_reduction(reduction);
             self.terminal_error = Some("The session engine is no longer available.".into());
@@ -473,7 +477,7 @@ impl SessionController {
         }
     }
     fn open_subtasks(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.can_open_session_panel() {
+        if !self.can_open_session_panel() || self.model.children.is_empty() {
             return false;
         }
         self.model.root.jobs_inspector_mut().close();
@@ -540,40 +544,56 @@ impl SessionController {
             self.model.route_prompt(&prompt, self.orchestrate)
         };
         match route {
-            InputRoute::Command(command) | InputRoute::McpPrompt(command) => {
-                if self.edit.is_recalling() {
-                    self.edit.stage_submission();
-                }
+            InputRoute::Prompt(command) => {
+                self.clear_draft();
                 self.draft_slot.stage(draft, self.draft_generation);
                 self.send(*command, cx);
             }
-            InputRoute::Models(scope) => {
-                // Management has no TurnStarted acknowledgement and must never
-                // acquire submitted-turn bookkeeping. Only an accepted slash
-                // invocation consumes its own command text.
-                if self.open_model_picker(scope, cx) {
-                    self.replace_draft(DraftContent::default());
-                }
+            InputRoute::Control(command) => {
+                self.clear_draft();
+                self.send(*command, cx);
             }
+            InputRoute::Edit(command) => {
+                // Keep the edit and caret locked in place until acceptance.
+                self.edit.stage_submission();
+                self.send(*command, cx);
+            }
+            InputRoute::Models(scope) => match self.model_selection_available() {
+                Ok(()) if self.open_model_picker(scope, cx) => self.clear_draft(),
+                Ok(()) => {}
+                Err(reason) => self.model.root.conversation.push_error(reason.into()),
+            },
             InputRoute::Mcp => {
                 if self.open_mcp(cx) {
-                    self.replace_draft(DraftContent::default());
+                    self.clear_draft();
                 }
             }
             InputRoute::Jobs => {
                 if self.open_jobs(cx) {
-                    self.replace_draft(DraftContent::default());
+                    self.clear_draft();
                 }
             }
             InputRoute::Subtasks => {
-                if self.open_subtasks(cx) {
-                    self.replace_draft(DraftContent::default());
+                if self.can_open_session_panel() && self.model.children.is_empty() {
+                    self.model
+                        .root
+                        .conversation
+                        .push_error("No subtasks in this session.".into());
+                    self.clear_draft();
+                } else if self.open_subtasks(cx) {
+                    self.clear_draft();
                 }
             }
-            InputRoute::New => self.new_session(cx),
+            InputRoute::New => {
+                if self.new_session(cx) {
+                    self.clear_draft();
+                }
+            }
             InputRoute::Resume => {
                 self.show_sessions = true;
+                self.resume_reveal_generation += 1;
                 self.refresh_sessions(cx);
+                self.clear_draft();
             }
             InputRoute::Notice(notice) => self.model.root.conversation.push_error(notice),
             InputRoute::Retained => {}
@@ -727,10 +747,10 @@ impl SessionController {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use gpui_kit::{AppContext as _, TestAppContext};
-    fn config(workspace: &std::path::Path, address: &str) -> Config {
+    pub(crate) fn config(workspace: &std::path::Path, address: &str) -> Config {
         let source = format!(
             r#"
 [providers.test]
@@ -754,7 +774,10 @@ builder = {{ provider = "test", model = "fixture", reasoning_level = "medium" }}
         );
         zevria_host::test_support::write_fixture(&workspace.join("config.toml"), &source).unwrap()
     }
-    fn until(cx: &mut TestAppContext, mut ready: impl FnMut(&mut TestAppContext) -> bool) {
+    pub(crate) fn until(
+        cx: &mut TestAppContext,
+        mut ready: impl FnMut(&mut TestAppContext) -> bool,
+    ) {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             // The pump may yield after startup metadata before conversational

@@ -91,7 +91,7 @@ async fn native_thinking_effort_selection_shutdown_resume_and_new_through_deskto
     let path = model.transcript_path.clone();
     let mut events = running.running.take_event_receiver().unwrap();
     let sender = running.running.command_sender();
-    let InputRoute::Command(command) = model.route_input("desktop smoke", false) else {
+    let InputRoute::Prompt(command) = model.route_input("desktop smoke", false) else {
         panic!()
     };
     sender.send(*command).unwrap();
@@ -163,7 +163,7 @@ async fn native_thinking_effort_selection_shutdown_resume_and_new_through_deskto
     );
     let mut events = running.running.take_event_receiver().unwrap();
     let sender = running.running.command_sender();
-    let InputRoute::Command(command) = model.route_input("resumed smoke", false) else {
+    let InputRoute::Prompt(command) = model.route_input("resumed smoke", false) else {
         panic!()
     };
     sender.send(*command).unwrap();
@@ -249,7 +249,7 @@ async fn transcript_edit_replaces_the_tail_on_the_wire_and_on_disk() {
     let mut events = started.running.take_event_receiver().unwrap();
     let sender = started.running.command_sender();
     for text in [FIRST, SECOND] {
-        let InputRoute::Command(command) = model.route_input(text, false) else {
+        let InputRoute::Prompt(command) = model.route_input(text, false) else {
             panic!("admit {text}")
         };
         sender.send(*command).unwrap();
@@ -265,7 +265,7 @@ async fn transcript_edit_replaces_the_tail_on_the_wire_and_on_disk() {
     let (prompt, target, index) = model.recallable_prompt(index, block).unwrap();
     assert_eq!(prompt, UserPrompt::from_text(FIRST));
     assert_eq!(target, TranscriptEditTarget::PromptOrdinal(0));
-    let InputRoute::Command(command) =
+    let InputRoute::Edit(command) =
         model.route_edit_input(&UserPrompt::from_text(EDITED), target, index)
     else {
         panic!("admit edit")
@@ -432,7 +432,7 @@ builder = { provider = "test", model = "test-model", reasoning_level = "medium" 
         ("/build", SessionMode::Build, true),
         ("/plan", SessionMode::Plan, false),
     ] {
-        let InputRoute::Command(command) = model.route_input(slash, false) else {
+        let InputRoute::Control(command) = model.route_input(slash, false) else {
             panic!("expected a mode selection command for {slash}");
         };
         sender.send(*command).unwrap();

@@ -6,6 +6,14 @@ use super::{
 };
 use zevria_presentation::session::OperationKind;
 
+fn is_prompt_submission(kind: OperationKind) -> bool {
+    // Plan feedback uses the same Submit or Skill operation as a fresh turn.
+    matches!(
+        kind,
+        OperationKind::Submit | OperationKind::Skill | OperationKind::Ensemble
+    )
+}
+
 impl SessionController {
     pub(super) fn attach(&mut self, cx: &mut Context<Self>) {
         let running = self.running.as_mut().expect("live running session");
@@ -131,6 +139,9 @@ impl SessionController {
     ) -> Option<zevria_workflow::PlanHandoff> {
         self.model.observe_clock(Instant::now());
         let reduction = self.model.apply(update);
+        if let Some(root) = reduction.root {
+            self.apply_reduction(root);
+        }
         self.flush_job_commands(cx);
         self.flush_mcp_commands(cx);
         while self.phase == Phase::Live {
@@ -140,21 +151,12 @@ impl SessionController {
             self.send(command, cx);
         }
         self.ensure_tick(cx);
-        if let Some(root) = reduction.root {
-            self.apply_reduction(root);
-        }
         if !self.model.root.is_busy() {
             self.cancelling = false;
-            // If busy cleared without a settlement, unlock the recall without
-            // consuming the unaccepted replacement draft.
-            let unaccepted_edit = self.reject_pending_edit();
-            if let Some(submitted) = self.draft_slot.take()
-                && !unaccepted_edit
-                && self.draft_generation == submitted.generation
-                && self.matches_draft(&submitted.draft)
-            {
-                self.replace_draft(Default::default());
-            }
+            // A transition without a settlement drops orphaned submissions
+            // and unlocks an edit without touching the live composer.
+            self.reject_pending_edit();
+            self.draft_slot.accept();
         }
         if reduction.fresh.is_none() {
             self.dispatch_job_continuation(cx);
@@ -172,13 +174,11 @@ impl SessionController {
             self.send(SessionCommand::Turn(command), cx);
         }
     }
-    fn reject_pending_edit(&mut self) -> bool {
-        if !self.edit.reject() {
-            return false;
+    fn reject_pending_edit(&mut self) {
+        if self.edit.reject() {
+            // Return focus from Stop without replacing the text or moving its caret.
+            self.rejected_edit_generation += 1;
         }
-        // Return focus from Stop without replacing the text or moving its caret.
-        self.rejected_edit_generation += 1;
-        true
     }
 
     pub(super) fn apply_reduction(&mut self, reduction: Reduction) {
@@ -189,24 +189,9 @@ impl SessionController {
             if kind.is_transcript_edit() {
                 self.edit.accept();
                 self.recalled_origin = None;
-            }
-            if !matches!(
-                kind,
-                OperationKind::JobContinuation | OperationKind::AuthoritativeJobContinuation
-            ) && let Some(submitted) = self.draft_slot.pending_mut()
-            {
-                if self.draft_generation == submitted.generation
-                    && self.draft == submitted.draft.text
-                    && self.draft_images == submitted.draft.images
-                {
-                    self.draft.clear();
-                    self.draft_images.clear();
-                    self.draft_generation += 1;
-                    // The empty replacement is a separate editor identity. User
-                    // editing and undoing cannot revive this restoration token.
-                    submitted.generation = self.draft_generation;
-                }
-                submitted.accepted = true;
+                self.clear_draft();
+            } else if is_prompt_submission(kind) {
+                self.draft_slot.accept();
             }
         }
         if let Some((kind, settlement)) = reduction.settled
@@ -218,51 +203,29 @@ impl SessionController {
             self.cancelling = false;
             if kind.is_transcript_edit() {
                 self.reject_pending_edit();
-            }
-            if let Some(submitted) = self.draft_slot.take()
-                && settlement.restores_draft()
+            } else if is_prompt_submission(kind)
+                && let Some(submitted) = self.draft_slot.take()
+                && settlement.restores_unaccepted_on_error()
+                && let Some(draft) = self.draft_slot.restore_or_retain(
+                    submitted.draft,
+                    submitted.generation,
+                    self.draft_generation,
+                    self.draft_is_empty(),
+                )
             {
-                if submitted.accepted {
-                    if let Some(draft) = self.draft_slot.restore_or_retain(
-                        submitted.draft,
-                        submitted.generation,
-                        self.draft_generation,
-                        self.draft.is_empty() && self.draft_images.is_empty(),
-                    ) {
-                        self.replace_draft(draft);
-                    }
-                } else if self.draft_generation != submitted.generation
-                    || !self.matches_draft(&submitted.draft)
-                {
-                    // The submitted text and images never left the composer.
-                    // Retain a recovery copy only if the user changed them.
-                    self.draft_slot.retain(submitted.draft);
-                }
+                self.replace_draft(draft);
             }
         }
-        if let Some(mode) = reduction.mode_selection {
-            if matches!(
+        if let Some(mode) = reduction.mode_selection
+            && matches!(
                 mode.result,
                 ModeSelectionResult::Accepted {
                     mode: zevria_foundation::SessionMode::Plan,
                     ..
                 }
-            ) {
-                self.orchestrate = false;
-            }
-            if let Some(submitted) = self.draft_slot.take() {
-                let unchanged = self.draft_generation == submitted.generation
-                    && self.matches_draft(&submitted.draft);
-                match mode.result {
-                    ModeSelectionResult::Accepted { .. } if unchanged => {
-                        self.replace_draft(Default::default());
-                    }
-                    ModeSelectionResult::Rejected { .. } if !unchanged => {
-                        self.draft_slot.retain(submitted.draft)
-                    }
-                    _ => {}
-                }
-            }
+            )
+        {
+            self.orchestrate = false;
         }
     }
 }

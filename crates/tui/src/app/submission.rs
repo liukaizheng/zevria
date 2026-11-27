@@ -113,13 +113,14 @@ impl App {
             | ClassifiedInput::Ensemble { .. }
             | ClassifiedInput::Builtin(SlashCommand::Compact)) => {
                 let mode = self.mcp_mode();
-                let command = match admit_work(
+                let (command, authored) = match admit_work(
                     &mut self.model,
                     work,
                     zevria_foundation::RequestBehavior::Standard,
                     mode,
                 ) {
-                    InputRoute::Command(command) | InputRoute::McpPrompt(command) => *command,
+                    InputRoute::Prompt(command) => (*command, true),
+                    InputRoute::Control(command) => (*command, false),
                     InputRoute::Notice(notice) => {
                         self.push_error(notice);
                         return None;
@@ -127,12 +128,7 @@ impl App {
                     _ => return None,
                 };
                 self.after_admission();
-                if matches!(
-                    &command,
-                    zevria_session_api::SessionCommand::Turn(TurnCommand::Compact { .. })
-                ) {
-                    self.composer.clear();
-                } else {
+                if authored {
                     if matches!(
                         &command,
                         zevria_session_api::SessionCommand::Turn(
@@ -143,6 +139,8 @@ impl App {
                     }
                     self.stage_draft();
                     self.queue.resume();
+                } else {
+                    self.composer.clear();
                 }
                 Some(UiAction::Session(command))
             }

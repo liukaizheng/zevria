@@ -12,7 +12,9 @@ use zevria_session_api::{
     TranscriptEditReplacement, TranscriptEditTarget,
 };
 use zevria_session_api::{JobEvent, ManagementEvent, PlanEvent, TurnEvent};
-use zevria_workflow::{PlanArtifact, PlanDecision, PlanId, PlanVersion, PlanWorkflowState};
+use zevria_workflow::{
+    PlanArtifact, PlanDecision, PlanHandoff, PlanId, PlanVersion, PlanWorkflowState,
+};
 const TURN: TurnId = TurnId::new(7);
 
 fn job_notice(
@@ -593,10 +595,11 @@ fn pending_append_survives_preturn_compaction_until_the_matching_turn_starts() {
     model.reduce(E::Turn(TurnEvent::ModeChanged {
         mode: SessionMode::Build,
     }));
-    model.reduce(E::Turn(TurnEvent::CompactionStarted {
+    let reduced = model.reduce(E::Turn(TurnEvent::CompactionStarted {
         turn_id: TURN,
         trigger,
     }));
+    assert_eq!(reduced.accepted, None);
     model.reduce(E::Turn(TurnEvent::CompactionCompleted {
         turn_id: TURN,
         trigger,
@@ -624,11 +627,12 @@ fn pending_append_survives_preturn_compaction_until_the_matching_turn_starts() {
             .accepted
             .is_none()
     );
-    model.reduce(E::Turn(TurnEvent::Started {
+    let reduced = model.reduce(E::Turn(TurnEvent::Started {
         turn_id: TURN,
         message: Message::user("canonical"),
         mode: SessionMode::Build,
     }));
+    assert_eq!(reduced.accepted, Some(OperationKind::Submit));
     assert!(model.pending_prompt().is_none());
     assert_eq!(model.conversation.turn_starts(false).len(), 1);
     model.reduce(E::Turn(TurnEvent::Failed {
@@ -644,6 +648,74 @@ fn pending_append_survives_preturn_compaction_until_the_matching_turn_starts() {
         panic!("committed prompt retained after failure");
     };
     assert_eq!(committed.blocks[0].primary_copy(), "canonical");
+}
+
+#[test]
+fn manual_compaction_start_reports_acceptance() {
+    let mut model = SessionModel::default();
+    assert!(model.compact().is_some());
+    let reduced = model.reduce(E::Turn(TurnEvent::CompactionStarted {
+        turn_id: TURN,
+        trigger: zevria_model::CompactionTrigger::Manual,
+    }));
+    assert_eq!(reduced.accepted, Some(OperationKind::ManualCompaction));
+    assert!(model.session.is_compacting());
+}
+
+#[test]
+fn stray_manual_compaction_does_not_accept_or_bind_a_pending_mcp_prompt() {
+    let mut model = SessionModel::default();
+    assert!(model.begin_mcp_prompt(SessionMode::Build));
+    assert!(model.pending_prompt().is_none());
+
+    let reduced = model.reduce(E::Turn(TurnEvent::CompactionStarted {
+        turn_id: TurnId::new(TURN.get() + 1),
+        trigger: zevria_model::CompactionTrigger::Manual,
+    }));
+    assert_eq!(reduced.accepted, None);
+    assert_eq!(model.session.cancel_target(), Some(None));
+    assert_eq!(start(&mut model).accepted, Some(OperationKind::Submit));
+}
+
+#[test]
+fn plan_handoff_start_reports_acceptance() {
+    let mut model = SessionModel::default();
+    let artifact = artifact();
+    let expected = artifact.version;
+    model.apply_plan_snapshot(PlanWorkflowState::Ready {
+        artifact: artifact.clone(),
+    });
+    assert!(
+        model
+            .resolve_plan(expected, PlanDecision::ImplementCurrent)
+            .is_some()
+    );
+    let reduced = model.reduce(E::Plan(PlanEvent::HandoffStarted {
+        turn_id: TURN,
+        handoff: Box::new(PlanHandoff::new(artifact, "source")),
+    }));
+    assert_eq!(
+        reduced.accepted,
+        Some(OperationKind::PlanImplementCurrent { expected })
+    );
+}
+
+#[test]
+fn only_rejection_and_failure_recover_unaccepted_prompts() {
+    for settlement in [
+        Settlement::Rejected("stale".into()),
+        Settlement::Failed("offline".into()),
+    ] {
+        assert!(settlement.restores_unaccepted_on_error());
+    }
+    for settlement in [
+        Settlement::Completed,
+        Settlement::Recovered,
+        Settlement::Cancelled,
+    ] {
+        assert!(!settlement.restores_unaccepted_on_error());
+    }
+    assert!(Settlement::Cancelled.restores_draft());
 }
 
 #[test]

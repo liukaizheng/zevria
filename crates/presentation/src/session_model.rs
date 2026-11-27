@@ -60,6 +60,12 @@ impl Settlement {
     pub fn restores_draft(&self) -> bool {
         matches!(self, Self::Rejected(_) | Self::Failed(_) | Self::Cancelled)
     }
+
+    /// Whether an unaccepted prompt should be recovered after an engine error.
+    /// Cancellation deliberately discards the submission instead.
+    pub fn restores_unaccepted_on_error(&self) -> bool {
+        matches!(self, Self::Rejected(_) | Self::Failed(_))
+    }
 }
 #[derive(Debug)]
 pub struct ModeSelectionSettled {
@@ -189,9 +195,11 @@ impl SessionModel {
                     .scope
                     .model_role_override()
                     .unwrap_or_else(|| role_for_mode(self.session.next_mode()));
-                let _ = self
-                    .session
-                    .compaction_started(turn_id, trigger, idle_role);
+                if let Some(transition) = self.session.compaction_started(turn_id, trigger, idle_role)
+                    && trigger == CompactionTrigger::Manual
+                {
+                    effects.accepted = Some(transition.kind);
+                }
             }
             SessionEvent::Turn(TurnEvent::CompactionCompleted {
                 turn_id, trigger, ..
@@ -308,9 +316,10 @@ impl SessionModel {
                 }
             }
             SessionEvent::Plan(PlanEvent::HandoffStarted { turn_id, handoff }) => {
-                if self.session.start_plan_handoff(turn_id).is_none() {
+                let Some(transition) = self.session.start_plan_handoff(turn_id) else {
                     return effects;
-                }
+                };
+                effects.accepted = Some(transition.operation());
                 let turn = self.conversation.allocate_turn();
                 self.session.bind_display_turn(turn);
                 self.conversation.push_plan_handoff(*handoff, turn);
