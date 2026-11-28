@@ -66,6 +66,7 @@ fn start_replacement(
             turn_id: REPLACEMENT,
             mode: SessionMode::Build,
             message: prompt.to_message(),
+            references: Vec::new(),
         }),
         cx,
     );
@@ -195,6 +196,7 @@ fn resend_locks_until_started_and_truncates_projected_rows_on_acceptance(cx: &mu
                 text: "revised work".into(),
                 mode: SessionMode::Build,
                 behavior: RequestBehavior::Orchestrate,
+                references: Vec::new(),
             },
         }
     );
@@ -647,6 +649,7 @@ fn read_only_child_rows_never_offer_edit(cx: &mut TestAppContext) {
                 turn_id: REPLACEMENT,
                 mode: SessionMode::Build,
                 message: Message::user("child prompt"),
+                references: Vec::new(),
             })),
         }),
         cx,

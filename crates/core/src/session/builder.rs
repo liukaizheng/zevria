@@ -103,6 +103,12 @@ impl<P: ModelProvider> SessionEngineBuilder<P> {
         self
     }
 
+    pub fn with_read_only_side_chat(mut self, config: super::SideChatReadOnlyConfig) -> Self {
+        self.engine.side_chat = Some(config);
+        self.engine.incremental_tools = true;
+        self
+    }
+
     pub fn with_incremental_tools(self, enabled: bool) -> Self {
         self.capability(|engine| engine.with_incremental_tools(enabled))
     }

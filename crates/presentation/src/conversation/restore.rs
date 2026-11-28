@@ -112,7 +112,13 @@ impl ConversationState {
     }
 
     /// Rebuild the pane from persisted transcript items.
-    pub fn restore(&mut self, items: Vec<TranscriptItem>) {
+    pub fn restore(&mut self, mut items: Vec<TranscriptItem>) {
+        if let Some(boundary) = items
+            .iter()
+            .position(|item| matches!(item, TranscriptItem::SideChatForkBoundary))
+        {
+            items.drain(..=boundary);
+        }
         let review_projection = zevria_transcript::project_worker_reviews(&items);
         // Started seeds projection state but is not review evidence. Only actual
         // review transitions/seals may supersede outcome-only/ReportsReady data.
@@ -186,6 +192,16 @@ impl ConversationState {
                         last_response = index;
                     } else if matches!(header, Some(NativeHeader::Prompt(_))) {
                         last_response = None;
+                        if let TranscriptItem::RequestPrompt {
+                            references: Some(references),
+                            ..
+                        } = provider
+                            && let Some(index) = index
+                            && let Some(HistoryEntry::Conversation(entry)) =
+                                self.history.get_mut(index)
+                        {
+                            entry.references = references.attachments().to_vec();
+                        }
                     }
                 }
                 TranscriptItem::ToolResults {
@@ -204,6 +220,8 @@ impl ConversationState {
                     }
                 }
                 TranscriptItem::SessionModels(_)
+                | TranscriptItem::SideChatOrigin(_)
+                | TranscriptItem::SideChatForkBoundary
                 | TranscriptItem::SessionMode(_)
                 | TranscriptItem::Directive(_)
                 | TranscriptItem::RequestDirective(_)

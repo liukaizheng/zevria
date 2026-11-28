@@ -616,6 +616,7 @@ async fn root_continues_same_socket_after_isolated_search_with_only_local_result
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "Research the version".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         ),

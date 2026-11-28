@@ -214,6 +214,7 @@ async fn exercise_batch(
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "Inspect both paths concurrently.".into(),
                     mode,
+                    references: Vec::new(),
                 }),
                 &events_tx
             ),

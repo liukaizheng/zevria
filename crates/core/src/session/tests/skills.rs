@@ -983,6 +983,7 @@ async fn repeat_skill_applications_use_the_same_path_without_replacing_pins() {
             behavior: zevria_foundation::RequestBehavior::Standard,
             text: "use the commit skill".into(),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
         SessionCommand::Turn(crate::session::TurnCommand::InvokeSkill {
             name: "review".parse().unwrap(),
@@ -1053,6 +1054,7 @@ async fn tool_and_direct_paths_share_one_activation_per_name() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "activate commit through the tool".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1146,6 +1148,7 @@ async fn engine_admits_valid_names_without_dispatch_and_rejects_malformed_argume
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "try invalid activation".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1215,6 +1218,7 @@ async fn resumed_skill_pin_is_reapplied_by_stateless_dispatch() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "load the commit skill".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1335,6 +1339,7 @@ async fn oversized_tool_activation_fails_without_mutating_typed_state() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "try a large tool activation".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )

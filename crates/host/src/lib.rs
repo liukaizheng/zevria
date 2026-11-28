@@ -12,8 +12,10 @@ mod session_lease;
 mod session_models;
 pub mod sessions;
 mod settings;
+mod side_chats;
 pub mod skills;
 mod subtasks;
+pub use side_chats::RestoredSideChat;
 pub mod theme_store;
 
 pub use config::Config;

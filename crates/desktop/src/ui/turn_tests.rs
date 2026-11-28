@@ -199,6 +199,7 @@ fn seed_disclosure_rows(controller: &Entity<SessionController>, cx: &mut TestApp
         turn_id,
         mode: SessionMode::Build,
         message: Message::user("Check the worktree and documentation"),
+        references: Vec::new(),
     }));
     emit(E::Turn(TurnEvent::ModelCallStarted { turn_id, call: 1 }));
     emit(E::Turn(TurnEvent::Intermediate {
@@ -452,6 +453,7 @@ fn begin_command_turn(controller: &Entity<SessionController>, cx: &mut TestAppCo
             turn_id,
             mode: SessionMode::Build,
             message: Message::user("Check the worktree"),
+            references: Vec::new(),
         }),
         cx,
     );

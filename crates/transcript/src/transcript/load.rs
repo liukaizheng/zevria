@@ -31,7 +31,7 @@ pub struct TranscriptDiagnostic {
 
 /// Validated projection of a current transcript, including recoverable tail
 /// diagnostics. Unsupported histories return an error instead of a projection.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TranscriptLoadOutcome {
     pub(super) path: PathBuf,
     pub(super) items: Vec<TranscriptItem>,
@@ -107,6 +107,40 @@ pub fn load(path: &Path) -> anyhow::Result<Vec<TranscriptItem>> {
     let outcome = load_report(path)?;
     outcome.ensure_resumable()?;
     Ok(outcome.items)
+}
+
+/// Read exactly the committed logical prefix, without decoding any following
+/// physical lines (which may still be in flight).
+pub fn load_prefix_items(
+    path: &Path,
+    exact_item_count: usize,
+) -> anyhow::Result<Vec<TranscriptItem>> {
+    if exact_item_count == 0 {
+        return Ok(Vec::new());
+    }
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut line = Vec::new();
+    let mut items = Vec::new();
+    let mut line_number = 0;
+    while items.len() < exact_item_count && read_record_line(&mut reader, &mut line)? {
+        line_number += 1;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        match serde_json::from_slice::<TranscriptLine>(&line)
+            .map_err(|error| UnsupportedHistory::decoding(path, line_number, &error))?
+        {
+            TranscriptLine::Item(item) => items.push(item),
+            TranscriptLine::Batch { records, .. } => {
+                items.extend(records.into_iter().take(exact_item_count - items.len()));
+            }
+        }
+    }
+    anyhow::ensure!(
+        items.len() == exact_item_count,
+        "parent transcript prefix changed during fork"
+    );
+    Ok(items)
 }
 
 pub fn load_report(path: &Path) -> anyhow::Result<TranscriptLoadOutcome> {

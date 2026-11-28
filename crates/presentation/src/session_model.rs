@@ -33,6 +33,10 @@ use zevria_workflow::{
 pub enum PaneScope {
     #[default]
     Root,
+    SideChat {
+        id: zevria_foundation::SideChatId,
+        role: ModelRole,
+    },
     Inspect {
         role: Option<ModelRole>,
     },
@@ -44,6 +48,7 @@ impl PaneScope {
     pub const fn model_role_override(self) -> Option<ModelRole> {
         match self {
             Self::Root => None,
+            Self::SideChat { role, .. } => Some(role),
             Self::Inspect { role } => role,
         }
     }
@@ -217,6 +222,7 @@ impl SessionModel {
                 turn_id,
                 message,
                 mode,
+                references,
             }) => {
                 let role = self
                     .scope
@@ -232,7 +238,7 @@ impl SessionModel {
                 let turn = self.conversation.allocate_turn();
                 self.session.bind_display_turn(turn);
                 let index = self.conversation.history().len();
-                self.conversation.push_user_turn(message, turn);
+                self.conversation.push_referenced_user_turn(message, turn, references);
                 if start.operation() == OperationKind::Submit
                     && let Some(preview) = self.pending_prompt.take()
                 {
@@ -422,7 +428,8 @@ impl SessionModel {
                 self.session
                     .settle_fresh_handoff_request(handoff.artifact.version);
             }
-            SessionEvent::Subtask(SubtaskEvent::Session { .. })
+            SessionEvent::SideChat(_)
+            | SessionEvent::Subtask(SubtaskEvent::Session { .. })
             | SessionEvent::Question(QuestionEvent::Asked { .. })
             | SessionEvent::Question(QuestionEvent::Closed { .. }) => {}
             SessionEvent::Turn(TurnEvent::Completed { turn_id, message, attempt_id }) => {
@@ -761,7 +768,10 @@ impl SessionModel {
         mode: SessionMode,
         role: ModelRole,
     ) -> bool {
-        if self.scope.is_root() && self.session.begin_operation(kind, mode, role) {
+        if (self.scope.is_root()
+            || matches!(self.scope, PaneScope::SideChat { .. }) && kind == OperationKind::Submit)
+            && self.session.begin_operation(kind, mode, role)
+        {
             // Management can leave eligibility unchanged (and hence produce no
             // new advertisement). Only turn dispatch consumes the local offer.
             if !kind.is_management() {
@@ -773,7 +783,7 @@ impl SessionModel {
         }
     }
     fn admits_work(&self) -> bool {
-        self.scope.is_root()
+        (self.scope.is_root() || matches!(self.scope, PaneScope::SideChat { .. }))
             && !self.is_busy()
             && !matches!(self.workflow.snapshot(), PlanWorkflowState::Ready { .. })
     }
@@ -824,6 +834,7 @@ impl SessionModel {
             text,
             mode,
             behavior,
+            references: Vec::new(),
         })
     }
     fn stage_prompt(&mut self, prompt: &UserPrompt, mode: SessionMode) -> Option<()> {
@@ -837,6 +848,14 @@ impl SessionModel {
     }
     pub fn pending_prompt(&self) -> Option<&PromptPreview> {
         self.pending_prompt.as_ref()
+    }
+    pub(crate) fn set_pending_prompt_references(
+        &mut self,
+        references: &[zevria_foundation::SideChatReferenceAttachment],
+    ) {
+        if let Some(preview) = &mut self.pending_prompt {
+            preview.references = references.to_vec();
+        }
     }
     pub fn accepted_prompt_paint(&self) -> Option<(usize, &PromptPaint)> {
         let (index, id, paint) = self.accepted_prompt_paint.as_ref()?;
@@ -977,6 +996,19 @@ impl SessionModel {
             result,
         })
     }
+    /// Settle a stopped side actor without adding an unpersisted transcript row.
+    pub fn stop_side_turn(&mut self) {
+        if !matches!(self.scope, PaneScope::SideChat { .. }) {
+            return;
+        }
+        if self
+            .finish_turn(self.active_turn_id().unwrap_or(TurnId::new(0)))
+            .is_some()
+        {
+            self.conversation.interrupt_executing_tool_calls();
+        }
+    }
+
     pub fn disconnected(&mut self) -> Reduction {
         self.jobs.disconnect();
         if let Some((id, _)) = self.session.mode_selection() {

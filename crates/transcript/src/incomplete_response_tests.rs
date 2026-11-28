@@ -241,6 +241,7 @@ fn request_replay_is_inert_but_recovery_cannot_split_prompt_and_boundary() {
     let prompt = TranscriptItem::RequestPrompt {
         message: Message::user("prompt"),
         request: request.clone(),
+        references: None,
     };
     let boundary =
         TranscriptItem::RequestDirective(Box::new(RequestDirective::boundary(request.clone())));

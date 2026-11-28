@@ -81,6 +81,108 @@ async fn web_search_batch_bounds_concurrency_and_keeps_assistant_call_order() {
     }
 }
 
+#[tokio::test]
+async fn side_chat_denies_inherited_privileged_tools_and_background_commands() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let tools = ToolServer::new()
+        .tool(CommandTestTool {
+            calls: calls.clone(),
+        })
+        .tool(WriteTestTool {
+            calls: calls.clone(),
+        })
+        .run();
+    let (_directory, transcript) = test_transcript();
+    let mut engine = SessionEngine::new(
+        ScriptedProvider::new([]),
+        tools,
+        test_policies(),
+        transcript,
+        Arc::new(SkillCatalog::default()),
+    )
+    .unwrap();
+    engine.side_chat = Some(SideChatReadOnlyConfig {
+        quoted_excerpt: None,
+        skills_enabled: false,
+        mode: SessionMode::Build,
+        instructions: Arc::from("Frozen Build instructions"),
+        frozen_tools: Arc::default(),
+        mcp_tools: None,
+        mcp: None,
+    });
+    let turn = TurnContext::new(TurnId::new(1), SessionMode::Build, CancellationToken::new());
+    let gate = PlanSubmissionGate::inert(None);
+    let scope = ToolExecutionScope::new(
+        &engine,
+        SessionMode::Build,
+        engine.policies.policy(SessionMode::Build),
+        &turn,
+        &gate,
+    );
+    let mut attempts = vec![
+        (
+            "command",
+            json!({"value": "foreground"}),
+            ToolCallOutcome::Success,
+        ),
+        (
+            "command",
+            json!({"value": "explicit foreground", "background": false}),
+            ToolCallOutcome::Success,
+        ),
+        (
+            "command",
+            json!({"value": "blocked", "background": true}),
+            ToolCallOutcome::Denied,
+        ),
+        (
+            "command",
+            json!({"value": "malformed", "background": "true"}),
+            ToolCallOutcome::Denied,
+        ),
+    ];
+    attempts.extend(
+        [
+            "write",
+            "edit",
+            "delete",
+            "task",
+            "create_plan",
+            "update_plan",
+            "read_plan",
+            "submit_plan",
+            "launch_subtasks",
+            "question",
+            "skill",
+            "skill_read",
+            "command_status",
+            "command_terminate",
+        ]
+        .map(|name| (name, json!({"value": "blocked"}), ToolCallOutcome::Denied)),
+    );
+    let tool_calls = attempts
+        .iter()
+        .enumerate()
+        .map(|(index, (name, args, _))| {
+            let AssistantContent::ToolCall(call) =
+                named_tool_call(&format!("side-{index}"), name, args.clone())
+            else {
+                unreachable!()
+            };
+            call
+        })
+        .collect::<Vec<_>>();
+    let batch = execute_tool_calls(&scope, &tool_calls, ActiveSkills::default(), &gate).await;
+    assert_eq!(batch.metadata.len(), attempts.len());
+    for (result, (name, _, expected)) in batch.metadata.iter().zip(attempts) {
+        assert_eq!(result.outcome, expected, "{name}: {:?}", result.diagnostic);
+    }
+    assert_eq!(
+        *calls.lock().unwrap(),
+        ["foreground", "explicit foreground"]
+    );
+}
+
 fn image_result_content() -> Vec<ToolResultContent> {
     vec![
         ToolResultContent::text("image summary"),
@@ -145,6 +247,7 @@ async fn image_tool_results_persist_reload_and_reach_the_next_provider_request()
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "look at the image".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -815,6 +918,7 @@ async fn one_batch_activates_each_distinct_skill_once() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "activate both".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -881,6 +985,7 @@ async fn mixed_batches_return_ordinary_and_subtask_results_together() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "run the batch".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -993,6 +1098,7 @@ async fn parallel_launches_in_one_batch_run_concurrently() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "explore both".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )

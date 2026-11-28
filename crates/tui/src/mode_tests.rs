@@ -58,6 +58,7 @@ fn orchestration_completion_retains_draft_and_recall_preserves_explicit_behavior
         TranscriptItem::RequestPrompt {
             message: Message::user("implement independent parts"),
             request: request.clone(),
+            references: None,
         },
         TranscriptItem::RequestDirective(Box::new(
             zevria_instructions::RequestDirective::boundary(request),
@@ -107,6 +108,7 @@ fn literal_recall_and_removed_orchestration_prefix_are_standard_requests() {
             TranscriptItem::RequestPrompt {
                 message: Message::user(literal),
                 request: request.clone(),
+                references: None,
             },
             TranscriptItem::RequestDirective(Box::new(
                 zevria_instructions::RequestDirective::boundary(request),
@@ -125,6 +127,7 @@ fn literal_recall_and_removed_orchestration_prefix_are_standard_requests() {
         TranscriptItem::RequestPrompt {
             message: Message::user("independent work"),
             request: request.clone(),
+            references: None,
         },
         TranscriptItem::RequestDirective(Box::new(
             zevria_instructions::RequestDirective::boundary(request),
@@ -194,6 +197,7 @@ fn pending_mode_selection_locks_input_management_and_unrelated_turn_events() {
             turn_id: TEST_TURN_ID,
             mode: SessionMode::Plan,
             message: Message::user("stale turn"),
+            references: Vec::new(),
         }),
         SessionEvent::Turn(TurnEvent::CompactionStarted {
             turn_id: TEST_TURN_ID,
@@ -760,7 +764,8 @@ fn orchestrate_uses_build_role_styling_and_hints_even_on_narrow_terminals() {
             zevria_session_api::TurnCommand::Submit {
                 behavior: zevria_foundation::RequestBehavior::Orchestrate,
                 text: "draft".into(),
-                mode: SessionMode::Build
+                mode: SessionMode::Build,
+                references: Vec::new(),
             }
         )))
     );

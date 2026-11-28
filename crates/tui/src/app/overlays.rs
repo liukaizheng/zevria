@@ -19,6 +19,7 @@ pub(crate) enum Overlay {
     Jobs,
     Mcp,
     Subtasks,
+    SideChats(crate::side_chats::SideChatsOverlay),
     Question(QuestionDialog),
     Help(HelpOverlay),
 }
@@ -31,6 +32,7 @@ impl Overlay {
             Self::Jobs => SurfaceKind::Jobs,
             Self::Mcp => SurfaceKind::Mcp,
             Self::Subtasks => SurfaceKind::Subtasks,
+            Self::SideChats(_) => SurfaceKind::SideChats,
             Self::Question(_) => SurfaceKind::Question,
             Self::Help(_) => SurfaceKind::Help,
         }
@@ -78,6 +80,24 @@ impl OverlayController {
     pub(crate) fn show_subtasks(&mut self, rows: Vec<SubtaskRow>) {
         self.subtasks.show(rows);
         self.replace(Overlay::Subtasks);
+    }
+    pub(crate) fn show_side_chats(&mut self, rows: Vec<zevria_foundation::SideChatDescriptor>) {
+        self.replace(Overlay::SideChats(
+            crate::side_chats::SideChatsOverlay::new(rows),
+        ));
+    }
+    pub(crate) fn update_side_chats(&mut self, rows: Vec<zevria_foundation::SideChatDescriptor>) {
+        if let Some(Overlay::SideChats(side)) = self
+            .stack
+            .iter_mut()
+            .find(|entry| matches!(entry, Overlay::SideChats(_)))
+        {
+            side.replace_rows(rows);
+        }
+    }
+    pub(crate) fn close_side_chats(&mut self) {
+        self.stack
+            .retain(|entry| !matches!(entry, Overlay::SideChats(_)));
     }
     pub(crate) fn show_mcp(&mut self) {
         self.mcp.show();
@@ -144,6 +164,7 @@ impl OverlayController {
         for entry in &mut self.stack {
             match entry {
                 Overlay::Picker(picker) => picker.invalidate_geometry(),
+                Overlay::SideChats(side) => side.invalidate_geometry(),
                 Overlay::Question(question) => question.invalidate_geometry(),
                 Overlay::Help(help) => help.invalidate_geometry(),
                 _ => {}
@@ -167,6 +188,7 @@ impl OverlayController {
             };
             match entry {
                 Overlay::Picker(picker) => picker.render(frame, bounds),
+                Overlay::SideChats(side) => side.render(frame, bounds),
                 Overlay::Models => self.models.render(frame, bounds),
                 Overlay::Skills => self.skills.render(frame, bounds),
                 Overlay::Jobs => self.jobs.render(jobs, frame, bounds),
@@ -196,6 +218,7 @@ impl OverlayController {
             Overlay::Jobs => self.jobs.context(jobs),
             Overlay::Mcp => KeyContext::OverlayList,
             Overlay::Subtasks => KeyContext::SubtasksList,
+            Overlay::SideChats(_) => KeyContext::SideChatsList,
             Overlay::Question(question) => question.context(),
             Overlay::Picker(_) => KeyContext::OverlayList,
             Overlay::Help(_) => KeyContext::Help,
@@ -210,6 +233,7 @@ impl OverlayController {
                 Overlay::Skills => self.skills.hint_eligibility(),
                 Overlay::Jobs => self.jobs.hint_eligibility(jobs),
                 Overlay::Subtasks => self.subtasks.hint_eligibility(),
+                Overlay::SideChats(side) => side.hint_eligibility(),
                 Overlay::Picker(picker) => picker.hint_eligibility(),
                 Overlay::Help(_) | Overlay::Mcp => unreachable!("help is not opened here"),
             };
@@ -282,6 +306,14 @@ impl OverlayController {
                 close = !self.subtasks.is_open();
                 action
             }
+            Overlay::SideChats(side) => match input {
+                UserInput::Key(key) => {
+                    let (closed, action) = side.handle_key(key);
+                    close = closed;
+                    action
+                }
+                UserInput::Paste(_) => None,
+            },
             Overlay::Skills => {
                 match input {
                     UserInput::Key(key) => self.skills.handle_input(key),

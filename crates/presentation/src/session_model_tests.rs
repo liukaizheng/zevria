@@ -280,6 +280,7 @@ fn start(model: &mut SessionModel) -> crate::Reduction {
         turn_id: TURN,
         message: Message::user("hello"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }))
 }
 fn artifact() -> PlanArtifact {
@@ -450,6 +451,7 @@ fn hidden_ready_admits_only_direct_versioned_revision_feedback() {
                         text: "edit".into(),
                         mode: SessionMode::Plan,
                         behavior: RequestBehavior::Standard,
+                        references: Vec::new(),
                     },
                 },
                 0
@@ -554,6 +556,7 @@ fn hidden_ready_revision_uses_prompt_operations_without_restoring_review() {
                     turn_id: TURN,
                     message: Message::user("feedback"),
                     mode: SessionMode::Plan,
+                    references: Vec::new(),
                 }));
                 assert_eq!(reduction.accepted, Some(kind));
                 model.reduce(E::Plan(PlanEvent::StateChanged {
@@ -622,7 +625,8 @@ fn pending_append_survives_preturn_compaction_until_the_matching_turn_starts() {
             .reduce(E::Turn(TurnEvent::Started {
                 turn_id: stale,
                 message: Message::user("wrong"),
-                mode: SessionMode::Build
+                mode: SessionMode::Build,
+                references: Vec::new(),
             }))
             .accepted
             .is_none()
@@ -631,6 +635,7 @@ fn pending_append_survives_preturn_compaction_until_the_matching_turn_starts() {
         turn_id: TURN,
         message: Message::user("canonical"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     assert_eq!(reduced.accepted, Some(OperationKind::Submit));
     assert!(model.pending_prompt().is_none());
@@ -750,6 +755,7 @@ fn identical_submits_have_distinct_previews_and_commit_once_each() {
                 turn_id,
                 message: prompt.to_message(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }));
         }
         assert!(model.pending_prompt().is_none());
@@ -780,6 +786,7 @@ fn accepted_edit_replaces_tail_before_appending_the_new_prompt() {
                     text: "hello".into(),
                     mode: SessionMode::Build,
                     behavior: RequestBehavior::Standard,
+                    references: Vec::new(),
                 },
             },
             0,

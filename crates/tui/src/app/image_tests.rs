@@ -631,6 +631,7 @@ fn image_only_submit_rejection_restores_complete_attempt_and_acceptance_discards
             behavior: _,
             text,
             mode,
+            ..
         },
     ))) = app.handle_event(Event::Key(KeyEvent::new(
         KeyCode::Enter,
@@ -645,6 +646,7 @@ fn image_only_submit_rejection_restores_complete_attempt_and_acceptance_discards
         turn_id: TurnId::new(2),
         message: text.to_message(),
         mode,
+        references: Vec::new(),
     }));
     app.reduce(SessionEvent::Turn(TurnEvent::Failed {
         turn_id: TurnId::new(2),

@@ -20,6 +20,7 @@ async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
     let active_skills = zevria_transcript::replay_active_skills(&items).unwrap();
     let pin_allocation = active_skills.snapshots().next().unwrap().body().as_ptr();
     let running = RunningSession {
+        side_chats: None,
         mcp: None,
         command_jobs: None,
         cleanup_abandoned_history: true,
@@ -38,6 +39,7 @@ async fn restoration_moves_heavy_data_once_and_retains_cleanup_identity() {
     let started = StartedSession {
         running,
         restored: RestoredSession {
+            side_chats: Vec::new(),
             mcp_prompts: vec![],
             model_contexts: crate::config::test_config().routing().context_policies(),
             reasoning_levels: [zevria_foundation::ReasoningLevel::Medium; ModelRole::COUNT],

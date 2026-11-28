@@ -14,7 +14,9 @@ use zevria_session_api::provider::ModelProvider;
 use zevria_session_api::question::QuestionResponder;
 use zevria_session_api::turn::TurnContext;
 use zevria_session_api::worker::WorkerControlRouter;
-use zevria_session_api::{EnsembleEvent, JobEvent, ManagementEvent};
+use zevria_session_api::{
+    EnsembleEvent, JobEvent, ManagementEvent, SideChatCommand, SideChatEvent,
+};
 use zevria_transcript::SessionReplayError;
 use zevria_workflow::ensemble::latest_ensemble_recovery;
 use zevria_workflow::ensemble_review::WorkerControlResult;
@@ -35,6 +37,7 @@ enum ActiveWork {
 
 struct ActiveWorkControl {
     work: ActiveWork,
+    side_chat_tx: Option<mpsc::UnboundedSender<SideChatCommand>>,
     question_responder: Option<QuestionResponder>,
     worker_controls: WorkerControlRouter,
     command_jobs: Option<zevria_session_api::CommandJobs>,
@@ -126,7 +129,8 @@ impl<P: ModelProvider> SessionEngine<P> {
 
     fn restored_work(&self) -> VecDeque<TurnWork> {
         let mut pending = VecDeque::new();
-        if !self.conversation.is_read_only()
+        if self.side_chat.is_none()
+            && !self.conversation.is_read_only()
             && let Some(recovery) =
                 latest_ensemble_recovery(self.conversation.items().iter().filter_map(|item| {
                     match item.ensemble_record() {
@@ -156,6 +160,9 @@ impl<P: ModelProvider> SessionEngine<P> {
         events: &SessionEventSender,
     ) -> Result<RunControl, SessionReplayError> {
         self.ensure_replay_valid()?;
+        if self.side_chat.is_some() && matches!(command, SessionCommand::Manage(_)) {
+            return Ok(RunControl::Continue);
+        }
         let (action, reply) = self.route_idle_command(command, false);
         if let Some(reply) = reply {
             let _ = events.send(reply).await;
@@ -191,6 +198,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             }) => {
                 let cancellation = CancellationToken::new();
                 let control = ActiveWorkControl {
+                    side_chat_tx: self.capabilities.side_chat_tx.clone(),
                     work: ActiveWork::Maintenance {
                         request_id: request_id.clone(),
                         cancellation: cancellation.clone(),
@@ -217,6 +225,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                     return Ok(RunControl::Continue);
                 }
                 let control = ActiveWorkControl {
+                    side_chat_tx: self.capabilities.side_chat_tx.clone(),
                     work: ActiveWork::Maintenance {
                         request_id: request_id.clone(),
                         cancellation: cancellation.clone(),
@@ -276,6 +285,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             return Ok(RunControl::Continue);
         }
         let control = ActiveWorkControl {
+            side_chat_tx: self.capabilities.side_chat_tx.clone(),
             work: ActiveWork::Turn(turn.clone()),
             question_responder: self.capabilities.question_responder.clone(),
             worker_controls: self.capabilities.worker_controls.clone(),
@@ -387,6 +397,7 @@ impl ActiveWorkControl {
         pending: &mut VecDeque<TurnWork>,
     ) -> (RunControl, Option<SessionEvent>) {
         let (action, reply) = CommandRouter {
+            side_chat_tx: self.side_chat_tx.as_ref(),
             active: Some(self),
             question_responder: self.question_responder.as_ref(),
             worker_controls: &self.worker_controls,
@@ -418,6 +429,7 @@ pub(in crate::session) enum CommandAction {
 }
 
 struct CommandRouter<'a> {
+    side_chat_tx: Option<&'a mpsc::UnboundedSender<SideChatCommand>>,
     active: Option<&'a ActiveWorkControl>,
     question_responder: Option<&'a QuestionResponder>,
     worker_controls: &'a WorkerControlRouter,
@@ -445,6 +457,29 @@ impl CommandRouter<'_> {
         let mut reply = None;
         match incoming {
             Some(SessionCommand::Turn(command)) => return (CommandAction::Queue(command), None),
+            Some(SessionCommand::Control(ControlCommand::SideChat(command))) => {
+                let failed = match self.side_chat_tx {
+                    Some(tx) => tx.send(command).err().map(|error| error.0),
+                    None => Some(command),
+                };
+                let unavailable = "Side Chat is unavailable for this session";
+                reply = match failed {
+                    Some(SideChatCommand::Create { request_id, .. }) => {
+                        Some(SideChatEvent::CreateFailed {
+                            request_id,
+                            error: unavailable.into(),
+                        })
+                    }
+                    Some(SideChatCommand::Submit { id, .. }) => {
+                        Some(SideChatEvent::SubmitRejected {
+                            id,
+                            error: unavailable.into(),
+                        })
+                    }
+                    _ => None,
+                }
+                .map(SessionEvent::SideChat);
+            }
             Some(SessionCommand::Control(ControlCommand::Command(control))) => {
                 reply = Some(command_control_reply(self.command_jobs, control));
             }
@@ -572,6 +607,7 @@ impl<P: ModelProvider> SessionEngine<P> {
     ) -> (CommandAction, Option<SessionEvent>) {
         CommandRouter {
             active: None,
+            side_chat_tx: self.capabilities.side_chat_tx.as_ref(),
             question_responder: self.capabilities.question_responder.as_ref(),
             worker_controls: &self.capabilities.worker_controls,
             command_jobs: self.capabilities.command_jobs.as_ref(),

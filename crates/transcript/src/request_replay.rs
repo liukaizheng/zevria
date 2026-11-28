@@ -33,6 +33,10 @@ impl RequestReplayState {
         !self.seen.is_empty()
     }
 
+    pub(crate) fn is_complete(&self) -> bool {
+        self.expected.is_none()
+    }
+
     pub(crate) fn validate_complete(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.expected.is_none(),
@@ -82,7 +86,7 @@ impl RequestReplayState {
                         } else {
                             anyhow::ensure!(
                                 directive.request.behavior == RequestBehavior::Standard,
-                                "orchestration requires typed intent on the owning user prompt"
+                                "non-standard behavior requires typed intent on the owning user prompt"
                             );
                         }
                         anyhow::ensure!(
@@ -112,10 +116,18 @@ impl RequestReplayState {
                 if self.boundary_allowed {
                     self.current = None;
                     self.corrected = false;
-                    if let TranscriptItem::RequestPrompt { message, request } = item {
+                    if let TranscriptItem::RequestPrompt {
+                        message,
+                        request,
+                        references,
+                    } = item
+                    {
                         if !decoded {
                             zevria_content::UserPrompt::from_message(message)?;
                             request.validate()?;
+                            if let Some(references) = references {
+                                references.validate_projection(message)?;
+                            }
                         }
                         self.expected = Some(request.clone());
                     }

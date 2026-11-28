@@ -1254,6 +1254,7 @@ impl std::fmt::Display for NativeHeader {
 pub struct ConversationEntry {
     pub header: Option<NativeHeader>,
     pub blocks: Vec<PresentationBlock>,
+    pub references: Vec<zevria_foundation::SideChatReferenceAttachment>,
 }
 
 /// Provider-call identity retained only for native tool-result correlation.

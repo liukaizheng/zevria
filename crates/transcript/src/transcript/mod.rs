@@ -21,7 +21,7 @@ pub use item::{
 };
 pub use load::{
     HistoryFailure, TranscriptDamage, TranscriptDiagnostic, TranscriptLoadOutcome,
-    UnsupportedHistory, load, load_report,
+    UnsupportedHistory, load, load_prefix_items, load_report,
 };
 pub use projection::{
     is_compaction_prompt_item, is_conversation_item, is_prompt_item,
@@ -30,7 +30,8 @@ pub use projection::{
 };
 pub use sessions::{
     SessionSummary, find_session_file, is_abandoned_root, latest_session_file, list_sessions,
-    pick_session_id, plans_dir, sessions_dir, subsession_files, subsessions_dir,
+    pick_session_id, plans_dir, sessions_dir, side_chat_files, side_chats_dir, subsession_files,
+    subsessions_dir,
 };
 pub use writer::TranscriptWriter;
 

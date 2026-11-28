@@ -11,6 +11,7 @@ mod mode;
 pub(crate) mod overlays;
 mod pane;
 mod queue;
+pub(crate) mod text_select;
 pub(crate) use queue::QueueView;
 use queue::{FollowUpQueue, MAX_QUEUED_FOLLOW_UPS, QueuePause, QueuedFollowUp, QueuedWork};
 mod render_state;
@@ -106,6 +107,19 @@ pub enum UiAction {
     Copy {
         text: String,
     },
+    OpenSideChat {
+        prompt: Option<zevria_content::UserPrompt>,
+        excerpt: Option<String>,
+    },
+    ReadSideChatExcerpt,
+    NewSideChat,
+    OpenSidePane {
+        id: zevria_foundation::SideChatId,
+    },
+    InsertSideReference {
+        id: zevria_foundation::SideChatId,
+    },
+    InsertSideQuote,
     OpenSubtask {
         id: SubtaskId,
     },
@@ -137,12 +151,17 @@ pub struct App {
     fold_structure: Option<(zevria_presentation::blocks::ProjectionEpoch, u64)>,
     composer: ComposerState,
     interaction: InteractionState,
+    text_selection: Option<text_select::VimTextSelection>,
     edit: EditState,
     pane: PaneState,
     worker: worker_review::WorkerReviewUiState,
     drafts: draft_submission::DraftSubmissions,
     queue: FollowUpQueue,
     active_subtasks: usize,
+    side_chat_count: usize,
+    side_excerpt: Option<String>,
+    side_error: Option<String>,
+    side_starting: bool,
     mode_command_draft: Option<(crate::composer::ComposerDraft, u64)>,
     pane_id: crate::input::PaneId,
     view: ViewState,
@@ -164,6 +183,129 @@ impl App {
 
     pub(crate) fn set_active_subtasks(&mut self, active: usize) {
         self.active_subtasks = active;
+    }
+
+    pub(crate) fn from_side_chat(
+        side: zevria_presentation::side_chats::SideChatPane,
+        insert: bool,
+    ) -> Self {
+        let role = side.model.scope().model_role_override().expect("side role");
+        let label = format!(
+            "{}  |  Side Chat {}  |  Read-only",
+            side.descriptor.title, side.descriptor.short_id
+        );
+        let mut app = Self {
+            model: side.model,
+            pane: PaneState::side_chat(label, role),
+            side_excerpt: side.quoted_excerpt,
+            side_starting: side.awaiting_initial_turn,
+            ..Self::default()
+        };
+        if insert {
+            app.interaction.enter_insert();
+        }
+        app.composer.disable_commands();
+        app
+    }
+
+    pub(crate) fn set_side_chat_count(&mut self, count: usize) {
+        self.side_chat_count = count;
+    }
+    pub(crate) fn side_chat_started_or_settled(&mut self) {
+        self.side_starting = false;
+        self.side_error = None;
+    }
+    pub(crate) fn stop_side_with_error(&mut self, error: String) {
+        self.side_starting = false;
+        self.model.stop_side_turn();
+        self.restore_rejected_draft();
+        self.side_error = Some(error);
+    }
+    pub(crate) fn clear_text_selection(&mut self) {
+        self.text_selection = None;
+    }
+    pub(crate) fn has_pending_text_find(&self) -> bool {
+        self.text_selection
+            .as_ref()
+            .is_some_and(|selection| selection.awaiting_find())
+    }
+
+    pub(crate) fn side_model(&self) -> &SessionModel {
+        &self.model
+    }
+
+    pub(crate) fn key_context(&self, surface: Surface) -> crate::input::KeyContext {
+        let context = surface.context();
+        if matches!(self.model.scope(), PaneScope::SideChat { .. }) {
+            context.in_side_chat()
+        } else {
+            context
+        }
+    }
+
+    pub(crate) fn side_reference_query(&self) -> Option<(&str, std::ops::Range<usize>)> {
+        self.composer_editable()
+            .then(|| {
+                zevria_presentation::side_chats::side_chat_query(
+                    self.composer.text(),
+                    self.composer.cursor(),
+                )
+            })
+            .flatten()
+    }
+
+    pub(crate) fn complete_side_reference(&mut self, token: &str) {
+        if let Some((_, range)) = self.side_reference_query() {
+            self.composer
+                .accept_external_completion(range, &format!("{token} "));
+            self.view.invalidate_rendered_geometry();
+        }
+    }
+
+    pub(crate) fn insert_side_quote(&mut self, text: &str) {
+        if !self.can_edit_draft() {
+            return;
+        }
+        self.clear_text_selection();
+        if text.starts_with("> Side Chat:") && !self.composer.is_blank() {
+            self.composer.insert_text("\n\n");
+        }
+        self.composer.insert_text(text);
+        self.interaction.enter_insert();
+        self.view.invalidate_rendered_geometry();
+    }
+
+    pub(crate) fn in_insert(&self) -> bool {
+        self.interaction.is_insert()
+    }
+
+    pub(crate) fn excerpt_for_side_chat(&self) -> Option<String> {
+        if !self.interaction.is_selecting() {
+            return None;
+        }
+        if let Some(selection) = &self.text_selection {
+            let excerpt = selection.excerpt();
+            let bounded = zevria_foundation::bound_side_chat_text(
+                &excerpt,
+                zevria_foundation::SIDE_CHAT_EXCERPT_BYTES,
+            );
+            return (!bounded.is_empty()).then(|| bounded.to_owned());
+        }
+        let selection = self.interaction.selection()?;
+        let diagnostics = self.pane.diagnostics_visible();
+        let history = &self.model.conversation;
+        let text = if self.interaction.selection_scope()? == SelectionScope::Message {
+            history.selected_message_text(selection.history_index, diagnostics)
+        } else {
+            history
+                .selected_plain_text(selection)
+                .or_else(|| history.selected_tool_output(selection))
+        }?;
+        let text = zevria_foundation::bound_side_chat_text(
+            &text,
+            zevria_foundation::SIDE_CHAT_EXCERPT_BYTES,
+        );
+        (!text.is_empty()).then(|| text.to_owned())
     }
 
     pub(crate) fn subtask_inspect(title: impl Into<String>) -> Self {
@@ -498,6 +640,7 @@ impl App {
     }
 
     fn reset_frontend(&mut self) {
+        self.clear_text_selection();
         self.drafts = Default::default();
         self.queue = Default::default();
         self.mode_command_draft = None;
@@ -584,7 +727,7 @@ impl App {
     }
 
     pub(crate) const fn is_busy(&self) -> bool {
-        self.model.session.is_busy()
+        self.side_starting || self.model.session.is_busy()
     }
 
     pub(crate) const fn active_turn_id(&self) -> Option<TurnId> {
@@ -608,7 +751,7 @@ impl App {
     }
 
     fn work_pending(&self) -> bool {
-        self.model.session.is_busy() || self.worker_busy()
+        self.side_starting || self.model.session.is_busy() || self.worker_busy()
     }
 
     pub(crate) fn capabilities(&self) -> crate::input::Capabilities {
@@ -707,7 +850,7 @@ impl App {
     }
 
     fn composer_editable(&self) -> bool {
-        self.interaction.is_insert()
+        self.in_insert()
             && self.can_edit_draft()
             && !self.interaction.is_selecting()
             && self.model.workflow.dialog().is_none()
@@ -737,6 +880,11 @@ impl App {
         let mut hints = crate::hints::Eligibility::default();
         let job = self.selected_command_job();
         for (available, action) in [
+            (self.pane.is_root(), Action::AskInSideChat),
+            (
+                matches!(self.model.scope(), PaneScope::SideChat { .. }),
+                Action::InsertToMain,
+            ),
             (
                 self.can_submit_work()
                     || self.capabilities().queue_work.is_ok()
@@ -747,6 +895,8 @@ impl App {
             (
                 self.model.workflow.dialog().is_some()
                     || self.pane.is_worker()
+                    || (matches!(self.model.scope(), PaneScope::SideChat { .. })
+                        && self.work_pending())
                     || (matches!(
                         self.surface().id.kind,
                         SurfaceKind::Composer | SurfaceKind::Completion
@@ -834,6 +984,8 @@ impl App {
                 "clear/cancel worker"
             } else if self.work_pending() {
                 "cancel turn"
+            } else if !self.pane.is_root() {
+                "clear draft"
             } else if self.can_clear_queue() {
                 "clear queue"
             } else {
@@ -907,6 +1059,8 @@ impl App {
             SurfaceKind::Completion
         } else if self.interaction.is_insert() && self.pane.can_compose() {
             SurfaceKind::Composer
+        } else if self.interaction.is_selecting() && self.text_selection.is_some() {
+            SurfaceKind::TextSelection
         } else if self.interaction.is_selecting() {
             SurfaceKind::Selection
         } else {
@@ -925,6 +1079,19 @@ impl App {
             self.model.workflow.hide();
             self.interaction.enter_normal();
             return None;
+        }
+        if let PaneScope::SideChat { id, .. } = self.model.scope() {
+            return if self.is_busy() {
+                Some(UiAction::Session(
+                    zevria_session_api::SessionCommand::Control(
+                        zevria_session_api::ControlCommand::SideChat(
+                            zevria_session_api::SideChatCommand::Cancel { id },
+                        ),
+                    ),
+                ))
+            } else {
+                None
+            };
         }
         if self.pane.is_worker() {
             return self.worker_action(WorkerControlAction::CancelPrompt);
@@ -965,6 +1132,7 @@ impl App {
 
     /// Workspace allocation or pane activation changed before the next draw.
     pub(crate) fn invalidate_rendered_geometry(&mut self) {
+        self.clear_text_selection();
         self.view.invalidate_rendered_geometry();
         if let Some(help) = &mut self.help {
             help.invalidate_geometry();
@@ -1076,6 +1244,7 @@ impl App {
         now: Instant,
         update: impl FnOnce(&mut SessionModel) -> Reduction,
     ) -> Vec<AppEffect> {
+        self.clear_text_selection();
         self.view.capture_conversation_anchor();
         self.view.invalidate_rendered_geometry();
         self.observe_clock(now);
@@ -1136,6 +1305,7 @@ impl App {
             }
         }
         if reduction.plan_ready {
+            self.clear_text_selection();
             self.queue.pause(QueuePause::PlanDecision);
             self.view.invalidate_rendered_geometry();
             self.composer.close_edit_group();

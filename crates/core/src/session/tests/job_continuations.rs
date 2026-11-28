@@ -478,6 +478,7 @@ async fn accepted_edit_unfollows_older_jobs_and_rejected_continuation_does_not_c
                 text: "edited prompt".into(),
                 mode: SessionMode::Build,
                 behavior: zevria_foundation::RequestBehavior::Standard,
+                references: Vec::new(),
             },
         },
     )));
@@ -513,6 +514,7 @@ async fn accepted_submit_plan_never_delivers_completions_before_approval() {
             text: "plan work".into(),
             mode: SessionMode::Plan,
             behavior: zevria_foundation::RequestBehavior::Standard,
+            references: Vec::new(),
         })],
         events,
         receiver,

@@ -1504,6 +1504,7 @@ mod tests {
                 turn_id,
                 message: prompt.clone(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }));
             live.reduce(E::Turn(TurnEvent::ModelCallStarted { turn_id, call: 1 }));
             live.reduce(E::Turn(TurnEvent::Intermediate {

@@ -54,6 +54,15 @@ pub fn is_conversation_item(item: &TranscriptItem) -> bool {
         || matches!(item.ensemble_record(), Some(EnsembleRecord::Started { .. }))
 }
 
+/// Inherited conversation is replay input, not work done by the draft fork.
+pub(super) fn has_post_fork_conversation_item(items: &[TranscriptItem]) -> bool {
+    items
+        .iter()
+        .rev()
+        .take_while(|item| !matches!(item, TranscriptItem::SideChatForkBoundary))
+        .any(is_conversation_item)
+}
+
 /// Whether an item supplies user-role model input that can anchor context
 /// compaction. Typed Plan handoffs and ensemble evidence are included without
 /// becoming editable/numbered frontend prompt rows. Not every anchor supplies

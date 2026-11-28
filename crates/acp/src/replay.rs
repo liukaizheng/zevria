@@ -100,6 +100,8 @@ pub(crate) fn replay_transcript(
                 ));
             }
             TranscriptItem::SessionModels(_)
+            | TranscriptItem::SideChatOrigin(_)
+            | TranscriptItem::SideChatForkBoundary
             | TranscriptItem::SessionMode(_)
             | TranscriptItem::Directive(_)
             | TranscriptItem::RequestDirective(_)

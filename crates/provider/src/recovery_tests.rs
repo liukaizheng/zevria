@@ -434,7 +434,7 @@ async fn core_cancellation_interrupts_every_network_wait_and_next_turn_still_wor
             let (commands, command_rx) = tokio::sync::mpsc::unbounded_channel();
             let (events, mut receiver) = session_event_channel(64);
             let task = tokio::spawn(engine.run(command_rx, events));
-            let submit = |text: &str| SessionCommand::Turn(TurnCommand::Submit { text: text.into(), mode: SessionMode::Build, behavior: zevria_foundation::RequestBehavior::Standard });
+            let submit = |text: &str| SessionCommand::Turn(TurnCommand::Submit { text: text.into(), mode: SessionMode::Build, behavior: zevria_foundation::RequestBehavior::Standard, references: Vec::new()  });
             commands.send(submit("cancel this request")).unwrap();
             ready.await.unwrap();
             if matches!(phase, "warning" | "backoff" | "silent" | "ws_stream" | "ws_send") {

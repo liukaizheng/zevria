@@ -237,6 +237,11 @@ pub async fn run_ui(
             dispatch_turn_action(&mut views, commands, &mut engine_done, action)?;
             dirty = true;
         }
+        if !engine_done && let Some(command) = views.take_side_command() {
+            commands.send(command).map_err(|_| {
+                anyhow::anyhow!("the session engine stopped before creating the Side Chat")
+            })?;
+        }
         files.set_request(views.file_search_request());
         if dirty {
             views.observe_clock(Instant::now());
@@ -294,6 +299,15 @@ pub async fn run_ui(
                 Some(Ok(event)) => {
                     dirty = true;
                     match views.handle_event(event) {
+                        Some(UiAction::ReadSideChatExcerpt) => {
+                            clipboard_id = clipboard_id.wrapping_add(1);
+                            if pending_paste.is_none() && clipboard.start(clipboard_id) {
+                                pending_paste = Some((clipboard_id, crate::workspace::ClipboardOrigin::SideChatExcerpt, 0, 0, Instant::now()));
+                            } else {
+                                views.show_root_error("A native clipboard read is still running; retry when it finishes.".into());
+                            }
+                        }
+                        Some(UiAction::OpenSideChat { .. }) => unreachable!("workspace consumes Side Chat input"),
                         Some(UiAction::ReadClipboard { generation, cursor }) => {
                             if let Some(origin) = views.clipboard_origin() {
                                 clipboard_id = clipboard_id.wrapping_add(1);
@@ -332,6 +346,7 @@ pub async fn run_ui(
                             SlashCommand::New => return new_session_outcome(&views.workspace.root),
                             SlashCommand::Skills => views.workspace.controls.show_skills(),
                             SlashCommand::Mcp => views.workspace.controls.show_mcp(),
+                            SlashCommand::Side | SlashCommand::Btw => unreachable!("side chats are classified separately"),
                             SlashCommand::Prompt => unreachable!("MCP prompts are classified separately"),
                             SlashCommand::Jobs => views.show_jobs(),
                             SlashCommand::Subtasks => views.show_subtasks(),
@@ -362,6 +377,7 @@ pub async fn run_ui(
                         Some(UiAction::OpenSubtask { .. })
                         | Some(UiAction::OpenAgentRun { .. })
                         | Some(UiAction::JobControl { .. })
+                        | Some(UiAction::NewSideChat | UiAction::OpenSidePane { .. } | UiAction::InsertSideReference { .. } | UiAction::InsertSideQuote)
                         | None => {}
                     }
                 }

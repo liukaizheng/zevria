@@ -22,6 +22,7 @@ pub enum TranscriptEditReplacement {
         text: UserPrompt,
         mode: SessionMode,
         behavior: zevria_foundation::RequestBehavior,
+        references: Vec<SideChatReferenceAttachment>,
     },
     Skill {
         name: SkillName,
@@ -70,6 +71,7 @@ pub enum TurnCommand {
         text: UserPrompt,
         mode: SessionMode,
         behavior: zevria_foundation::RequestBehavior,
+        references: Vec<SideChatReferenceAttachment>,
     },
     /// Atomically replace a recalled prompt row or ensemble start and its
     /// complete tail with an ordinary message, typed skill invocation, or
@@ -151,6 +153,7 @@ impl TurnCommand {
 /// Interaction traffic never allocates a turn and is never queued.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlCommand {
+    SideChat(SideChatCommand),
     Command(CommandControl),
     Worker(WorkerControl),
     AnswerQuestion {

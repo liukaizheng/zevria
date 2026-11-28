@@ -122,6 +122,7 @@ fn start_span_turn(app: &mut App, id: u64, prompt: &str) {
         turn_id: TurnId::new(id),
         message: Message::user(prompt),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
 }
 
@@ -1130,6 +1131,7 @@ fn removed_fold_commands_are_inert_in_normal_and_both_select_scopes() {
                     raw_output: None,
                 })));
             app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+                references: Vec::new(),
                 header: None,
                 blocks: vec![tool],
             }));
@@ -1257,6 +1259,7 @@ fn message_folds_keep_the_top_item_anchored_and_follow_stays_at_bottom() {
 fn fold_toggle_rebuilds_only_the_toggled_block() {
     let mut app = App::new();
     app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+        references: Vec::new(),
         header: None,
         blocks: (0..3)
             .map(|id| plain_block(id, PresentationRole::Assistant, &numbered_lines(6)))
@@ -1800,6 +1803,7 @@ fn root_and_child_panes_keep_independent_folds_across_navigation() {
             turn_id: TurnId::new(42),
             message: Message::user(numbered_lines(6)),
             mode: SessionMode::Build,
+            references: Vec::new(),
         })),
     }));
     views.handle_event(ctrl('i'));
@@ -1832,6 +1836,7 @@ fn root_and_child_panes_keep_independent_folds_across_navigation() {
 fn message_fold_summary_counts_blocks_and_honours_inner_block_folds() {
     let mut app = App::new();
     app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+        references: Vec::new(),
         header: None,
         blocks: (0..3)
             .map(|id| plain_block(id, PresentationRole::Assistant, &numbered_lines(4)))
@@ -1875,6 +1880,7 @@ fn message_fold_summary_counts_blocks_and_honours_inner_block_folds() {
 fn enter_on_a_folded_message_expands_it_and_selects_blocks() {
     let mut app = App::new();
     app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+        references: Vec::new(),
         header: None,
         blocks: vec![
             plain_block(0, PresentationRole::Assistant, &numbered_lines(4)),
@@ -2099,6 +2105,7 @@ fn message_selection_rebuilds_only_the_affected_entries() {
     let mut app = App::new();
     for _ in 0..3 {
         app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+            references: Vec::new(),
             header: None,
             blocks: (0..3)
                 .map(|id| plain_block(id, PresentationRole::Assistant, "body"))
@@ -2151,6 +2158,7 @@ fn message_fold_keeps_the_top_row_anchored() {
         let mut app = App::new();
         for _ in 0..4 {
             app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+                references: Vec::new(),
                 header: None,
                 blocks: (0..3)
                     .map(|id| plain_block(id, PresentationRole::Assistant, &numbered_lines(10)))

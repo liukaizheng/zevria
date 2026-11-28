@@ -559,8 +559,40 @@ Other useful commands:
 | `/model-session` | Select this mode's model and reasoning level; retain on reset/resume without changing global defaults. |
 | `/jobs` | Inspect shell jobs and stop or background an individual command in the terminal or desktop, even during a turn. |
 | `/subtasks` | List session subtasks and open one for inspection in the terminal or desktop, even during a turn. |
+| `/side [question]`, `/btw [question]` | Open a read-only side conversation without interrupting the main session. |
 | `/skills` | Inspect, enable, disable, and reload local skills. |
 | `/ensemble-review <prompt>` | Collect independent ACP reviews and synthesize a read-only review. |
+
+### Side Chat
+
+Use `/side <question>` or `/btw <question>` to ask a parallel question, even
+while the main session is working. Use **Shift+Cmd+S** on macOS, **Ctrl+Shift+L**
+on Windows, or **Alt+B** in the terminal to open Side Chat. In Desktop, you can
+select transcript or diff text and use the shortcut or **Ask in Side Chat**.
+Choose **Attach images**, paste an image, or drop image files into either
+Desktop composer. This also works when sending `/side <question>` from the
+main composer.
+
+In the terminal, enter selection with `v` and use `Enter` to drill from a
+message into its blocks. On an expanded block, `Enter` opens text selection:
+use `v` for characters or `V` for lines, `s` to ask about the selection, and `y`
+to copy it. You can also copy text using your terminal and choose `p` in the
+Side Chat list (`/side --clip`). Inside a Side Chat, `m` quotes into the main
+draft and `Ctrl+O` returns to the main pane.
+
+Each thread saves its own inherited history and model settings. The first
+request can reuse the parent's cacheable prompt prefix; the provider decides
+whether to serve it from cache. `command` runs in the shell with private,
+foreground-only jobs and time and output limits. The runtime rejects
+`background: true` and disables structured file mutation. The model is instructed
+to use commands only for inspection; shell access is not a filesystem sandbox.
+Other allowed tools are image reads, skill resources, configured web search,
+and Plan-allowed MCP tools that declare read-only behavior. Only
+explicitly quoting a reply or submitting an `@side:<id>` reference (optionally
+`@side:<id>#<turn>`) brings its material back to the main conversation. Desktop
+shows collapsible reference chips under the submitted prompt; expand one to
+read its saved excerpt or open the Side Chat. The terminal shows compact
+reference labels in the same place.
 
 Build and Plan keep independent provider, model, and reasoning selections through
 mode switches, `/new`, and `/implement-fresh` (including the approval-dialog action).
@@ -626,7 +658,7 @@ does not request client permission before running tools. Use an appropriately
 restricted OS account, container, VM, or sandbox for untrusted work.
 
 On Windows, Linux, and macOS, workspace history and generated artifacts live
-in `sessions/`, `subsessions/`, `ensemble-sessions/`, `agent-runs/`, and `plans/`
+in `sessions/`, `subsessions/`, `ensemble-sessions/`, `agent-runs/`, `plans/`, and `side-chats/`
 directly under `<workspace>/.zevria/`. Continue, resume, and ACP listing do not
 look in the old `.zevria/windows/` directory.
 Logs default to `~/.zevria/logs/`. Conversations, tool output, and submitted images
@@ -634,7 +666,7 @@ can contain sensitive source material; images persist as embedded base64 in
 plaintext history. Protect these files, keep credentials out of version control,
 and remember that prompts and relevant tool output go to the configured provider.
 
-`zevria clean` **deletes the five directories above without confirmation**,
+`zevria clean` **deletes the six directories above without confirmation**,
 regardless of which operating system wrote the data.
 Stop every session and worker using that workspace and back up any state you want
 to keep before cleaning. It preserves `.zevria/windows/`, project skills, and

@@ -35,6 +35,7 @@ pub(in crate::session) enum CapacityCompactionState {
     PreparedForEdit,
     NotAttempted,
     Unavailable,
+    DisabledForSideChat,
 }
 
 /// Fingerprint the already-rendered stable prefix and filtered tools. Admission
@@ -491,6 +492,9 @@ impl<P: ModelProvider> SessionEngine<P> {
             }
             CapacityCompactionState::Unavailable => {
                 "automatic compaction was unavailable because the request history had no compaction prompt"
+            }
+            CapacityCompactionState::DisabledForSideChat => {
+                "automatic compaction is disabled for Side Chat to preserve its inherited prefix"
             }
         };
         format!(

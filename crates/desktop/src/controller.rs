@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 use zevria_content::PromptImage;
-use zevria_foundation::{CommandJobId, SubtaskId};
+use zevria_foundation::{CommandJobId, SideChatId, SubtaskId};
 use zevria_host::{
     Config, RunningSession, SessionStart,
     sessions::{self, SessionSummary},
@@ -23,7 +23,9 @@ use zevria_presentation::{
     draft::DraftSlot,
     edit::{EditState, RecallEdit},
 };
-use zevria_session_api::{ControlCommand, ModeSelectionResult, SessionCommand, SessionUpdate};
+use zevria_session_api::{
+    ControlCommand, ModeSelectionResult, SessionCommand, SessionUpdate, SideChatCommand,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
@@ -43,6 +45,11 @@ pub struct SavedComposerDraft {
     orchestrate: bool,
 }
 
+struct PendingSideChatDraft {
+    request_id: String,
+    generation: u64,
+}
+
 pub struct SessionController {
     pub phase: Phase,
     pub config: Option<Arc<Config>>,
@@ -51,6 +58,7 @@ pub struct SessionController {
     pub model: WorkspaceModel,
     pub sessions: Vec<SessionSummary>,
     pub draft: String,
+    pub(crate) main_draft_focus_generation: u64,
     pub draft_images: Vec<PromptImage>,
     pub edit: EditState<SavedComposerDraft>,
     recalled_origin: Option<RecalledOrigin>,
@@ -62,7 +70,9 @@ pub struct SessionController {
     pub resume_reveal_generation: u64,
     /// Native capturing dialogs (for example replacement confirmation).
     capturing_dialog: bool,
+    session_generation: u64,
     draft_generation: u64,
+    pending_side_chat_draft: Option<PendingSideChatDraft>,
     pub draft_slot: DraftSlot<DraftContent>,
     running: Option<RunningSession>,
     command: Option<tokio::sync::mpsc::UnboundedSender<SessionCommand>>,
@@ -107,6 +117,7 @@ impl SessionController {
             model: WorkspaceModel::default(),
             sessions: Vec::new(),
             draft: String::new(),
+            main_draft_focus_generation: 0,
             draft_images: Vec::new(),
             edit: EditState::default(),
             recalled_origin: None,
@@ -117,7 +128,9 @@ impl SessionController {
             show_sessions: false,
             resume_reveal_generation: 0,
             capturing_dialog: false,
+            session_generation: 0,
             draft_generation: 0,
+            pending_side_chat_draft: None,
             draft_slot: Default::default(),
             running: None,
             command: None,
@@ -234,6 +247,148 @@ impl SessionController {
         true
     }
 
+    pub(crate) fn image_attachment_generation(&self, side: Option<SideChatId>) -> Option<u64> {
+        (self.phase == Phase::Live
+            && !self.capturing_dialog
+            && self.model.controls.selected_child.is_none()
+            && (side.is_some() || !self.edit.is_awaiting_acceptance())
+            && !self.model.controls.models.is_open()
+            && self.model.controls.question.is_none()
+            && self.model.root.workflow.dialog().is_none()
+            && side.is_none_or(|id| {
+                self.model
+                    .side_chats
+                    .iter()
+                    .any(|pane| pane.descriptor.id == id && !pane.is_running())
+            }))
+        .then_some(self.session_generation)
+    }
+
+    pub(crate) fn begin_image_dialog(
+        &mut self,
+        side: Option<SideChatId>,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
+        let generation = self.image_attachment_generation(side)?;
+        self.set_capturing_dialog(true, cx);
+        Some(generation)
+    }
+
+    pub(crate) fn finish_image_dialog(&mut self, generation: u64, cx: &mut Context<Self>) -> bool {
+        if self.phase != Phase::Live || self.session_generation != generation {
+            return false;
+        }
+        self.set_capturing_dialog(false, cx);
+        true
+    }
+
+    pub(crate) fn finish_image_attachment(
+        &mut self,
+        side: Option<SideChatId>,
+        generation: u64,
+        result: Result<Vec<PromptImage>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.image_attachment_generation(side) != Some(generation) {
+            return;
+        }
+        match result {
+            Ok(images) => self.attach_images(side, images, cx),
+            Err(error) => self.image_attachment_error(side, error, cx),
+        }
+    }
+
+    fn attach_images(
+        &mut self,
+        side: Option<SideChatId>,
+        images: Vec<PromptImage>,
+        cx: &mut Context<Self>,
+    ) {
+        use zevria_content::prompt::{MAX_PROMPT_IMAGE_BYTES, MAX_PROMPT_IMAGES};
+        let (target, side_error) = if let Some(id) = side {
+            let pane = self
+                .model
+                .side_chats
+                .iter_mut()
+                .find(|pane| pane.descriptor.id == id)
+                .expect("attachment target was checked");
+            (&mut pane.draft_images, Some(&mut pane.error))
+        } else {
+            (&mut self.draft_images, None)
+        };
+        if target.len() + images.len() > MAX_PROMPT_IMAGES {
+            self.image_attachment_error(
+                side,
+                format!("Attach at most {MAX_PROMPT_IMAGES} images per message."),
+                cx,
+            );
+            return;
+        }
+        if target
+            .iter()
+            .chain(&images)
+            .map(PromptImage::encoded_len)
+            .sum::<usize>()
+            > MAX_PROMPT_IMAGE_BYTES
+        {
+            self.image_attachment_error(
+                side,
+                "Images exceed the 20 MiB per-message limit.".into(),
+                cx,
+            );
+            return;
+        }
+        target.extend(images);
+        if let Some(error) = side_error {
+            *error = None;
+        } else {
+            self.draft_generation += 1;
+        }
+        cx.notify();
+    }
+
+    fn image_attachment_error(
+        &mut self,
+        side: Option<SideChatId>,
+        error: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = side {
+            if let Some(pane) = self
+                .model
+                .side_chats
+                .iter_mut()
+                .find(|pane| pane.descriptor.id == id)
+            {
+                pane.error = Some(error);
+            }
+        } else {
+            self.model.root.conversation.push_error(error);
+        }
+        cx.notify();
+    }
+
+    pub fn remove_side_image(
+        &mut self,
+        id: zevria_foundation::SideChatId,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if self.phase != Phase::Live || self.capturing_dialog {
+            return;
+        }
+        if let Some(pane) = self
+            .model
+            .side_chats
+            .iter_mut()
+            .find(|pane| pane.descriptor.id == id && !pane.is_running())
+            && index < pane.draft_images.len()
+        {
+            pane.draft_images.remove(index);
+            cx.notify();
+        }
+    }
+
     pub fn remove_draft_image(&mut self, index: usize, cx: &mut Context<Self>) {
         if !self.edit.is_awaiting_acceptance() && index < self.draft_images.len() {
             self.draft_images.remove(index);
@@ -276,6 +431,7 @@ impl SessionController {
 
     pub(crate) fn clock_required(&self) -> bool {
         self.model.root.is_busy()
+            || self.side_chat_running()
             || self.model.root.jobs_inspector().is_open()
             || self
                 .model
@@ -416,6 +572,7 @@ impl SessionController {
         }
         self.model.root.jobs_inspector_mut().close();
         self.model.controls.subtasks_open = false;
+        self.model.controls.side_chat_open = false;
         self.model.controls.mcp.show();
         self.flush_mcp_commands(cx);
         true
@@ -461,6 +618,7 @@ impl SessionController {
         }
         self.model.controls.subtasks_open = false;
         self.model.controls.mcp.close();
+        self.model.controls.side_chat_open = false;
         self.model.root.jobs_inspector_mut().show();
         self.model.select_default_job();
         self.flush_job_commands(cx);
@@ -482,6 +640,7 @@ impl SessionController {
         }
         self.model.root.jobs_inspector_mut().close();
         self.model.controls.mcp.close();
+        self.model.controls.side_chat_open = false;
         self.model.controls.subtasks_open = true;
         cx.notify();
         true
@@ -526,6 +685,232 @@ impl SessionController {
         self.flush_job_commands(cx);
         cx.notify();
     }
+    pub fn quote_side_answer(
+        &mut self,
+        id: zevria_foundation::SideChatId,
+        answer: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self
+            .model
+            .side_chats
+            .iter()
+            .find(|pane| pane.descriptor.id == id)
+        else {
+            return;
+        };
+        let quote =
+            zevria_presentation::side_chats::format_quote_for_main(&pane.descriptor.title, answer);
+        if self.edit.is_awaiting_acceptance() {
+            return;
+        }
+        self.model.controls.selected_child = None;
+        let mut draft = self.draft.clone();
+        if !draft.is_empty() {
+            draft.push_str("\n\n");
+        }
+        draft.push_str(&quote);
+        self.main_draft_focus_generation = self.main_draft_focus_generation.wrapping_add(1);
+        self.edit_draft(draft, cx);
+    }
+
+    pub fn insert_side_reference(
+        &mut self,
+        id: zevria_foundation::SideChatId,
+        turn: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if self.edit.is_awaiting_acceptance() {
+            return;
+        }
+        let Some(pane) = self
+            .model
+            .side_chats
+            .iter()
+            .find(|pane| pane.descriptor.id == id)
+        else {
+            return;
+        };
+        let mut draft = self.draft.clone();
+        if draft
+            .chars()
+            .next_back()
+            .is_some_and(|c| !c.is_whitespace())
+        {
+            draft.push(' ');
+        }
+        draft.push_str(&format!("@side:{}#{turn} ", pane.descriptor.short_id));
+        self.model.controls.selected_child = None;
+        self.main_draft_focus_generation = self.main_draft_focus_generation.wrapping_add(1);
+        self.edit_draft(draft, cx);
+    }
+
+    pub fn side_chat_running(&self) -> bool {
+        self.model.side_chats.iter().any(|pane| pane.is_running())
+    }
+
+    pub fn toggle_side_chat(&mut self, cx: &mut Context<Self>) {
+        if self.model.controls.side_chat_open {
+            self.close_side_chat_panel(cx);
+        } else if self.model.side_chats.is_empty() {
+            self.create_side_chat(None, None, cx);
+        } else {
+            self.open_side_chat_panel(cx);
+        }
+    }
+
+    pub fn close_side_chat_panel(&mut self, cx: &mut Context<Self>) {
+        self.model.controls.side_chat_open = false;
+        cx.notify();
+    }
+
+    fn open_side_chat_panel(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.phase != Phase::Live || self.capturing_dialog {
+            return false;
+        }
+        let selected = self
+            .model
+            .controls
+            .selected_side_chat
+            .or_else(|| self.model.side_chats.last().map(|pane| pane.descriptor.id));
+        let opened = self.model.open_side_chat(selected);
+        if opened {
+            cx.notify();
+        }
+        opened
+    }
+
+    pub fn select_side_chat(&mut self, id: zevria_foundation::SideChatId, cx: &mut Context<Self>) {
+        if self.phase == Phase::Live
+            && !self.capturing_dialog
+            && self
+                .model
+                .side_chats
+                .iter()
+                .any(|pane| pane.descriptor.id == id)
+            && self.model.open_side_chat(Some(id))
+        {
+            cx.notify();
+        }
+    }
+
+    pub fn create_side_chat(
+        &mut self,
+        prompt: Option<zevria_content::UserPrompt>,
+        excerpt: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_side_chat(prompt, excerpt, false, cx);
+    }
+
+    fn request_side_chat(
+        &mut self,
+        prompt: Option<zevria_content::UserPrompt>,
+        excerpt: Option<String>,
+        from_draft: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.phase != Phase::Live
+            || self.capturing_dialog
+            || (from_draft && self.pending_side_chat_draft.is_some())
+            || !self.model.open_side_chat(None)
+        {
+            return;
+        }
+        let command = zevria_presentation::side_chats::new_side_chat(prompt, excerpt);
+        if from_draft {
+            let SideChatCommand::Create { request_id, .. } = &command else {
+                unreachable!("new Side Chat command");
+            };
+            // Leave input in the editor until this specific request succeeds.
+            self.pending_side_chat_draft = Some(PendingSideChatDraft {
+                request_id: request_id.clone(),
+                generation: self.draft_generation,
+            });
+        }
+        self.send(
+            SessionCommand::Control(ControlCommand::SideChat(command)),
+            cx,
+        );
+    }
+
+    pub fn update_side_draft(
+        &mut self,
+        id: zevria_foundation::SideChatId,
+        draft: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.phase != Phase::Live || self.capturing_dialog {
+            return;
+        }
+        if let Some(pane) = self
+            .model
+            .side_chats
+            .iter_mut()
+            .find(|pane| pane.descriptor.id == id)
+        {
+            pane.draft = draft;
+            cx.notify();
+        }
+    }
+
+    pub fn submit_side_chat(&mut self, id: zevria_foundation::SideChatId, cx: &mut Context<Self>) {
+        if self.phase != Phase::Live || self.capturing_dialog {
+            return;
+        }
+        let Some(pane) = self
+            .model
+            .side_chats
+            .iter_mut()
+            .find(|pane| pane.descriptor.id == id)
+        else {
+            return;
+        };
+        if pane.is_running() {
+            return;
+        }
+        let Ok(text) = zevria_content::UserPrompt::new(
+            std::iter::once(zevria_content::PromptBlock::Text(pane.draft.clone()))
+                .filter(|_| !pane.draft.trim().is_empty())
+                .chain(
+                    pane.draft_images
+                        .iter()
+                        .cloned()
+                        .map(zevria_content::PromptBlock::Image),
+                )
+                .collect(),
+        ) else {
+            return;
+        };
+        if pane
+            .model
+            .submit_in_mode(
+                text.clone(),
+                zevria_foundation::RequestBehavior::SideChat,
+                pane.descriptor.forked_mode,
+            )
+            .is_none()
+        {
+            return;
+        }
+        self.send(
+            SessionCommand::Control(zevria_session_api::ControlCommand::SideChat(
+                zevria_session_api::SideChatCommand::Submit { id, text },
+            )),
+            cx,
+        );
+        cx.notify();
+    }
+
+    pub fn cancel_side_chat(&mut self, id: zevria_foundation::SideChatId, cx: &mut Context<Self>) {
+        self.send(
+            SessionCommand::Control(zevria_session_api::ControlCommand::SideChat(
+                zevria_session_api::SideChatCommand::Cancel { id },
+            )),
+            cx,
+        );
+    }
+
     pub fn submit(&mut self, cx: &mut Context<Self>) {
         if self.phase != Phase::Live
             || self.model.controls.selected_child.is_some()
@@ -581,6 +966,13 @@ impl SessionController {
                         .push_error("No subtasks in this session.".into());
                     self.clear_draft();
                 } else if self.open_subtasks(cx) {
+                    self.clear_draft();
+                }
+            }
+            InputRoute::SideChat(prompt) => {
+                if prompt.is_some() || self.model.side_chats.is_empty() {
+                    self.request_side_chat(prompt, None, true, cx);
+                } else if self.open_side_chat_panel(cx) {
                     self.clear_draft();
                 }
             }

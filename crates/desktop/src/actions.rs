@@ -8,6 +8,8 @@ gpui_kit::actions!(
         ToggleSidebar,
         ToggleJobs,
         ToggleSubtasks,
+        ToggleSideChat,
+        NewSideChat,
         Cancel,
         Stop,
         Submit,
@@ -54,6 +56,7 @@ impl Shortcut {
     pub const QUIT: Self = Self::platform("cmd-q", "ctrl-q");
     pub const TOGGLE_SIDEBAR: Self = Self::platform("ctrl-cmd-s", "ctrl-shift-s");
     pub const TOGGLE_JOBS: Self = Self::platform("shift-cmd-j", "ctrl-shift-y");
+    pub const TOGGLE_SIDE_CHAT: Self = Self::platform("shift-cmd-s", "ctrl-shift-l");
     pub const TOGGLE_SUBTASKS: Self = Self::platform("shift-cmd-t", "ctrl-shift-t");
     pub const TOGGLE_MODE: Self = Self::platform("shift-cmd-m", "ctrl-shift-m");
     pub const OPEN_MODELS: Self = Self::platform("ctrl-cmd-m", "ctrl-shift-p");
@@ -101,6 +104,8 @@ fn bindings() -> impl IntoIterator<Item = KeyBinding> {
         Shortcut::TOGGLE_JOBS.bind(ToggleJobs, desktop),
         Shortcut::TOGGLE_JOBS.bind(ToggleJobs, input),
         KeyBinding::new("escape", Cancel, Some("ZevriaJobs")),
+        Shortcut::TOGGLE_SIDE_CHAT.bind(ToggleSideChat, desktop),
+        Shortcut::TOGGLE_SIDE_CHAT.bind(ToggleSideChat, input),
         Shortcut::TOGGLE_SUBTASKS.bind(ToggleSubtasks, desktop),
         Shortcut::TOGGLE_SUBTASKS.bind(ToggleSubtasks, input),
         KeyBinding::new("escape", Cancel, Some("ZevriaSubtasks")),
@@ -196,6 +201,7 @@ mod tests {
             (Shortcut::TOGGLE_SIDEBAR, "Ctrl+Shift+S"),
             (Shortcut::TOGGLE_JOBS, "Ctrl+Shift+Y"),
             (Shortcut::TOGGLE_SUBTASKS, "Ctrl+Shift+T"),
+            (Shortcut::TOGGLE_SIDE_CHAT, "Ctrl+Shift+L"),
             (Shortcut::TOGGLE_MODE, "Ctrl+Shift+M"),
             (Shortcut::OPEN_MODELS, "Ctrl+Shift+P"),
             (Shortcut::STOP, "Ctrl+."),
@@ -237,6 +243,8 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::action("Stop", Stop),
         ]),
         Menu::new("View").items([
+            MenuItem::action("Toggle Side Chat panel", ToggleSideChat),
+            MenuItem::action("New Side Chat", NewSideChat),
             MenuItem::action("Toggle sidebar", ToggleSidebar),
             MenuItem::action("Toggle jobs panel", ToggleJobs),
             MenuItem::action("Toggle subtasks panel", ToggleSubtasks),

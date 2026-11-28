@@ -4,7 +4,7 @@ use super::item::TranscriptItem;
 use super::item::{BatchRef, MAX_ROOT_RECORD_BYTES};
 use super::load::TranscriptLoadOutcome;
 use super::load::load_report;
-use super::projection::is_conversation_item;
+use super::projection::has_post_fork_conversation_item;
 use super::sessions::pick_session_id;
 use crate::jsonl::with_record_buffer;
 use anyhow::Context as _;
@@ -373,7 +373,7 @@ impl TranscriptWriter {
     ) -> anyhow::Result<()> {
         self.ensure_writable()?;
         if self.is_pending() {
-            if items.iter().any(is_conversation_item) {
+            if has_post_fork_conversation_item(items) {
                 self.publish_records(items, suffix)
             } else {
                 for item in items {

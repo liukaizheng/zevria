@@ -49,6 +49,9 @@ pub(in crate::session) fn request_shape_fingerprint(
     }
     match policy.mcp_access {
         zevria_foundation::McpToolAccess::None => {}
+        zevria_foundation::McpToolAccess::ReadOnlyPlanScoped => {
+            update_component(&mut hasher, b"mcp:side_chat")
+        }
         zevria_foundation::McpToolAccess::PlanScoped => {
             update_component(&mut hasher, b"mcp:plan_scoped")
         }
@@ -138,6 +141,9 @@ pub(in crate::session) struct ModelManagement {
 
 #[derive(Default)]
 pub(in crate::session) struct RootCapabilities {
+    pub(in crate::session) fork: Option<super::super::side_chat::ParentForkPublisher>,
+    pub(in crate::session) side_chat_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<zevria_session_api::SideChatCommand>>,
     pub(in crate::session) mcp: Option<Arc<dyn zevria_session_api::mcp::McpSessionService>>,
     pub(in crate::session) command_jobs: Option<zevria_session_api::CommandJobs>,
     pub(in crate::session) job_follow: crate::session::turn::job_notices::JobFollowState,

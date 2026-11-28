@@ -210,6 +210,7 @@ fn streaming_updates_coalesce_while_lifecycle_events_stay_bounded() {
             turn_id,
             message: Message::user("question"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }))
         .expect("the sole lifecycle slot is available");
 
@@ -889,4 +890,58 @@ fn continuing_agent_previews_move_the_growing_text_without_copying_earlier_segme
         "thought/message boundaries retain the unread prior row"
     );
     assert!(snapshot.agent_runs.values().any(|state| matches!(&*state.event, AgentRunEvent::AgentMessage { text, .. } if text == &format!("start{}", " more".repeat(256)))));
+}
+
+#[tokio::test]
+async fn side_chat_turn_fences_are_independent_of_root_and_other_forks() {
+    let (sender, mut receiver) = session_event_channel(8);
+    let turn_id = TurnId::new(1);
+    let first = SideChatId::random();
+    let second = SideChatId::random();
+    sender.stream_updated(turn_id, Message::assistant("root continues"));
+    let state = || SessionStreamState {
+        turn_id,
+        revision: 0,
+        message: Some(Message::assistant("side preview").into()),
+        attempt: None,
+    };
+    sender.set_side_chat_stream(first, state());
+    sender.set_side_chat_stream(second, state());
+    let cancelled = SessionEvent::SideChat(SideChatEvent::Session {
+        id: first,
+        event: Box::new(SessionEvent::Turn(TurnEvent::Cancelled { turn_id })),
+    });
+    sender.send(cancelled.clone()).await.unwrap();
+    assert_eq!(
+        receiver.recv().await,
+        Some(SessionUpdate::Lifecycle(cancelled))
+    );
+    let Some(SessionUpdate::Streams(batch)) = receiver.recv().await else {
+        panic!("expected unrelated previews")
+    };
+    assert!(batch.root.is_some());
+    assert!(batch.subtasks.is_empty());
+    assert!(batch.side_chats.contains_key(&second));
+    assert!(!batch.side_chats.contains_key(&first));
+
+    sender.set_side_chat_stream(second, state());
+    let failed = SessionEvent::SideChat(SideChatEvent::Failed {
+        id: second,
+        error: "thread stopped".into(),
+    });
+    sender.send(failed.clone()).await.unwrap();
+    assert_eq!(
+        receiver.recv().await,
+        Some(SessionUpdate::Lifecycle(failed))
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "failure must fence the stale preview"
+    );
+
+    sender.set_side_chat_stream(second, state());
+    let Some(SessionUpdate::Streams(batch)) = receiver.recv().await else {
+        panic!("expected a new preview after restarting the thread");
+    };
+    assert!(batch.side_chats.contains_key(&second));
 }

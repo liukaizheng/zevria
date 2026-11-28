@@ -41,6 +41,7 @@ pub(in crate::session) struct RequestPlan {
     pub(in crate::session) bodies_enabled: bool,
     pub(in crate::session) mcp_instructions: Vec<zevria_foundation::McpServerInstruction>,
     validation: Option<String>,
+    pub(in crate::session) frozen: bool,
 }
 
 impl RequestPlan {
@@ -67,9 +68,13 @@ impl<P: ModelProvider> SessionEngine<P> {
         }
         #[cfg(feature = "test-support")]
         crate::session::pipeline_probe::record(|counts| counts.instruction_renders += 1);
-        let set = self.instruction_set(policy);
-        let validation = set.validate().err().map(|error| format!("{error:#}"));
-        let instructions: Arc<str> = set.render().into();
+        let (instructions, validation) = if let Some(side) = &self.side_chat {
+            (side.instructions.clone(), None)
+        } else {
+            let set = self.instruction_set(policy);
+            let validation = set.validate().err().map(|error| format!("{error:#}"));
+            (Arc::<str>::from(set.render()), validation)
+        };
         let available = self.skill_activation_available(policy);
         let plan = self.build_request_plan(
             policy,
@@ -126,6 +131,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .as_ref()
                 .map_or_else(Vec::new, |mcp| mcp.active_instructions(policy.mcp_access)),
             validation,
+            frozen: self.side_chat.is_some(),
         })
     }
 

@@ -18,7 +18,8 @@ impl<P: ModelProvider> SessionEngine<P> {
         // Unsupported children and maintenance engines have no request contract
         // to reset. Typed resumed history still requires a reset even when the
         // current capability is absent.
-        policy.file_mutation_scope == FileMutationScope::ProcessFilesystem
+        self.side_chat.is_some()
+            || policy.file_mutation_scope == FileMutationScope::ProcessFilesystem
             || self.capabilities.subtask_concurrency.is_some()
             || self
                 .instruction_replay()
@@ -102,6 +103,9 @@ impl RequestPlan {
         state: &DirectiveState,
         active: &ActiveSkills,
     ) -> anyhow::Result<Vec<DirectiveContent>> {
+        if self.frozen {
+            return Ok(Vec::new());
+        }
         let mut updates = state.reconcile(active, |name| {
             self.bodies_enabled && self.catalog.config().name_enabled(name)
         });

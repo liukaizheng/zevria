@@ -24,6 +24,8 @@ pub mod event;
 pub mod mcp;
 pub mod provider;
 pub mod question;
+pub mod side_chat;
+pub use side_chat::*;
 pub mod subtask;
 pub mod turn;
 pub mod web_search;

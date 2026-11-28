@@ -172,6 +172,7 @@ async fn registered_plan_tools_fail_cleanly_in_build_even_under_an_unrestricted_
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "build".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )

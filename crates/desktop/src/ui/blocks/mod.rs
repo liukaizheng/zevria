@@ -31,7 +31,11 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use std::{borrow::Cow, collections::HashMap, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use zevria_content::{decode_image_base64, readable::sanitize_readable, tool_result_image};
 use zevria_foundation::{
     CommandJobId, CommandJobSnapshot, CommandJobStatus, FileChange, READ_IMAGE_TOOL_NAME,
@@ -106,17 +110,20 @@ fn live_controls_width(job: &CommandJobSnapshot) -> f32 {
 enum CopyTarget {
     Primary,
     Output,
+    Reference(usize),
 }
 
 pub struct BlockView {
     row: TimelineRow,
     data: Arc<BlockData>,
+    side_chat: Option<zevria_foundation::SideChatId>,
     text: Entity<TextViewState>,
     text_source: String,
     plain: bool,
     show_all_output: bool,
     command_clipped: bool,
     show_all_sources: bool,
+    expanded_references: HashSet<usize>,
     diff: Option<Entity<DiffState>>,
     diff_error: Option<String>,
     diff_task: Option<Task<()>>,
@@ -144,6 +151,12 @@ impl BlockView {
     pub(super) fn disclosure_focus(&self) -> FocusHandle {
         self.disclosure_focus.clone()
     }
+    pub(super) fn selected_diff(&self, cx: &App) -> Option<String> {
+        let diff = self.diff.as_ref()?;
+        let text = diff.read(cx).selected_text(cx);
+        (!text.trim().is_empty()).then_some(text)
+    }
+
     pub(super) fn has_disclosure_focus(&self, window: &Window) -> bool {
         self.data.is_disclosure() && self.disclosure_focus.is_focused(window)
     }
@@ -173,6 +186,7 @@ impl BlockView {
     pub fn new(
         row: TimelineRow,
         controller: Entity<SessionController>,
+        side_chat: Option<zevria_foundation::SideChatId>,
         cx: &mut Context<Self>,
     ) -> Self {
         let (text_source, plain) = Self::text_source(&row).unwrap_or_default();
@@ -180,6 +194,7 @@ impl BlockView {
         let watch = Self::watch_text(&text, cx);
         let mut this = Self {
             data: row.data.clone(),
+            side_chat,
             attachments: Self::attachments(&row.data),
             row,
             text,
@@ -188,6 +203,7 @@ impl BlockView {
             show_all_output: false,
             command_clipped: false,
             show_all_sources: false,
+            expanded_references: HashSet::new(),
             diff: None,
             diff_error: None,
             diff_task: None,
@@ -281,6 +297,7 @@ impl BlockView {
         let content_changed = row.data.revision != self.data.revision;
         let expanded_changed = row.expanded != self.row.expanded;
         if content_changed {
+            self.expanded_references.clear();
             let before = self.tool().map(|t| &t.changes);
             let after = match &row.data.kind {
                 BlockKind::Step(Step::Tool(t)) => Some(&t.changes),
@@ -349,8 +366,24 @@ impl BlockView {
             _ => None,
         }
     }
+    fn target_model<'a>(&self, cx: &'a App) -> Option<&'a zevria_presentation::SessionModel> {
+        let model = &self.controller.read(cx).model;
+        if let Some(id) = self.side_chat {
+            model
+                .side_chats
+                .iter()
+                .find(|pane| pane.descriptor.id == id)
+                .map(|pane| &pane.model)
+        } else {
+            Some(model.visible())
+        }
+    }
+
     fn jobs_inspector<'a>(&self, cx: &'a App) -> Option<&'a JobsInspector> {
         let model = &self.controller.read(cx).model;
+        if self.side_chat.is_some() {
+            return None;
+        }
         model
             .controls
             .selected_child
@@ -444,7 +477,10 @@ impl BlockView {
         let Some((index, source)) = self.data.source else {
             return;
         };
-        let conversation = &self.controller.read(cx).model.visible().conversation;
+        let Some(model) = self.target_model(cx) else {
+            return;
+        };
+        let conversation = &model.conversation;
         let Some(HistoryEntry::Conversation(entry)) = conversation.entry(index) else {
             return;
         };
@@ -583,18 +619,21 @@ impl BlockView {
 
     fn editable_prompt_source(&self, cx: &App) -> Option<(usize, PresentationBlockId)> {
         self.data.source.filter(|&source| {
-            matches!(
-                self.data.kind,
-                BlockKind::Prompt {
-                    preparing: false,
-                    ..
-                }
-            ) && self.controller.read(cx).is_prompt_editable(source)
+            self.side_chat.is_none()
+                && matches!(
+                    self.data.kind,
+                    BlockKind::Prompt {
+                        preparing: false,
+                        ..
+                    }
+                )
+                && self.controller.read(cx).is_prompt_editable(source)
         })
     }
 
     fn is_active_edit_target(&self, cx: &App) -> bool {
-        matches!(self.data.kind, BlockKind::Prompt { .. })
+        self.side_chat.is_none()
+            && matches!(self.data.kind, BlockKind::Prompt { .. })
             && self.data.source.is_some_and(|(index, _)| {
                 self.controller.read(cx).active_edit_history_index() == Some(index)
             })
@@ -1584,6 +1623,200 @@ impl BlockView {
         )
     }
 
+    fn side_answer_actions(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let id = self.side_chat?;
+        let (index, block) = self.data.source?;
+        let model = self.target_model(cx)?;
+        if !model.conversation.is_committed_answer(index, block) {
+            return None;
+        }
+        let HistoryEntry::Conversation(entry) = model.conversation.entry(index)? else {
+            return None;
+        };
+        let zevria_presentation::blocks::NativeHeader::Assistant { turn, .. } = entry.header?
+        else {
+            return None;
+        };
+        let answer = self.data.primary_copy();
+        if answer.trim().is_empty() {
+            return None;
+        }
+        Some(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(4.))
+                .mt(px(5.))
+                .child(
+                    Button::new("quote-side-answer")
+                        .ghost()
+                        .xsmall()
+                        .label("Quote in main")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.controller
+                                .update(cx, |c, cx| c.quote_side_answer(id, &answer, cx))
+                        })),
+                )
+                .child(
+                    Button::new("reference-side-answer")
+                        .ghost()
+                        .xsmall()
+                        .label("Insert reference")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.controller
+                                .update(cx, |c, cx| c.insert_side_reference(id, turn.0, cx))
+                        })),
+                ),
+        )
+    }
+
+    fn reference_chips(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let BlockKind::Prompt { references, .. } = &self.data.kind else {
+            return None;
+        };
+        if references.is_empty() {
+            return None;
+        }
+        let t = palette(cx);
+        let hairline = tones(cx).hairline;
+        let mut chips = div().flex().flex_wrap().gap(px(5.));
+        let mut excerpts = Vec::new();
+        for (index, reference) in references.iter().enumerate() {
+            let open = self.expanded_references.contains(&index);
+            let token = match reference.turn_ordinal {
+                Some(turn) => format!("@side:{}#{turn}", reference.short_id),
+                None => format!("@side:{}", reference.short_id),
+            };
+            let chip = Button::new(("side-reference-toggle", index))
+                .ghost()
+                .xsmall()
+                .max_w_full()
+                .border_1()
+                .border_color(hairline)
+                .icon(gpui_kit::component::Icon::new(if open {
+                    Lucide::ChevronDown
+                } else {
+                    Lucide::ChevronRight
+                }))
+                .accessibility_label(format!(
+                    "{} reference: {}",
+                    if open { "Collapse" } else { "Expand" },
+                    reference.title
+                ))
+                .child(
+                    style::meta()
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .text_color(t.text.muted)
+                        .child(token),
+                )
+                .child(
+                    style::meta()
+                        .text_color(t.text.secondary)
+                        .min_w_0()
+                        .truncate()
+                        .child(sanitize_readable(&reference.title)),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.expanded_references.remove(&index) {
+                        this.expanded_references.insert(index);
+                    }
+                    cx.emit(DetailResized);
+                    cx.notify();
+                }));
+            chips = chips.child(
+                div()
+                    .id(("side-reference-chip", index))
+                    .test_support()
+                    .aria_expanded(open)
+                    .max_w_full()
+                    .child(chip),
+            );
+            if open {
+                let id = reference.id;
+                let can_open = self
+                    .controller
+                    .read(cx)
+                    .model
+                    .side_chats
+                    .iter()
+                    .any(|pane| pane.descriptor.id == id);
+                let copy = reference.excerpt.clone();
+                let copied = self.copy_feedback.is_active(CopyTarget::Reference(index));
+                excerpts.push(
+                    div()
+                        .id(("side-reference-excerpt", index))
+                        .test_support()
+                        .pl(px(10.))
+                        .border_l_1()
+                        .border_color(hairline)
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .when(!reference.question_preview.is_empty(), |d| {
+                            d.child(
+                                style::meta()
+                                    .text_color(t.text.muted)
+                                    .child(sanitize_readable(&reference.question_preview)),
+                            )
+                        })
+                        .child(
+                            div()
+                                .id(("side-reference-body", index))
+                                .max_h(px(220.))
+                                .overflow_y_scroll()
+                                .child(
+                                    style::body()
+                                        .text_color(t.text.secondary)
+                                        .child(sanitize_readable(&reference.excerpt)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(6.))
+                                .child(
+                                    Button::new(("copy-side-reference", index))
+                                        .ghost()
+                                        .xsmall()
+                                        .label(if copied { "Copied" } else { "Copy excerpt" })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy.clone(),
+                                            ));
+                                            this.copy_feedback.trigger(
+                                                CopyTarget::Reference(index),
+                                                cx,
+                                                |this| &mut this.copy_feedback,
+                                            );
+                                        })),
+                                )
+                                .when(can_open, |d| {
+                                    d.child(
+                                        Button::new(("open-side-reference", index))
+                                            .ghost()
+                                            .xsmall()
+                                            .label("Open Side Chat")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.controller
+                                                    .update(cx, |c, cx| c.select_side_chat(id, cx))
+                                            })),
+                                    )
+                                }),
+                        ),
+                );
+            }
+        }
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(chips)
+                .children(excerpts),
+        )
+    }
+
     fn prompt(&self, preparing: bool, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = palette(cx);
         let tone = tones(cx);
@@ -1626,6 +1859,7 @@ impl BlockView {
                     })
                     .child(self.actions(window, cx)),
             )
+            .children(self.reference_chips(cx))
             .children(self.attachments.iter().map(|(label, dimensions, image)| {
                 div()
                     .flex()
@@ -1870,11 +2104,12 @@ impl Render for BlockView {
                 }))
                 .into_any_element(),
             BlockKind::Live => {
-                let controller = self.controller.read(cx);
-                let text = if data.body.starts_with("Reconnecting") {
+                let text = if data.body.starts_with("Reconnecting")
+                    && let Some(model) = self.target_model(cx)
+                {
                     super::status::working_activity(
-                        controller.model.visible(),
-                        controller.cancelling,
+                        model,
+                        self.side_chat.is_none() && self.controller.read(cx).cancelling,
                     )
                 } else {
                     data.body.to_string()
@@ -1888,7 +2123,7 @@ impl Render for BlockView {
                     .into_any_element()
             }
         };
-        div()
+        let row = div()
             .id(data.key.clone())
             .test_support()
             .track_focus(&self.block_focus)
@@ -1905,5 +2140,55 @@ impl Render for BlockView {
             .min_w_0()
             .w_full()
             .child(contents)
+            .children(self.side_answer_actions(cx));
+        if self.side_chat.is_none() && !data.primary_copy().trim().is_empty() {
+            use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
+            let block = cx.entity().downgrade();
+            let controller = self.controller.downgrade();
+            row.context_menu(move |menu, window, cx| {
+                let Some(block) = block.upgrade() else {
+                    return menu;
+                };
+                let diff = block
+                    .read(cx)
+                    .diff
+                    .as_ref()
+                    .map(|diff| diff.read(cx).selected_text(cx));
+                let selected = diff
+                    .filter(|text| !text.trim().is_empty())
+                    .unwrap_or_else(|| gpui_kit::base::TextSelection::selected_text(window, cx));
+                let exact = !selected.trim().is_empty();
+                let full = if exact {
+                    selected
+                } else {
+                    block.read(cx).data.primary_copy()
+                };
+                let excerpt = zevria_foundation::bound_side_chat_text(
+                    &full,
+                    zevria_foundation::SIDE_CHAT_EXCERPT_BYTES,
+                )
+                .to_owned();
+                let controller = controller.clone();
+                menu.item(PopupMenuItem::new("Copy").on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(full.clone()))
+                }))
+                .item(
+                    PopupMenuItem::new(if exact {
+                        "Ask in Side Chat"
+                    } else {
+                        "Ask about this block in Side Chat"
+                    })
+                    .on_click(move |_, _, cx| {
+                        let excerpt = excerpt.clone();
+                        let _ = controller.update(cx, |controller, cx| {
+                            controller.create_side_chat(None, Some(excerpt), cx)
+                        });
+                    }),
+                )
+            })
+            .into_any_element()
+        } else {
+            row.into_any_element()
+        }
     }
 }

@@ -95,6 +95,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 ),
             }
         };
+        self.publish_fork();
         let _ = events
             .send(SessionEvent::Manage(ManagementEvent::ModeResult {
                 request_id,

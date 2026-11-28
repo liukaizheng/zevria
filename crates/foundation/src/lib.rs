@@ -14,6 +14,8 @@ pub mod question;
 pub mod request;
 pub mod runtime_paths;
 pub mod shell;
+pub mod side_chat;
+pub use side_chat::*;
 pub mod subtask;
 pub mod task;
 pub mod tool_names;

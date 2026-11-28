@@ -9,6 +9,7 @@ fn request(behavior: RequestBehavior) -> Vec<TranscriptItem> {
         TranscriptItem::RequestPrompt {
             message: Message::user("ordered prompt"),
             request: request.clone(),
+            references: None,
         },
         TranscriptItem::RequestDirective(Box::new(RequestDirective::boundary(request))),
     ]
@@ -106,6 +107,7 @@ fn scope_survives_resume_without_updating_legacy_request_bytes() {
         TranscriptItem::RequestPrompt {
             message: Message::user("edit a sibling file"),
             request: request.clone(),
+            references: None,
         },
         TranscriptItem::RequestDirective(Box::new(
             RequestDirective::boundary_with_file_mutation_scope(

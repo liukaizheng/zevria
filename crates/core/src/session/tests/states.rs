@@ -198,7 +198,7 @@ async fn failed_replay_has_no_payload_and_rejects_every_command_and_reseeding() 
     assert_eq!(engine.restored_model_contexts().unwrap_err(), error);
     for anchor in [TurnAnchor::Append, TurnAnchor::ReplaceFrom(0)] {
         assert!(matches!(
-            engine.prepare_test_prompt(anchor, PromptTurnInput::Message { behavior: zevria_foundation::RequestBehavior::Standard, text: "cannot repair here".into() }, SessionMode::Build),
+            engine.prepare_test_prompt(anchor, PromptTurnInput::Message { behavior: zevria_foundation::RequestBehavior::Standard, text: "cannot repair here".into(), references: Vec::new()  }, SessionMode::Build),
             Err(Rejection::Fatal(actual)) if actual == error
         ));
     }
@@ -210,6 +210,7 @@ async fn failed_replay_has_no_payload_and_rejects_every_command_and_reseeding() 
             behavior: zevria_foundation::RequestBehavior::Standard,
             text: "must not run".into(),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
         prompt_message_edit(0, "cannot repair here", SessionMode::Build),
         SessionCommand::Turn(crate::session::TurnCommand::InvokeSkill {
@@ -470,6 +471,7 @@ async fn invalid_committed_replay_is_fatal_but_a_cancelled_response_never_commit
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "go".into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -517,6 +519,7 @@ async fn invalid_committed_replay_is_fatal_but_a_cancelled_response_never_commit
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "queued".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }))
             .unwrap();
         let (blocked, _receiver) = session_event_channel(1);
@@ -704,6 +707,7 @@ async fn cancellation_after_prompt_commit_preserves_count_until_the_next_measure
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "x".repeat(2_400).into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             },
             &first,
             &events,
@@ -751,6 +755,7 @@ async fn cancellation_after_prompt_commit_preserves_count_until_the_next_measure
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "next".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             },
             &second,
             &events,

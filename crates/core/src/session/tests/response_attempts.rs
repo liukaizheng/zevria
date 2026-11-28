@@ -187,6 +187,7 @@ async fn every_model_exit_flushes_retry_trail_before_terminal_publication() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "search".into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -355,6 +356,7 @@ async fn observed_activity_is_on_disk_before_a_local_tool_can_execute() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "search then tool".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -435,6 +437,7 @@ async fn cancellation_while_provider_is_blocked_on_delivery_flushes_once() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "search".into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -1004,6 +1007,7 @@ mod recovery_lifecycle {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "request".into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -1154,6 +1158,7 @@ async fn success_is_finalized_from_the_record_and_live_only_activity_is_not_pers
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "respond".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1228,6 +1233,7 @@ async fn completed_response_that_loses_the_cancellation_race_is_interrupted_reco
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "respond".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1294,6 +1300,7 @@ async fn committed_response_with_usage_is_durable_before_a_blocked_frontend_publ
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "respond".into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )

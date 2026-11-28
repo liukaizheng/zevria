@@ -71,12 +71,12 @@ with the CLI. The old `zevria-app.log` is left alone.
 ### Workspace state
 
 Desktop shares the CLI's `<workspace>/.zevria/` layout on Windows and macOS,
-with `sessions/`, `subsessions/`, `plans/`, `agent-runs/`, and `ensemble-sessions/`
-directly beneath it. Continue and resume do not look under the legacy
+with `sessions/`, `subsessions/`, `plans/`, `agent-runs/`, `ensemble-sessions/`,
+and `side-chats/` directly beneath it. Continue and resume do not look under the legacy
 `.zevria/windows/` location. To reuse state there, follow the
 [optional offline transfer](windows.md#optional-offline-transfer-of-legacy-windows-state).
 The CLI's [`zevria clean`](architecture.md#offline-workspace-cleanup) purges the
-five unified directories without removing the legacy subtree or project skills.
+six unified directories without removing the legacy subtree or project skills.
 Stop all sessions and workers and back up any state you want to keep before
 running it.
 

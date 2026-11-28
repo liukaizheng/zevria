@@ -32,6 +32,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             && let Some(summary) = mcp.sync_pending_updates().await
         {
             self.invalidate_mode_accounting();
+            self.publish_fork();
             let _ = events
                 .send(SessionEvent::Manage(ManagementEvent::McpChanged {
                     revision: summary.revision,
@@ -78,6 +79,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         } = &result
         {
             self.invalidate_mode_accounting();
+            self.publish_fork();
             let _ = events
                 .send(SessionEvent::Manage(ManagementEvent::McpChanged {
                     revision: revision.clone(),

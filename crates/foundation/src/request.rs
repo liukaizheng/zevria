@@ -7,6 +7,7 @@ pub enum RequestBehavior {
     #[default]
     Standard,
     Orchestrate,
+    SideChat,
 }
 
 /// Versioned intent on the owning user prompt. A fresh submission/edit always

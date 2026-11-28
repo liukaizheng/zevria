@@ -263,6 +263,7 @@ fn submit(text: &str) -> SessionCommand {
         behavior: zevria_foundation::RequestBehavior::Standard,
         text: text.into(),
         mode: SessionMode::Build,
+        references: Vec::new(),
     })
 }
 fn invoke() -> SessionCommand {
@@ -437,6 +438,7 @@ async fn engine_skill_lifecycle_is_incremental_with_both_explicit_wire_roles() {
                         behavior: zevria_foundation::RequestBehavior::Standard,
                         text: "replacement history".into(),
                         mode: SessionMode::Build,
+                        references: Vec::new(),
                     },
                 },
             )),

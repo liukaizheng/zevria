@@ -308,6 +308,7 @@ async fn every_detail_variant_stays_out_of_provider_continuations() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "run the tool".into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )

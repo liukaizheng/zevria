@@ -26,6 +26,7 @@ fn input(skill: bool, text: impl Into<zevria_content::UserPrompt>) -> PromptTurn
         PromptTurnInput::Message {
             text: text.into(),
             behavior: zevria_foundation::RequestBehavior::Standard,
+            references: Vec::new(),
         }
     }
 }
@@ -172,6 +173,7 @@ async fn rejected_and_pre_cancelled_input_and_guidance_never_materialize() {
                 text: " \n\t ".into(),
                 mode: SessionMode::Build,
                 behavior: zevria_foundation::RequestBehavior::Standard,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -213,6 +215,7 @@ async fn pending_orchestrated_acceptance_is_durable_before_dispatch_and_survives
             PromptTurnInput::Message {
                 text: "independent work".into(),
                 behavior: zevria_foundation::RequestBehavior::Orchestrate,
+                references: Vec::new(),
             },
             SessionMode::Build,
             &events,

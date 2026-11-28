@@ -246,6 +246,7 @@ fn rejected_submissions_restore_history_but_acceptance_and_resets_discard_it() {
                 turn_id,
                 mode: SessionMode::Build,
                 message: Message::user("first second"),
+                references: Vec::new(),
             }));
             app.reduce(SessionEvent::Turn(TurnEvent::Cancelled { turn_id }));
         } else {

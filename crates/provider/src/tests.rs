@@ -35,6 +35,8 @@ mod search_tests;
 mod service_tiers;
 #[path = "session_header_tests.rs"]
 mod session_headers;
+#[path = "side_chat_wire_tests.rs"]
+mod side_chat_wire;
 #[path = "subtask_batch_tests.rs"]
 mod subtask_batches;
 #[path = "summary_tests.rs"]
@@ -4729,6 +4731,7 @@ async fn stalled_continuation_does_not_repeat_completed_tools_or_execute_partial
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "run it once".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &event_tx,
         ),
@@ -7291,6 +7294,7 @@ async fn http_only_responses_gateway_supports_arbitrary_models_tools_and_replay(
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "Use the gateway tool".into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &event_tx,
             )
@@ -8328,6 +8332,7 @@ async fn incident_prefix_flow(developer_messages: bool, cached_tokens: [u64; 4])
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: text.into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             ),

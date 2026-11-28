@@ -3,10 +3,10 @@ use super::header::is_leading_metadata;
 use super::item::TranscriptItem;
 use super::load::TranscriptLoadOutcome;
 use super::projection::is_compaction_prompt_item;
-use super::projection::is_conversation_item;
 use super::projection::is_prompt_item;
 use super::projection::model_input_at;
 use super::projection::retained_user_candidates;
+use super::projection::{has_post_fork_conversation_item, is_conversation_item};
 use super::writer::TranscriptWriter;
 use crate::ModelRequestItem;
 #[cfg(any(test, feature = "test-support"))]
@@ -41,6 +41,7 @@ pub struct Conversation {
     latest_compaction_index: Option<usize>,
     has_real_user_prompt: bool,
     has_conversation_item: bool,
+    rewrite_generation: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// Disjoint writer borrow used while a provider holds immutable model input.
@@ -99,6 +100,7 @@ impl Conversation {
             latest_compaction_index: None,
             has_real_user_prompt: false,
             has_conversation_item: false,
+            rewrite_generation: None,
         }
     }
 
@@ -184,7 +186,12 @@ impl Conversation {
             }
             self.has_compaction_prompt |= is_compaction_prompt_item(item);
             self.has_real_user_prompt |= is_prompt_item(item);
-            self.has_conversation_item |= is_conversation_item(item);
+            if matches!(item, TranscriptItem::SideChatForkBoundary) {
+                // Inherited conversation alone must not materialize a draft.
+                self.has_conversation_item = false;
+            } else {
+                self.has_conversation_item |= is_conversation_item(item);
+            }
         }
     }
 
@@ -370,6 +377,7 @@ impl Conversation {
 
     fn persist_prepared_change(&mut self, change: PreparedChange) -> anyhow::Result<()> {
         self.ensure_durable()?;
+        self.invalidate_fork_generation();
         self.writer.persist_edit(&change.items, change.suffix)?;
         self.adopt_validated(change.items, change.replay);
         Ok(())
@@ -532,7 +540,7 @@ impl Conversation {
                 self.items.truncate(start);
                 return Err(error.into());
             }
-            if !self.items.iter().any(is_conversation_item) {
+            if !has_post_fork_conversation_item(&self.items) {
                 if let Err(error) = self.writer.persist_records(&self.items) {
                     self.items.truncate(start);
                     return Err(error);
@@ -570,6 +578,7 @@ impl Conversation {
         if self.persistence_error.is_none() && !self.writer.is_pending() {
             return Ok(false);
         }
+        self.invalidate_fork_generation();
         if let Err(error) = self.writer.persist_unprepared(&self.items) {
             let error = error.context("failed to repair the degraded session transcript");
             self.persistence_error = Some(format!("{error:#}"));
@@ -627,6 +636,7 @@ impl Conversation {
     pub fn truncate(&mut self, index: usize) -> anyhow::Result<()> {
         self.ensure_durable()?;
         let index = index.max(self.leading_metadata_len());
+        self.invalidate_fork_generation();
         self.writer.persist_unprepared(&self.items[..index])?;
         self.items.truncate(index);
         self.replay = crate::validate_session_replay(&self.items);
@@ -657,11 +667,28 @@ impl Conversation {
         let index = index.max(self.leading_metadata_len());
         let mut replacement = self.items[..index].to_vec();
         replacement.extend(new_items);
+        self.invalidate_fork_generation();
         self.writer.persist_unprepared(&replacement)?;
         self.items = replacement;
         self.replay = crate::validate_session_replay(&self.items);
         self.rebuild_input_identity();
         Ok(())
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.writer.is_pending()
+    }
+
+    pub fn observe_rewrites(&mut self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        self.rewrite_generation
+            .get_or_insert_with(Default::default)
+            .clone()
+    }
+
+    fn invalidate_fork_generation(&self) {
+        if let Some(generation) = &self.rewrite_generation {
+            generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
     }
 
     pub fn session_id(&self) -> &str {

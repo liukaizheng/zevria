@@ -843,6 +843,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                 behavior: zevria_foundation::RequestBehavior::Standard,
                                 text: args,
                                 mode,
+                                references: Vec::new(),
                             })
                         }
                         command => command,
@@ -852,6 +853,7 @@ impl SessionRuntimeFactory for FakeFactory {
                             behavior: _,
                             text,
                             mode,
+                            ..
                         }) => {
                             let turn_id = TurnId::new(next_turn);
                             next_turn += 1;
@@ -876,6 +878,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                         .unwrap_or_else(|| text.clone())
                                         .to_message(),
                                     mode,
+                                    references: Vec::new(),
                                 }))
                                 .await;
                             if text == zevria_content::UserPrompt::from_text("make plan")
@@ -1116,6 +1119,7 @@ impl SessionRuntimeFactory for FakeFactory {
                                             turn_id,
                                             message: handoff.prompt,
                                             mode: SessionMode::Build,
+                                            references: Vec::new(),
                                         }))
                                         .await;
                                     let _ = events_tx
@@ -1140,6 +1144,11 @@ impl SessionRuntimeFactory for FakeFactory {
                         SessionCommand::Turn(
                             zevria_session_api::TurnCommand::ContinueAfterJobs { .. },
                         ) => panic!("ACP must never dispatch a job continuation"),
+                        SessionCommand::Control(zevria_session_api::ControlCommand::SideChat(
+                            _,
+                        )) => {
+                            panic!("ACP must never dispatch a Side Chat")
+                        }
                         SessionCommand::Turn(zevria_session_api::TurnCommand::StartFromPlan {
                             ..
                         })

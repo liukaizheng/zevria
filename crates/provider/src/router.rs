@@ -121,6 +121,7 @@ pub struct ProviderRouter {
     slots: Vec<ProfileSlot>,
     preamble: String,
     session_id: String,
+    prompt_cache_session_id: Option<String>,
     last_dispatched: Option<usize>,
     requires_portable_compaction: bool,
 }
@@ -210,9 +211,17 @@ impl ProviderRouter {
             slots,
             preamble: preamble.into(),
             session_id: session_id.into(),
+            prompt_cache_session_id: None,
             last_dispatched: None,
             requires_portable_compaction,
         })
+    }
+
+    /// Reuse the parent's cache and upstream affinity without sharing any
+    /// runtime slot, transport, or previous response chain.
+    pub fn with_prompt_cache_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.prompt_cache_session_id = Some(session_id.into());
+        self
     }
 
     /// Attach the actual transcript location without changing routing/cache keys.
@@ -352,19 +361,23 @@ impl ProviderRouter {
         index: usize,
         level: ReasoningLevel,
     ) -> anyhow::Result<&mut ProfileRuntime> {
+        let cache_session = self
+            .prompt_cache_session_id
+            .as_deref()
+            .unwrap_or(&self.session_id);
         let slot = self
             .slots
             .get_mut(index)
             .ok_or_else(|| anyhow::anyhow!("invalid provider router slot {index}"))?;
         if slot.runtime.is_none() {
-            let cache_key = profile_cache_key(&self.session_id, &slot.profile);
+            let cache_key = profile_cache_key(cache_session, &slot.profile);
             let runtime = match &slot.profile.protocol {
                 ProfileProtocol::Responses { .. } => {
                     let mut runtime = OpenAiProvider::unconnected(
                         &slot.profile,
                         level,
                         &self.preamble,
-                        &self.session_id,
+                        cache_session,
                         &cache_key,
                     )?;
                     runtime.slot_cache = slot.cache.clone();
@@ -376,7 +389,7 @@ impl ProviderRouter {
                         &slot.profile,
                         level,
                         &self.preamble,
-                        &self.session_id,
+                        cache_session,
                     )?))
                 }
             };
@@ -433,21 +446,25 @@ impl ModelProvider for ProviderRouter {
             "only root Build and Plan assignments may change"
         );
         self.route(role)?;
+        let cache_session = self
+            .prompt_cache_session_id
+            .as_deref()
+            .unwrap_or(&self.session_id);
         let profile = &self.slots[self.profile_slot(&target.profile)?].profile;
         match &profile.protocol {
             ProfileProtocol::Responses { .. } => {
                 OpenAiProvider::validate_profile_settings(
                     profile,
                     target.reasoning_level,
-                    &self.session_id,
-                    &profile_cache_key(&self.session_id, profile),
+                    cache_session,
+                    &profile_cache_key(cache_session, profile),
                 )?;
             }
             ProfileProtocol::Anthropic { .. } => {
                 AnthropicProvider::validate_profile_settings(
                     profile,
                     target.reasoning_level,
-                    &self.session_id,
+                    cache_session,
                 )?;
             }
         }

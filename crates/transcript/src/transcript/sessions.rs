@@ -32,6 +32,17 @@ pub fn subsessions_dir(workspace: &Path, root_session_id: &str) -> PathBuf {
         .join(root_session_id)
 }
 
+/// Side Chats have a private namespace and do not participate in --continue.
+pub fn side_chats_dir(workspace: &Path, root_id: &str) -> PathBuf {
+    zevria_foundation::runtime_paths::workspace_state_root(workspace)
+        .join("side-chats")
+        .join(root_id)
+}
+
+pub fn side_chat_files(directory: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
+    subsession_files(directory)
+}
+
 /// The plans directory of a workspace: `{workspace}/.zevria/plans`. Submitted
 /// artifacts are projected here by the session engine; transcripts remain
 /// canonical.

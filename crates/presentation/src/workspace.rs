@@ -32,6 +32,7 @@ pub struct ChildPane {
 pub struct WorkspaceModel<R = SessionModel, S = ChildPane, A = (), O = WorkspaceControls> {
     pub root: R,
     pub children: Vec<S>,
+    pub side_chats: Vec<crate::side_chats::SideChatPane>,
     pub agents: Vec<A>,
     pub controls: O,
     pub session_id: String,
@@ -43,6 +44,7 @@ impl<R, S, A, O> WorkspaceModel<R, S, A, O> {
         Self {
             root,
             children: Vec::new(),
+            side_chats: Vec::new(),
             agents: Vec::new(),
             controls,
             session_id: String::new(),
@@ -59,6 +61,8 @@ pub struct WorkspaceControls {
     pub subtasks_open: bool,
     pub registry: CommandRegistry,
     pub selected_child: Option<SubtaskId>,
+    pub selected_side_chat: Option<zevria_foundation::SideChatId>,
+    pub side_chat_open: bool,
 }
 
 impl Default for WorkspaceControls {
@@ -71,6 +75,8 @@ impl Default for WorkspaceControls {
             subtasks_open: false,
             registry: CommandRegistry::default(),
             selected_child: None,
+            selected_side_chat: None,
+            side_chat_open: false,
         }
     }
 }
@@ -112,6 +118,7 @@ pub enum InputRoute {
     Jobs,
     Mcp,
     Subtasks,
+    SideChat(Option<UserPrompt>),
     Notice(String),
     Retained,
 }
@@ -134,6 +141,7 @@ pub fn admit_work(
     }
     let command = match input {
         ClassifiedInput::Message(text) => root.submit(text, behavior),
+        ClassifiedInput::SideChat(prompt) => return InputRoute::SideChat(prompt),
         ClassifiedInput::Orchestrate(_) if root.next_mode() != SessionMode::Build => {
             return InputRoute::Notice(
                 "Orchestration is available only in Build mode; the draft was retained.".into(),
@@ -333,7 +341,34 @@ impl WorkspaceModel {
                 for (id, stream) in batch.subtasks {
                     self.child(&id).model.apply_stream(stream);
                 }
+                for (id, stream) in batch.side_chats {
+                    if let Some(side) = self
+                        .side_chats
+                        .iter_mut()
+                        .find(|side| side.descriptor.id == id)
+                    {
+                        side.model.apply_stream(stream);
+                    }
+                }
                 WorkspaceReduction { root, fresh: None }
+            }
+            SessionUpdate::Lifecycle(SessionEvent::SideChat(event)) => {
+                match &event {
+                    zevria_session_api::SideChatEvent::Created { descriptor, .. } => {
+                        // A fresh Plan decision takes precedence over a fork that finished opening.
+                        if self.root.workflow.dialog().is_none() {
+                            self.open_side_chat(Some(descriptor.id));
+                        }
+                    }
+                    zevria_session_api::SideChatEvent::CreateFailed { error, .. } => {
+                        self.root
+                            .conversation
+                            .push_error(format!("Side Chat could not open: {error}"));
+                    }
+                    _ => {}
+                }
+                crate::side_chats::apply_side_chat_event(&mut self.side_chats, event);
+                WorkspaceReduction::default()
             }
             SessionUpdate::Lifecycle(SessionEvent::Subtask(SubtaskEvent::Session {
                 id,
@@ -452,6 +487,9 @@ impl WorkspaceModel {
                 }
                 self.root.retain_unsaved_partial(&event);
                 let root = self.root.reduce(event);
+                if root.plan_ready || self.root.workflow.dialog().is_some() {
+                    self.controls.side_chat_open = false;
+                }
                 WorkspaceReduction {
                     root: Some(root),
                     fresh,
@@ -470,6 +508,9 @@ impl WorkspaceModel {
         self.root.observe_clock(now);
         for child in &mut self.children {
             child.model.observe_clock(now);
+        }
+        for side in &mut self.side_chats {
+            side.model.observe_clock(now);
         }
     }
     pub fn jobs_panel_visible(&self) -> bool {
@@ -496,7 +537,30 @@ impl WorkspaceModel {
             }
         }
     }
+    pub fn open_side_chat(&mut self, id: Option<zevria_foundation::SideChatId>) -> bool {
+        if self.controls.models.is_open() || self.controls.question.is_some() {
+            return false;
+        }
+        self.root.workflow.hide();
+        self.root.jobs_inspector_mut().close();
+        self.controls.subtasks_open = false;
+        self.controls.selected_child = None;
+        self.controls.mcp.close();
+        self.controls.side_chat_open = true;
+        if let Some(id) = id {
+            self.controls.selected_side_chat = Some(id);
+        }
+        true
+    }
+
     pub fn disconnected(&mut self) -> Reduction {
+        for pane in &mut self.side_chats {
+            if pane.is_running() {
+                pane.stopped(
+                    "The session disconnected. Reopen it to continue this Side Chat.".into(),
+                );
+            }
+        }
         self.controls.question = None;
         self.controls.models.reset();
         self.controls.mcp = Default::default();
@@ -519,6 +583,7 @@ impl WorkspaceModel {
         let Some(mode) = self.root.begin_model_management() else {
             return false;
         };
+        self.controls.side_chat_open = false;
         self.controls.models.show(mode, scope)
     }
     pub fn can_edit_transcript(&self) -> bool {
@@ -560,6 +625,10 @@ impl WorkspaceModel {
         let mode = self.root.next_mode();
         let replacement = match self.controls.registry.classify_prompt(prompt) {
             Ok(ClassifiedInput::Message(text)) => TranscriptEditReplacement::Message {
+                references: crate::side_chats::extract_side_chat_references(
+                    &text,
+                    &self.side_chats,
+                ),
                 text,
                 mode,
                 behavior: RequestBehavior::Standard,
@@ -570,6 +639,10 @@ impl WorkspaceModel {
                 );
             }
             Ok(ClassifiedInput::Orchestrate(text)) => TranscriptEditReplacement::Message {
+                references: crate::side_chats::extract_side_chat_references(
+                    &text,
+                    &self.side_chats,
+                ),
                 text,
                 mode,
                 behavior: RequestBehavior::Orchestrate,
@@ -583,7 +656,11 @@ impl WorkspaceModel {
                         .into(),
                 );
             }
-            Ok(ClassifiedInput::Builtin(_) | ClassifiedInput::McpPrompt { .. }) => {
+            Ok(
+                ClassifiedInput::Builtin(_)
+                | ClassifiedInput::SideChat(_)
+                | ClassifiedInput::McpPrompt { .. },
+            ) => {
                 return InputRoute::Notice(
                     "Built-in commands cannot replace transcript items; cancel the recall to run the command.".into(),
                 );
@@ -610,6 +687,7 @@ impl WorkspaceModel {
     pub fn route_prompt(&mut self, prompt: &UserPrompt, orchestrate: bool) -> InputRoute {
         let classified = self.controls.registry.classify_prompt(prompt);
         match classified {
+            Ok(ClassifiedInput::SideChat(prompt)) => return InputRoute::SideChat(prompt),
             Ok(ClassifiedInput::Builtin(SlashCommand::Jobs)) => return InputRoute::Jobs,
             Ok(ClassifiedInput::Builtin(SlashCommand::Mcp)) => return InputRoute::Mcp,
             Ok(ClassifiedInput::Builtin(SlashCommand::Subtasks)) => return InputRoute::Subtasks,
@@ -634,7 +712,19 @@ impl WorkspaceModel {
                 } else {
                     RequestBehavior::Standard
                 };
-                return admit_work(&mut self.root, work, behavior, mode);
+                let mut route = admit_work(&mut self.root, work, behavior, mode);
+                if let InputRoute::Prompt(command) = &mut route
+                    && let SessionCommand::Turn(zevria_session_api::TurnCommand::Submit {
+                        text,
+                        references,
+                        ..
+                    }) = command.as_mut()
+                {
+                    *references =
+                        crate::side_chats::extract_side_chat_references(text, &self.side_chats);
+                    self.root.set_pending_prompt_references(references);
+                }
+                return route;
             }
             ClassifiedInput::Builtin(SlashCommand::Build) => self
                 .root
@@ -672,6 +762,7 @@ impl WorkspaceModel {
             }
             ClassifiedInput::Builtin(SlashCommand::New) => return InputRoute::New,
             ClassifiedInput::Builtin(SlashCommand::Resume) => return InputRoute::Resume,
+            ClassifiedInput::SideChat(_) => unreachable!("handled before admission"),
             ClassifiedInput::Builtin(_) | ClassifiedInput::Ensemble { .. } => {
                 return InputRoute::Notice(
                     "This command is not available in this frontend; the draft was retained."

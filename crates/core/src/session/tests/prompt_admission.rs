@@ -101,6 +101,7 @@ async fn admission_records_match_source_replay_for_message_activation_reapplicat
         || PromptTurnInput::Message {
             behavior: zevria_foundation::RequestBehavior::Standard,
             text: "initial".into(),
+            references: Vec::new(),
         },
         None,
     );
@@ -153,6 +154,7 @@ async fn admission_records_match_source_replay_for_message_activation_reapplicat
         || PromptTurnInput::Message {
             behavior: zevria_foundation::RequestBehavior::Standard,
             text: "replace activation".into(),
+            references: Vec::new(),
         },
         None,
     );
@@ -318,6 +320,7 @@ async fn admission_replays_zero_append_history_once_for_edits_and_only_the_propo
                         PromptTurnInput::Message {
                             behavior: zevria_foundation::RequestBehavior::Standard,
                             text: "next".into(),
+                            references: Vec::new(),
                         }
                     };
                     let plan_before = PROMPT_PLAN_PREFIX_REPLAYS.get();
@@ -397,6 +400,7 @@ async fn second_prompt_after_metadata_bearing_results_keeps_the_committed_prefix
                 PromptTurnInput::Message {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "first ordinary prompt".into(),
+                    references: Vec::new(),
                 },
                 SessionMode::Build,
             )
@@ -493,6 +497,7 @@ async fn second_prompt_after_metadata_bearing_results_keeps_the_committed_prefix
             || PromptTurnInput::Message {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "second ordinary prompt".into(),
+                references: Vec::new(),
             },
             None,
         );

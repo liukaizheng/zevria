@@ -337,6 +337,7 @@ async fn anthropic_root_dispatches_the_same_local_search_to_responses_sse() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "Research the current version".into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -457,6 +458,7 @@ async fn engine_tool_loop_effort_selection_preserves_signed_thinking_and_reopene
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "count once".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -642,4 +644,191 @@ async fn idle_timeout_retries_without_partial_output_and_retry_after_is_bounded(
         }
         server.await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn side_chat_wire_preserves_signed_anthropic_prefix() {
+    use zevria_foundation::{RequestBehavior, SessionMode, SideChatId, SideChatOrigin};
+    use zevria_session_api::TurnCommand;
+    use zevria_transcript::SideChatFork;
+    let root_dir = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut profile = profile(format!(
+        "http://{}/v1/messages",
+        listener.local_addr().unwrap()
+    ));
+    if let ProfileProtocol::Anthropic { endpoint, .. } = &mut profile.protocol {
+        Arc::make_mut(endpoint).input_token_count.enabled = false;
+    }
+    let server = tokio::spawn(async move {
+        let mut bodies = Vec::new();
+        for index in 0..3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            bodies.push(receive_http_json(&mut stream).await.body);
+            let reply = if index == 0 {
+                response(
+                    vec![
+                        json!({"type":"thinking","thinking":"private reasoning", "signature":"original signature"}),
+                        json!({"type":"text","text":"Parent answer"}),
+                    ],
+                    "end_turn",
+                )
+            } else {
+                answer()
+            };
+            send_http_response(&mut stream, "200 OK", "text/event-stream", reply).await;
+        }
+        bodies
+    });
+    let effort = zevria_foundation::ReasoningLevel::High;
+    let root = TranscriptWriter::allocate(root_dir.path()).unwrap();
+    let root_id = root.session_id().to_owned();
+    let router = |id: &str| {
+        ProviderRouter::from_routes(
+            [(ModelRole::Build, profile.clone(), effort)],
+            "stable application",
+            id,
+        )
+        .unwrap()
+    };
+    let skills = Arc::new(SkillCatalog::default());
+    let tools = ToolServer::new()
+        .tool(CountTool {
+            executions: Arc::new(AtomicUsize::new(0)),
+        })
+        .run();
+    let policy = zevria_model::CompactionPolicy::new(
+        Default::default(),
+        std::array::from_fn(|_| profile.context_policy()),
+    )
+    .unwrap();
+    let mut root = SessionEngine::builder(
+        router(&root_id),
+        tools,
+        test_policies(),
+        root,
+        skills.clone(),
+    )
+    .unwrap()
+    .with_compaction_policy(policy.clone())
+    .with_incremental_tools(true)
+    .build()
+    .unwrap();
+    let (command, _) = tokio::sync::mpsc::unbounded_channel();
+    let handle = root.enable_side_chats(command);
+
+    async fn submit(
+        engine: &mut SessionEngine<ProviderRouter>,
+        text: &str,
+        behavior: RequestBehavior,
+    ) {
+        let (events, mut updates) = zevria_session_api::session_event_channel(128);
+        engine
+            .handle_command(
+                SessionCommand::Turn(TurnCommand::Submit {
+                    text: text.into(),
+                    mode: SessionMode::Build,
+                    behavior,
+                    references: Vec::new(),
+                }),
+                &events,
+            )
+            .await
+            .unwrap();
+        let mut completed = false;
+        while let Ok(update) = updates.try_recv() {
+            if let zevria_session_api::SessionUpdate::Lifecycle(
+                zevria_session_api::SessionEvent::Turn(event),
+            ) = update
+            {
+                assert!(
+                    !matches!(event, TurnEvent::Failed { .. } | TurnEvent::Rejected { .. }),
+                    "{event:?}"
+                );
+                completed |= matches!(event, TurnEvent::Completed { .. });
+            }
+        }
+        assert!(completed, "expected a completed provider turn");
+    }
+    submit(
+        &mut root,
+        "Remember the signed history",
+        RequestBehavior::Standard,
+    )
+    .await;
+    let meta = handle.borrow().clone().unwrap();
+    let inherited =
+        zevria_transcript::load_prefix_items(&meta.transcript_path, meta.safe_len).unwrap();
+    submit(
+        &mut root,
+        "The main conversation continues",
+        RequestBehavior::Standard,
+    )
+    .await;
+
+    let id = SideChatId::random();
+    let fork = SideChatFork {
+        origin: SideChatOrigin {
+            version: 1,
+            id,
+            parent_session_id: root_id.clone(),
+            title: "Independent question".into(),
+            forked_mode: SessionMode::Build,
+            forked_model_role: ModelRole::Build,
+            forked_profile: profile.profile.clone(),
+            forked_reasoning: effort,
+            inherited_turn_count: meta.inherited_turn_count,
+            quoted_excerpt: None,
+        },
+        instructions: meta.instructions.to_string(),
+        initial_tools: (*meta.initial_tools).clone(),
+        skills_enabled: meta.skills_enabled,
+    };
+    let mut items = vec![TranscriptItem::SideChatOrigin(Box::new(fork))];
+    items.extend(inherited);
+    items.push(TranscriptItem::SideChatForkBoundary);
+    let mut side = SessionEngine::builder(
+        router(&id.to_string()).with_prompt_cache_session_id(&root_id),
+        ToolServer::new().run(),
+        test_policies(),
+        TranscriptWriter::allocate(root_dir.path()).unwrap(),
+        skills,
+    )
+    .unwrap()
+    .with_transcript_items(items)
+    .unwrap()
+    .with_read_only_side_chat(zevria_core::SideChatReadOnlyConfig {
+        quoted_excerpt: None,
+        skills_enabled: meta.skills_enabled,
+        mode: SessionMode::Build,
+        instructions: meta.instructions.clone(),
+        frozen_tools: meta.initial_tools.clone(),
+        mcp: None,
+        mcp_tools: None,
+    })
+    .with_compaction_policy(policy)
+    .build()
+    .unwrap();
+    submit(
+        &mut side,
+        "Independent Side Chat question",
+        RequestBehavior::SideChat,
+    )
+    .await;
+    let bodies = server.await.unwrap();
+    let (root, side) = (&bodies[1], &bodies[2]);
+    for key in ["system", "tools", "thinking", "output_config", "model"] {
+        assert_eq!(root[key], side[key], "fork changed {key}");
+    }
+    let prefix_len = root["messages"].as_array().unwrap().len() - 1;
+    assert_eq!(
+        root["messages"].as_array().unwrap()[..prefix_len],
+        side["messages"].as_array().unwrap()[..prefix_len]
+    );
+    assert!(side["messages"].to_string().contains("original signature"));
+    assert!(
+        side["messages"]
+            .to_string()
+            .contains("Side Chat request forked")
+    );
 }

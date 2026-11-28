@@ -117,6 +117,7 @@ fn submit(text: &str) -> SessionCommand {
         behavior: zevria_foundation::RequestBehavior::Standard,
         text: text.into(),
         mode: SessionMode::Build,
+        references: Vec::new(),
     })
 }
 
@@ -269,6 +270,54 @@ impl RunningSession {
             crate::session::ControlCommand::Shutdown,
         ));
         self.finish().await
+    }
+}
+
+#[tokio::test]
+async fn side_submit_is_rejected_when_the_supervisor_is_missing_or_closed() {
+    use zevria_foundation::SideChatId;
+    use zevria_session_api::{SideChatCommand, SideChatEvent};
+
+    for closed in [false, true] {
+        let (_directory, transcript) = test_transcript();
+        let (provider, mut calls) = GatedProvider::new();
+        let mut engine = engine(provider, transcript);
+        if closed {
+            let (tx, rx) = mpsc::unbounded_channel();
+            drop(rx);
+            engine.enable_side_chats(tx);
+        }
+        let (events, receiver) = session_event_channel(32);
+        let mut runtime = RunningSession::start(engine, [], events, receiver);
+        let active = if closed {
+            runtime.send(submit("work in the parent"));
+            Some(runtime.call(&mut calls).await)
+        } else {
+            None
+        };
+        let id = SideChatId::random();
+        runtime.send(SessionCommand::Control(ControlCommand::SideChat(
+            SideChatCommand::Submit {
+                id,
+                text: "side question".into(),
+            },
+        )));
+        let event = runtime
+            .until(|event| matches!(event, SessionEvent::SideChat(_)))
+            .await;
+        assert_eq!(
+            event,
+            SessionEvent::SideChat(SideChatEvent::SubmitRejected {
+                id,
+                error: "Side Chat is unavailable for this session".into(),
+            })
+        );
+        if let Some(call) = active {
+            let turn = call.turn.id;
+            answer(call, "parent answer");
+            runtime.completed(turn).await;
+        }
+        runtime.shutdown().await;
     }
 }
 
@@ -569,6 +618,7 @@ async fn restored_plan_is_available_before_run_without_startup_events_or_project
             behavior: zevria_foundation::RequestBehavior::Standard,
             text: "revise this plan".into(),
             mode: SessionMode::Plan,
+            references: Vec::new(),
         })],
         events,
         receiver,

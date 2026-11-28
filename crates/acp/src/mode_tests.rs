@@ -695,6 +695,7 @@ async fn retained_plan_snapshots_and_turn_modes_do_not_erase_explicit_selection(
                 turn_id: TurnId::new(2),
                 mode: SessionMode::Plan,
                 message: Message::user("retained turn"),
+                references: Vec::new(),
             }))?;
             assert_eq!(live.mode(), SessionMode::Build);
             live.handle_event(SessionEvent::Plan(PlanEvent::StateChanged {

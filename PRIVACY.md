@@ -150,12 +150,13 @@ resume, recovery, and troubleshooting. Common locations are:
 | --- | --- |
 | `~/.zevria/config.toml` and `~/.zevria/models.jsonc` | Settings, provider endpoints, and literal API credentials or local credential-helper commands/arguments (not generated keys). `ZEVRIA_CONFIG` selects another configuration file and its sibling `models.jsonc`. |
 | `<workspace>/.zevria/sessions/` | Root conversation history, submitted images, skill activation records, tool calls and results, model settings, and provider replay data. |
+| `<workspace>/.zevria/side-chats/` | Side Chat history, including the copied parent history, selected excerpts, submitted images, and provider replay data. |
 | `<workspace>/.zevria/subsessions/` and `<workspace>/.zevria/ensemble-sessions/` | Histories of delegated subtasks and native ensemble workers. |
 | `<workspace>/.zevria/agent-runs/` and `<workspace>/.zevria/plans/` | Ensemble evidence, worker journals and diagnostics, and generated plans. |
 | `~/.zevria/logs/zevria.log` | Operational logs, errors, paths, request or response identifiers, usage information, and other diagnostic details. The directory and log level are configurable under `[log]`; `RUST_LOG` overrides the configured level. |
 
 Here `~` means the local home directory resolved by Zevria. Windows, Linux, and
-macOS use the same five workspace state directories directly under
+macOS use the same six workspace state directories directly under
 `<workspace>/.zevria/`. Older Windows state under `<workspace>/.zevria/windows/`
 remains on disk but is not read or migrated automatically. See the
 [optional offline transfer](docs/windows.md#optional-offline-transfer-of-legacy-windows-state).
@@ -192,8 +193,9 @@ previously saved history.
 To delete Zevria's workspace history and generated artifacts, first stop **all
 sessions and workers using that workspace** and back up any state you want to
 keep. Run `zevria clean` from the workspace. **It deletes `sessions/`,
-`subsessions/`, `ensemble-sessions/`, `agent-runs/`, and `plans/` directly under
-`<workspace>/.zevria/` without confirmation**, even if another OS created them.
+`subsessions/`, `ensemble-sessions/`, `agent-runs/`, `plans/`, and `side-chats/`
+directly under `<workspace>/.zevria/` without confirmation**, even if another OS
+created them.
 
 This cleanup does not remove legacy `.zevria/windows/` data, global configuration
 or logs, skills, other unlisted files, external agents' separately stored

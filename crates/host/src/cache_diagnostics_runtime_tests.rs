@@ -131,6 +131,7 @@ builder = {{ provider = "test", model = "test-model", reasoning_level = "medium"
                         behavior: zevria_foundation::RequestBehavior::Standard,
                         text: text.into(),
                         mode: SessionMode::Build,
+                        references: Vec::new(),
                     },
                 ))
                 .unwrap();

@@ -32,6 +32,7 @@ pub enum CommandControlResult {
 pub enum SessionEvent {
     Turn(TurnEvent),
     Subtask(SubtaskEvent),
+    SideChat(SideChatEvent),
     Ensemble(EnsembleEvent),
     Plan(PlanEvent),
     Manage(ManagementEvent),
@@ -58,6 +59,7 @@ pub enum TurnEvent {
         turn_id: TurnId,
         message: Message,
         mode: SessionMode,
+        references: Vec<SideChatReferenceAttachment>,
     },
     /// The final assistant response for the user turn.
     Completed {
@@ -353,6 +355,7 @@ impl SessionStreamState {
 pub struct SessionStreamBatch {
     pub root: Option<SessionStreamState>,
     pub subtasks: HashMap<SubtaskId, SessionStreamState>,
+    pub side_chats: HashMap<SideChatId, SessionStreamState>,
     /// Changed accumulated ACP segments in transport sequence order. More
     /// than one segment from the same worker can be present when the consumer
     /// falls behind a thought-to-message transition.
@@ -361,7 +364,10 @@ pub struct SessionStreamBatch {
 
 impl SessionStreamBatch {
     pub(super) fn is_empty(&self) -> bool {
-        self.root.is_none() && self.subtasks.is_empty() && self.agent_runs.is_empty()
+        self.root.is_none()
+            && self.subtasks.is_empty()
+            && self.side_chats.is_empty()
+            && self.agent_runs.is_empty()
     }
 }
 
@@ -420,6 +426,7 @@ pub(super) struct SequencedSessionEvent {
 pub(super) struct SessionStreamSnapshot {
     pub(super) root: Option<SessionStreamState>,
     pub(super) subtasks: HashMap<SubtaskId, SessionStreamState>,
+    pub(super) side_chats: HashMap<SideChatId, SessionStreamState>,
     pub(super) agent_runs: HashMap<AgentRunPreviewKey, AgentRunStreamState>,
     pub(super) active_agent_runs: HashMap<AgentRunId, AgentRunPreviewKey>,
 }
@@ -443,9 +450,11 @@ pub struct SessionEventReceiver {
     pub(super) pending_lifecycle: Option<SequencedSessionEvent>,
     pub(super) root_fence: u64,
     pub(super) subtask_fences: HashMap<SubtaskId, u64>,
+    side_chat_fences: HashMap<SideChatId, u64>,
     pub(super) agent_run_fences: HashMap<AgentRunId, u64>,
     pub(super) root_emitted: u64,
     pub(super) subtask_emitted: HashMap<SubtaskId, u64>,
+    side_chat_emitted: HashMap<SideChatId, u64>,
     pub(super) agent_run_emitted: HashMap<AgentRunPreviewKey, u64>,
 }
 
@@ -471,9 +480,11 @@ pub fn session_event_channel(capacity: usize) -> (SessionEventSender, SessionEve
             pending_lifecycle: None,
             root_fence: 0,
             subtask_fences: HashMap::new(),
+            side_chat_fences: HashMap::new(),
             agent_run_fences: HashMap::new(),
             root_emitted: 0,
             subtask_emitted: HashMap::new(),
+            side_chat_emitted: HashMap::new(),
             agent_run_emitted: HashMap::new(),
         },
     )
@@ -589,6 +600,15 @@ impl SessionEventSender {
             state.revision = sequence;
             self.streams.send_modify(|snapshot| {
                 snapshot.subtasks.insert(id, state);
+            });
+        });
+    }
+
+    pub fn set_side_chat_stream(&self, id: SideChatId, mut state: SessionStreamState) {
+        self.publish_next(|sequence| {
+            state.revision = sequence;
+            self.streams.send_modify(|snapshot| {
+                snapshot.side_chats.insert(id, state);
             });
         });
     }
@@ -765,6 +785,30 @@ impl SessionEventReceiver {
 
     pub(super) fn lifecycle_update(&mut self, event: SequencedSessionEvent) -> SessionUpdate {
         match &event.event {
+            SessionEvent::SideChat(SideChatEvent::Session { id, event: inner })
+                if fences_turn_preview(inner) =>
+            {
+                self.side_chat_fences.insert(*id, event.sequence);
+            }
+            SessionEvent::SideChat(SideChatEvent::Failed { id, .. }) => {
+                self.side_chat_fences.insert(*id, event.sequence);
+            }
+            SessionEvent::SideChat(SideChatEvent::Unloaded { id }) => {
+                self.side_chat_fences.remove(id);
+                self.side_chat_emitted.remove(id);
+                self.stream_cleanup.send_if_modified(|snapshot| {
+                    if snapshot
+                        .side_chats
+                        .get(id)
+                        .is_some_and(|state| state.revision <= event.sequence)
+                    {
+                        snapshot.side_chats.remove(id);
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
             SessionEvent::Subtask(SubtaskEvent::Status { id, status, .. })
                 if status.is_terminal() =>
             {
@@ -851,6 +895,19 @@ impl SessionEventReceiver {
                 if before_sequence.is_none() {
                     self.subtask_emitted.insert(id.clone(), state.revision);
                     batch.subtasks.insert(id.clone(), state.clone());
+                } else {
+                    deferred = true;
+                }
+            }
+        }
+
+        for (id, state) in &snapshot.side_chats {
+            let fence = self.side_chat_fences.get(id).copied().unwrap_or_default();
+            let emitted = self.side_chat_emitted.get(id).copied().unwrap_or_default();
+            if state.revision > fence && state.revision > emitted {
+                if before_sequence.is_none() {
+                    self.side_chat_emitted.insert(*id, state.revision);
+                    batch.side_chats.insert(*id, state.clone());
                 } else {
                     deferred = true;
                 }

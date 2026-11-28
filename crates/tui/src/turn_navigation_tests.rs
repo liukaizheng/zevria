@@ -217,6 +217,7 @@ fn native_prompt_kinds_are_destinations_live_and_restored_but_metadata_is_not() 
                     TranscriptItem::RequestPrompt {
                         message: Message::user("work"),
                         request: request.clone(),
+                        references: None,
                     },
                     TranscriptItem::RequestDirective(Box::new(
                         zevria_instructions::RequestDirective::boundary(request.clone()),
@@ -252,6 +253,7 @@ fn native_prompt_kinds_are_destinations_live_and_restored_but_metadata_is_not() 
                         turn_id,
                         message,
                         mode: SessionMode::Build,
+                        references: Vec::new(),
                     }));
                     app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Completed {
                         turn_id,
@@ -283,6 +285,7 @@ fn native_prompt_kinds_are_destinations_live_and_restored_but_metadata_is_not() 
                     turn_id: TurnId::new(6),
                     message: image_prompt,
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }));
             }
             app.set_view_for_test(0, false);
@@ -409,6 +412,7 @@ fn reflow_folding_and_streaming_preserve_a_turn_header_not_an_old_scroll_anchor(
         turn_id: TurnId::new(10),
         message: Message::user("latest"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     jump(&mut app, ']');
     assert_first_row(&mut app, 80, 20, "Approved Plan handoff · #2");

@@ -131,6 +131,7 @@ fn enter_tab_and_ctrl_i_insert_only_and_ctrl_enter_submits_exact_literal_text() 
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: UserPrompt::from_text("Explain @\"docs/my file.md\" suffix"),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }
             )))
         );
@@ -146,6 +147,7 @@ fn enter_tab_and_ctrl_i_insert_only_and_ctrl_enter_submits_exact_literal_text() 
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: UserPrompt::from_text("Explain @app"),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }
         )))
     );
@@ -191,7 +193,8 @@ fn loading_empty_and_unavailable_rows_are_inert_and_diagnostics_never_become_his
                 zevria_session_api::TurnCommand::Submit {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "@none".into(),
-                    mode: SessionMode::Build
+                    mode: SessionMode::Build,
+                    references: Vec::new(),
                 }
             )))
         );

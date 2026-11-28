@@ -187,6 +187,7 @@ impl EngineRoundFixture {
                         behavior: zevria_foundation::RequestBehavior::Standard,
                         text: "Run the synthetic tool once".into(),
                         mode: SessionMode::Build,
+                        references: Vec::new(),
                     }),
                     &events,
                 )

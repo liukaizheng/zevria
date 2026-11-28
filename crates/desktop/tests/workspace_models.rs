@@ -35,6 +35,7 @@ fn fixture(mode: SessionMode) -> WorkspaceModel {
         turn_id: TURN,
         mode,
         message: Message::user("saved prompt"),
+        references: Vec::new(),
     })));
     let role = mode_role(mode);
     model.apply(U::Lifecycle(E::Turn(TurnEvent::UsageUpdated {

@@ -40,6 +40,8 @@ pub enum SlashCommand {
     Jobs,
     /// List this session's subtasks, even while busy.
     Subtasks,
+    Side,
+    Btw,
     /// Pick a previous session of this workspace and resume it.
     Resume,
     /// Reset the conversation in Build, retaining both modes' model/reasoning choices.
@@ -158,6 +160,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "model-session",
         description: "Choose this mode's model/reasoning; keep on reset/resume, not in config",
     },
+    CommandSpec {
+        command: SlashCommand::Side,
+        name: "side",
+        description: "Open a read-only side chat forked from this conversation",
+    },
+    CommandSpec {
+        command: SlashCommand::Btw,
+        name: "btw",
+        description: "Ask a quick read-only side question",
+    },
 ];
 
 pub const WORKER_COMMANDS: &[CommandSpec] = &[
@@ -202,6 +214,7 @@ pub const WORKER_COMMANDS: &[CommandSpec] = &[
 /// recalled transcript target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClassifiedInput {
+    SideChat(Option<zevria_content::UserPrompt>),
     Message(zevria_content::UserPrompt),
     Orchestrate(zevria_content::UserPrompt),
     Builtin(SlashCommand),
@@ -298,6 +311,7 @@ pub struct CommandRegistry {
     skills: Vec<SkillMeta>,
     mcp_prompts: Vec<(String, String)>,
     worker: bool,
+    disabled: bool,
 }
 
 impl CommandRegistry {
@@ -308,7 +322,19 @@ impl CommandRegistry {
             skills,
             mcp_prompts: vec![],
             worker: false,
+            disabled: false,
         }
+    }
+
+    pub fn disabled() -> Self {
+        Self {
+            disabled: true,
+            ..Self::default()
+        }
+    }
+
+    pub const fn is_disabled(&self) -> bool {
+        self.disabled
     }
 
     pub fn worker() -> Self {
@@ -351,6 +377,9 @@ impl CommandRegistry {
     /// or catalog (skill) order. Once whitespace begins before the caret,
     /// there is no active completion filter; text after the caret is ignored.
     pub fn matches(&self, input: &str, cursor: usize) -> Vec<MatchEntry<'_>> {
+        if self.disabled {
+            return Vec::new();
+        }
         let Some(completion) = completion(input, cursor) else {
             return Vec::new();
         };
@@ -429,11 +458,16 @@ impl CommandRegistry {
                         SlashCommand::EnsemblePlan
                             | SlashCommand::EnsembleReview
                             | SlashCommand::Orchestrate
+                            | SlashCommand::Side
+                            | SlashCommand::Btw
                     )
                 {
                     return Err(ClassificationError::ImagesOnControl);
                 }
                 match spec.command {
+                    SlashCommand::Side | SlashCommand::Btw => Ok(ClassifiedInput::SideChat(
+                        (!args.is_blank()).then_some(args),
+                    )),
                     SlashCommand::Prompt => crate::mcp::parse_prompt(&args.text_projection())
                         .map(|(server, prompt, arguments)| ClassifiedInput::McpPrompt {
                             server,
@@ -546,6 +580,8 @@ mod tests {
                 "subtasks",
                 "model",
                 "model-session",
+                "side",
+                "btw",
             ]
         );
         assert_eq!(
@@ -616,6 +652,8 @@ mod tests {
                 "subtasks",
                 "model",
                 "model-session",
+                "side",
+                "btw",
             ]
         );
         assert_eq!(
@@ -954,6 +992,8 @@ mod tests {
                 "subtasks",
                 "model",
                 "model-session",
+                "side",
+                "btw",
             ]
         );
         assert!(registry.matches("$", 1).is_empty());

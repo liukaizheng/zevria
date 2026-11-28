@@ -70,7 +70,8 @@ impl DraftContent {
 
 pub fn restore(restored: RestoredSession) -> WorkspaceModel {
     let skills = restored.skill_context.completions();
-    WorkspaceModel::restore(WorkspaceRestoration {
+    let side_chats = restored.side_chats;
+    let mut model = WorkspaceModel::restore(WorkspaceRestoration {
         session_id: restored.session_id,
         transcript_path: restored.transcript_path,
         session: RestorationInput {
@@ -97,5 +98,18 @@ pub fn restore(restored: RestoredSession) -> WorkspaceModel {
                 items: child.items,
             })
             .collect(),
-    })
+    });
+    model.side_chats = side_chats
+        .into_iter()
+        .map(|side| {
+            zevria_presentation::side_chats::SideChatPane::restore(
+                zevria_presentation::side_chats::RestoredSidePane {
+                    descriptor: side.descriptor,
+                    quoted_excerpt: side.origin.quoted_excerpt,
+                    items: side.items,
+                },
+            )
+        })
+        .collect();
+    model
 }

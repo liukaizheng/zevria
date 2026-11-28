@@ -286,6 +286,7 @@ async fn fallback_and_direct_build_submissions_respect_all_plan_states() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "implement directly".into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )

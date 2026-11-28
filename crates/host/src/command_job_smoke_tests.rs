@@ -51,6 +51,7 @@ async fn background_completion_cache_fixture(automatic: bool) {
             text: "start a background job".into(),
             mode: SessionMode::Build,
             behavior: zevria_foundation::RequestBehavior::Standard,
+            references: Vec::new(),
         }))
         .unwrap();
     // completed() includes the post-turn EngineIdle barrier.
@@ -88,6 +89,7 @@ async fn background_completion_cache_fixture(automatic: bool) {
             text: "inspect files".into(),
             mode: SessionMode::Build,
             behavior: zevria_foundation::RequestBehavior::Standard,
+            references: Vec::new(),
         }))
         .unwrap();
     completed(&mut events).await;
@@ -119,6 +121,7 @@ async fn background_completion_cache_fixture(automatic: bool) {
             text: "list jobs after resume".into(),
             mode: SessionMode::Build,
             behavior: zevria_foundation::RequestBehavior::Standard,
+            references: Vec::new(),
         }))
         .unwrap();
     completed(&mut events).await;
@@ -268,6 +271,7 @@ async fn command_error_envelope_and_unix_signal_reach_provider_unchanged() {
             text: "check interrupted and signalled commands".into(),
             mode: SessionMode::Build,
             behavior: zevria_foundation::RequestBehavior::Standard,
+            references: Vec::new(),
         }))
         .unwrap();
     completed(&mut events).await;

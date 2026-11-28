@@ -1012,6 +1012,7 @@ fn user_message_surfaces_exclude_roleless_diagnostics_and_mixed_role_separators(
     });
     let mut app = App::new();
     app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+        references: Vec::new(),
         header: None,
         blocks: vec![
             plain_block(0, PresentationRole::User, "first user"),

@@ -48,6 +48,7 @@ async fn submit(engine: &mut SessionEngine<ScriptedProvider>, mode: SessionMode,
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: text.into(),
                 mode,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -475,6 +476,7 @@ async fn prospective_addition_is_in_the_exact_counted_request_and_reuses_its_cou
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: prompt,
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )

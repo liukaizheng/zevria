@@ -5,12 +5,13 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
-const DIRECTORIES: [&str; 5] = [
+const DIRECTORIES: [&str; 6] = [
     "agent-runs",
     "plans",
     "sessions",
     "subsessions",
     "ensemble-sessions",
+    "side-chats",
 ];
 const CONTENTS: &[u8] = b"custom artifact or malformed history\n\xff";
 
@@ -112,7 +113,7 @@ fn failure(output: &Output) -> &str {
 }
 
 #[test]
-fn clean_purges_exactly_the_five_invocation_workspace_directories() {
+fn clean_purges_exactly_the_six_invocation_workspace_directories() {
     let home = tempfile::tempdir().unwrap();
     let ancestor = tempfile::tempdir().unwrap();
     let workspace = ancestor.path().join("project/nested");
@@ -188,6 +189,7 @@ fn absent_empty_and_partial_storage_are_repeatable_no_ops_without_creation() {
         (true, &[][..]),
         (true, &["plans"][..]),
         (true, &["ensemble-sessions"][..]),
+        (true, &["side-chats"][..]),
         (true, &["agent-runs", "sessions"][..]),
     ] {
         let home = tempfile::tempdir().unwrap();
@@ -589,11 +591,11 @@ fn removal_permission_errors_report_partial_progress_and_stop_before_later_roots
 
 #[cfg(unix)]
 #[test]
-fn final_worker_removal_permission_errors_report_four_completed_removals() {
+fn final_side_chat_removal_permission_errors_report_five_completed_removals() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let storage = workspace.path().join(".zevria");
-    let blocked = storage.join("ensemble-sessions");
+    let blocked = storage.join("side-chats");
     let preserved = populate(workspace.path())
         .into_iter()
         .filter(|path| path.starts_with(&blocked))
@@ -614,7 +616,7 @@ fn final_worker_removal_permission_errors_report_four_completed_removals() {
     assert!(stderr.contains("failed to remove"), "{stderr}");
     assert!(stderr.contains(&blocked.display().to_string()), "{stderr}");
     assert!(
-        stderr.contains("directories removed: 4, already absent: 0"),
+        stderr.contains("directories removed: 5, already absent: 0"),
         "{stderr}"
     );
     assert!(stderr.contains("cleanup may be partial"), "{stderr}");

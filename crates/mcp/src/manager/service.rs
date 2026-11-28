@@ -101,11 +101,20 @@ impl McpSessionService for McpManager {
                 // Only the applied snapshot contributes instructions. A dead
                 // transport denies calls immediately but revokes at a boundary.
                 entry.connection.is_some()
-                    && (entry.allows_read(access)
-                        || (access == McpToolAccess::PlanScoped
-                            && entry.catalog.tools.iter().any(|(name, tool)| {
-                                entry.config.plan_tool_allowed(name, read_only(tool))
-                            })))
+                    && match access {
+                        McpToolAccess::None => false,
+                        McpToolAccess::AllEnabled => true,
+                        McpToolAccess::PlanScoped | McpToolAccess::ReadOnlyPlanScoped => {
+                            (entry.allows_read(access)
+                                && (access == McpToolAccess::PlanScoped
+                                    || entry.catalog.resource_capability))
+                                || entry.catalog.tools.iter().any(|(name, tool)| {
+                                    let read_only = read_only(tool);
+                                    (access == McpToolAccess::PlanScoped || read_only)
+                                        && entry.config.plan_tool_allowed(name, read_only)
+                                })
+                        }
+                    }
             })
             .filter_map(|entry| entry.catalog.instructions.clone())
             .collect()

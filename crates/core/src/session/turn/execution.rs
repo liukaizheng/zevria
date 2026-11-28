@@ -215,6 +215,19 @@ impl<P: ModelProvider> SessionEngine<P> {
                 return self.resume_ensemble(*recovery, events, turn).await;
             }
         };
+        if self.side_chat.is_some()
+            && !matches!(&command, TurnCommand::Submit { behavior: zevria_foundation::RequestBehavior::SideChat, references, .. } if references.is_empty())
+        {
+            return self
+                .finish_rejected(
+                    turn,
+                    events,
+                    Rejection::Rejected(
+                        "only Side Chat message submission without thread references is available here".into(),
+                    ),
+                )
+                .await;
+        }
         match command {
             TurnCommand::ContinueAfterJobs { mode } => {
                 self.continue_after_jobs(mode, events, turn).await
@@ -223,10 +236,16 @@ impl<P: ModelProvider> SessionEngine<P> {
                 text,
                 mode,
                 behavior,
+                references,
             } => {
+                let mode = self.side_chat.as_ref().map_or(mode, |side| side.mode);
                 self.run_prompt_turn(
                     TurnAnchor::Append,
-                    PromptTurnInput::Message { text, behavior },
+                    PromptTurnInput::Message {
+                        text,
+                        behavior,
+                        references,
+                    },
                     mode,
                     events,
                     turn,
@@ -278,6 +297,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                     PromptTurnInput::Message {
                         text,
                         behavior: zevria_foundation::RequestBehavior::Standard,
+                        references: Vec::new(),
                     },
                     mode,
                     events,

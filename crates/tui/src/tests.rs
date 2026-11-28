@@ -338,6 +338,7 @@ fn start_empty_turn(app: &mut App, turn_id: TurnId, mode: SessionMode) {
             content: Vec::new(),
         },
         mode,
+        references: Vec::new(),
     }));
 }
 
@@ -1016,6 +1017,7 @@ fn start_timed_tail(app: &mut App, event: Option<SessionUpdate>) {
                     content: Vec::new()
                 },
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             now
         )

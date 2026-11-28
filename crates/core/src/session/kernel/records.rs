@@ -151,11 +151,12 @@ impl<P: ModelProvider> SessionEngine<P> {
         let change = change.into();
         let _timing = LifecycleTiming::new("commit", change.items.len());
         let persist_mode = change.mode.filter(|_| {
-            self.capabilities.mode_management
-                || self
-                    .conversation
-                    .replay()
-                    .is_ok_and(|r| r.instructions.persisted_mode().is_some())
+            self.side_chat.is_none()
+                && (self.capabilities.mode_management
+                    || self
+                        .conversation
+                        .replay()
+                        .is_ok_and(|r| r.instructions.persisted_mode().is_some()))
         });
         let start = self.conversation.items().len();
         let history_replaced = matches!(change.anchor, TurnAnchor::ReplaceFrom(_));
@@ -181,7 +182,10 @@ impl<P: ModelProvider> SessionEngine<P> {
                 change.items,
                 persist_mode,
             )
-            .map_err(|error| self.record_error(error))?;
+            .map_err(|error| {
+                self.publish_fork();
+                self.record_error(error)
+            })?;
         let committed = Committed {
             range: if reestimate { 0 } else { start }..self.conversation.items().len(),
             history_replaced,
@@ -247,6 +251,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         } else {
             self.append_committed_estimates(committed.range.clone());
         }
+        self.publish_fork();
         if completed
             && self.conversation.items()[committed.range.clone()]
                 .iter()
@@ -298,7 +303,9 @@ impl<P: ModelProvider> SessionEngine<P> {
         &mut self,
         events: &SessionEventSender,
     ) -> Result<(), Rejection> {
-        match self.conversation.ensure_durable() {
+        let result = self.conversation.ensure_durable();
+        self.publish_fork();
+        match result {
             Ok(restored) => {
                 if restored {
                     let _ = events

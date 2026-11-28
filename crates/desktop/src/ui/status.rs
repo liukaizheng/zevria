@@ -457,6 +457,36 @@ impl DesktopWindow {
                     .child(label),
             );
         }
+        if controller.phase == crate::controller::Phase::Live
+            && !controller.model.side_chats.is_empty()
+        {
+            let running = controller
+                .model
+                .side_chats
+                .iter()
+                .filter(|pane| pane.is_running())
+                .count();
+            let count = controller.model.side_chats.len();
+            row = row.child(
+                panel_chip(
+                    "status-side-chat",
+                    "side chat",
+                    if running == 0 {
+                        format!("Side Chat {count}")
+                    } else {
+                        format!("Side Chat {count}")
+                    },
+                    (running != 0).then(|| accent(&controller.model.root, cx)),
+                    controller.model.controls.side_chat_open,
+                    Shortcut::TOGGLE_SIDE_CHAT,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.controller
+                        .update(cx, |controller, cx| controller.toggle_side_chat(cx))
+                })),
+            );
+        }
         if !controller.model.children.is_empty() {
             let running =
                 subtasks::active_count(controller.model.children.iter().map(|child| child.status));
@@ -573,6 +603,7 @@ mod tests {
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("Check cache usage"),
+            references: Vec::new(),
         }));
         model
     }

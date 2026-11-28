@@ -25,6 +25,7 @@ async fn prompt<P: ModelProvider>(
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: text.into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             events,
         )

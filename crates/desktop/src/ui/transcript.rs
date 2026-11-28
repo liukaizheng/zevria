@@ -86,6 +86,7 @@ impl PaneView {
 
 pub struct TranscriptView {
     controller: Entity<SessionController>,
+    side: Option<zevria_foundation::SideChatId>,
     pane: PaneView,
     selected: Option<zevria_foundation::SubtaskId>,
     parked: HashMap<Option<zevria_foundation::SubtaskId>, PaneView>,
@@ -99,6 +100,26 @@ impl TranscriptView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::for_target(controller, window_focus, None, window, cx)
+    }
+
+    pub fn new_side(
+        controller: Entity<SessionController>,
+        window_focus: FocusHandle,
+        id: zevria_foundation::SideChatId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::for_target(controller, window_focus, Some(id), window, cx)
+    }
+
+    fn for_target(
+        controller: Entity<SessionController>,
+        window_focus: FocusHandle,
+        side: Option<zevria_foundation::SideChatId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let pane = PaneView::new(cx);
         let selected = controller.read(cx).model.controls.selected_child.clone();
         let watch = cx.observe_in(&controller, window, |this, _, window, cx| {
@@ -106,6 +127,7 @@ impl TranscriptView {
         });
         let mut this = Self {
             controller,
+            side,
             pane,
             selected,
             parked: HashMap::new(),
@@ -114,6 +136,34 @@ impl TranscriptView {
         };
         this.sync(window, cx);
         this
+    }
+
+    fn target_model(
+        controller: &SessionController,
+        id: Option<zevria_foundation::SideChatId>,
+    ) -> Option<&zevria_presentation::SessionModel> {
+        match id {
+            Some(id) => controller
+                .model
+                .side_chats
+                .iter()
+                .find(|pane| pane.descriptor.id == id)
+                .map(|pane| &pane.model),
+            None => Some(controller.model.visible()),
+        }
+    }
+
+    pub(super) fn selected_diff(&self, window: &Window, cx: &App) -> Option<String> {
+        let blocks = || self.pane.blocks.values().map(|block| block.view.read(cx));
+        if let Some(text) = blocks()
+            .filter(|block| block.contains_focus(window, cx))
+            .find_map(|block| block.selected_diff(cx))
+        {
+            return Some(text);
+        }
+        let mut selections = blocks().filter_map(|block| block.selected_diff(cx));
+        let text = selections.next()?;
+        selections.next().is_none().then_some(text)
     }
 
     fn rekey(&mut self, old: &str, new: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -131,20 +181,16 @@ impl TranscriptView {
     }
 
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self
-            .controller
-            .read(cx)
-            .model
-            .controls
-            .selected_child
-            .clone();
-        let epoch = self
-            .controller
-            .read(cx)
-            .model
-            .visible()
-            .conversation
-            .epoch();
+        let controller = self.controller.read(cx);
+        let selected = if self.side.is_none() {
+            controller.model.controls.selected_child.clone()
+        } else {
+            None
+        };
+        let Some(model) = Self::target_model(controller, self.side) else {
+            return;
+        };
+        let epoch = model.conversation.epoch();
         let pane_changed = selected != self.selected;
         let mut reset_focus = (pane_changed || Some(epoch) != self.pane.epoch)
             && self
@@ -167,7 +213,9 @@ impl TranscriptView {
             id.as_ref()
                 .is_none_or(|id| controller.model.children.iter().any(|c| &c.id == id))
         });
-        let model = controller.model.visible();
+        let Some(model) = Self::target_model(controller, self.side) else {
+            return;
+        };
         let revision = model.conversation.revision();
         let structure = model.conversation.structure_revision();
         let snapshot = model.session.stream_snapshot();
@@ -175,7 +223,7 @@ impl TranscriptView {
         let busy = model.session.has_turn_work();
         let call = model.session.call_header();
         let pending = model.pending_prompt().map(|p| p.id());
-        let cancelling = controller.cancelling;
+        let cancelling = self.side.is_none() && controller.cancelling;
         let replaced = Some(epoch) != self.pane.epoch;
         let activity = busy.then(|| {
             let label = super::status::working_activity(model, cancelling);
@@ -268,9 +316,7 @@ impl TranscriptView {
                 self.pane.disclosures.remove(&row.data.key);
             }
         }
-        let jobs = self
-            .selected
-            .is_none()
+        let jobs = (self.side.is_none() && self.selected.is_none())
             .then(|| self.controller.read(cx).model.root.jobs_inspector());
         for (i, row) in projection.rows.iter_mut().enumerate() {
             row.apply_disclosure(&self.pane.disclosures);
@@ -367,6 +413,9 @@ impl TranscriptView {
     }
 
     fn sync_prompt_edit_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.side.is_some() {
+            return;
+        }
         let controller = self.controller.read(cx);
         let can_edit = controller.can_begin_transcript_edit();
         let target = controller.active_edit_history_index();
@@ -402,7 +451,7 @@ impl TranscriptView {
     }
 
     fn sync_live_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected.is_some() {
+        if self.side.is_some() || self.selected.is_some() {
             return;
         }
         let controller = self.controller.read(cx);
@@ -595,7 +644,7 @@ impl TranscriptView {
         if let Some(block) = self.pane.blocks.get(&key) {
             return block.view.clone();
         }
-        let entity = cx.new(|cx| BlockView::new(row, self.controller.clone(), cx));
+        let entity = cx.new(|cx| BlockView::new(row, self.controller.clone(), self.side, cx));
         let resize = cx.subscribe(&entity, |this, entity, _: &DetailResized, cx| {
             let key = entity.read(cx).key();
             if this
@@ -641,7 +690,9 @@ impl TranscriptView {
         let Some(row) = self.pane.rows.get(index).cloned() else {
             return div().into_any_element();
         };
-        let model = self.controller.read(cx).model.visible();
+        let Some(model) = Self::target_model(self.controller.read(cx), self.side) else {
+            return div().into_any_element();
+        };
         let paint = match row.data.kind {
             BlockKind::Prompt {
                 preparing: true, ..
@@ -715,8 +766,22 @@ impl Render for TranscriptView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let owner = cx.entity();
         let controller = self.controller.read(cx);
+        if self.side.is_some() && self.pane.rows.is_empty() {
+            return div()
+                .id("side-transcript-empty")
+                .test_support()
+                .size_full()
+                .p(px(16.))
+                .child(
+                    style::body()
+                        .text_color(palette(cx).text.muted)
+                        .child("Ask a question about the main conversation."),
+                )
+                .into_any_element();
+        }
         if controller.phase == crate::controller::Phase::Live
             && self.selected.is_none()
+            && self.side.is_none()
             && self.pane.rows.is_empty()
         {
             let name = controller

@@ -118,6 +118,7 @@ async fn submit_request(
                 text: "implement independent work".into(),
                 mode: SessionMode::Build,
                 behavior,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -331,6 +332,7 @@ async fn standard_boundary_and_fresh_edit_never_inherit_authorization_or_evidenc
                     text: "edited independent work".into(),
                     mode: SessionMode::Build,
                     behavior: RequestBehavior::Orchestrate,
+                    references: Vec::new(),
                 },
             })),
             &events,
@@ -544,6 +546,7 @@ async fn admission_rejects_unsupported_profiles_plan_pending_work_and_limit_one_
                     text: "delegate".into(),
                     mode,
                     behavior: RequestBehavior::Orchestrate,
+                    references: Vec::new(),
                 }),
                 &events,
             )

@@ -80,6 +80,7 @@ async fn live_network_diagnostics_are_quiet_until_stall_or_retry_and_preserve_st
                     turn_id,
                     message: Message::user("prompt"),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }))?;
                 let transport = if index % 2 == 0 {
                     NetworkTransport::WebSocket

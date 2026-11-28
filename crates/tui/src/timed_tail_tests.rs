@@ -15,6 +15,7 @@ fn start_at(app: &mut App, now: Instant) {
                 content: Vec::new(),
             },
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
         now,
     );
@@ -371,6 +372,7 @@ fn child_network_warning_is_isolated_from_root_preview_and_cleared_on_completion
             turn_id: TEST_TURN_ID,
             message: Message::user("child"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         })
         .into(),
         SessionEvent::Turn(TurnEvent::ModelCallStarted {
@@ -1306,6 +1308,7 @@ fn child_call_clocks_are_independent_across_switches_and_hidden_completion() {
             turn_id: TEST_TURN_ID,
             message: Message::user("child prompt"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
         SessionEvent::Turn(TurnEvent::ModelCallStarted {
             turn_id: TEST_TURN_ID,
@@ -1379,6 +1382,7 @@ fn clock_redraws_follow_visible_native_lifecycle_not_hidden_root_or_acp_work() {
             turn_id: TEST_TURN_ID,
             message: Message::user("child prompt"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         })),
     }));
     // Forwarded native lifecycle starts timing while the child is hidden.

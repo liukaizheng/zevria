@@ -1127,6 +1127,7 @@ fn user_message_surfaces_in_acp_do_not_require_card_metadata() {
     });
     let (mut app, _) = acp_transcript_app();
     app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+        references: Vec::new(),
         header: None,
         blocks: vec![
             plain_block(

@@ -43,6 +43,7 @@ async fn submit(engine: &mut SessionEngine<ScriptedProvider>, text: &str, mode: 
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: text.into(),
                 mode,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -132,6 +133,7 @@ async fn complete_catalog_is_disclosed_or_rejected_without_disabling_management(
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "an ordinary request".into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )

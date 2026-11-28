@@ -34,6 +34,7 @@ fn start(controller: &Entity<SessionController>, message: Message, cx: &mut Test
             turn_id: TURN,
             mode: SessionMode::Build,
             message,
+            references: Vec::new(),
         }),
         cx,
     );

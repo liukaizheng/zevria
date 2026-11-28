@@ -14,6 +14,7 @@ impl SessionMetadataState {
         match item {
             TranscriptItem::SessionModels(models) => self.models = Some((**models).clone()),
             TranscriptItem::SessionMode(mode) => self.mode = Some(*mode),
+            TranscriptItem::SideChatOrigin(_) => {}
             _ => unreachable!("only session metadata enters this reducer"),
         }
     }
@@ -42,6 +43,8 @@ pub fn install_session_mode(
 pub fn is_leading_metadata(item: &TranscriptItem) -> bool {
     matches!(
         item,
-        TranscriptItem::SessionModels(_) | TranscriptItem::SessionMode(_)
+        TranscriptItem::SessionModels(_)
+            | TranscriptItem::SessionMode(_)
+            | TranscriptItem::SideChatOrigin(_)
     )
 }

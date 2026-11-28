@@ -40,6 +40,7 @@ async fn admission_rejections_are_event_only_and_preserve_transcript_bytes() {
             behavior: zevria_foundation::RequestBehavior::Standard,
             text: "work".into(),
             mode: SessionMode::Build,
+            references: Vec::new(),
         };
         let ensemble = || TurnCommand::RunEnsemble {
             workflow: EnsembleWorkflow::Review,
@@ -50,6 +51,7 @@ async fn admission_rejections_are_event_only_and_preserve_transcript_bytes() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: " \n\t".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             },
             "unknown-skill" => TurnCommand::InvokeSkill {
                 name: "missing".parse().unwrap(),
@@ -81,6 +83,7 @@ async fn admission_rejections_are_event_only_and_preserve_transcript_bytes() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "x".repeat(20_000).into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }
             }
             "missing-launcher" => ensemble(),
@@ -119,6 +122,7 @@ async fn admission_rejections_are_event_only_and_preserve_transcript_bytes() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "plan work".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             },
             "ensemble-commit" => {
                 engine = engine
@@ -276,6 +280,7 @@ async fn unconvertible_replay_fails_without_committing_the_fallback_message() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "reject the fallback".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -637,6 +642,7 @@ async fn channel_closure_drains_both_sources_before_returning_none() {
             turn_id,
             message: Message::user("question"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }))
         .await
         .expect("lifecycle queues");
@@ -719,6 +725,7 @@ async fn question_answer_and_note_resume_the_same_turn_and_persist_as_one_tool_r
             behavior: zevria_foundation::RequestBehavior::Standard,
             text: "plan the change".into(),
             mode: SessionMode::Plan,
+            references: Vec::new(),
         }))
         .expect("submit command");
 
@@ -846,6 +853,7 @@ async fn cancelling_an_active_turn_stops_the_provider_and_keeps_the_engine_respo
             behavior: zevria_foundation::RequestBehavior::Standard,
             text: "wait forever".into(),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }))
         .expect("engine command channel");
     let turn_id =
@@ -962,6 +970,7 @@ async fn valid_submission_commits_ready_after_completion_and_projects_markdown()
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "make a plan".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1037,6 +1046,7 @@ async fn disabled_mode_suppresses_and_enabled_mode_restores_active_overlay() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "plan without skills".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1048,6 +1058,7 @@ async fn disabled_mode_suppresses_and_enabled_mode_restores_active_overlay() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "return to build".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1108,6 +1119,7 @@ async fn multiple_tools_execute_sequentially_and_are_correlated() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "go".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1153,6 +1165,7 @@ async fn structured_file_metadata_is_emitted_but_never_enters_model_messages() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "change a file".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1270,6 +1283,7 @@ async fn tool_dispatch_failures_are_model_visible_and_recoverable() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "exercise failures".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1323,6 +1337,7 @@ async fn transcript_records_authoritative_messages_in_order() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "recorded question".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1366,6 +1381,7 @@ async fn resumed_history_is_owned_and_replayed_by_the_engine() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "new question".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1417,6 +1433,7 @@ async fn resumed_provider_messages_keep_their_native_replay_records() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "new question".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1465,6 +1482,7 @@ async fn denied_launches_never_reach_the_supervisor() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "plan something".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1539,6 +1557,7 @@ async fn supervisor_shutdown_mid_call_fails_the_launch_without_wedging() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "explore it".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1596,6 +1615,7 @@ async fn failed_launches_are_model_visible_and_recoverable() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "try to launch".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1711,6 +1731,7 @@ async fn exact_below_trigger_overrides_a_high_usage_tracker() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "continue".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1778,6 +1799,7 @@ async fn exact_above_trigger_overrides_a_low_usage_tracker() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "continue".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1878,6 +1900,7 @@ async fn opaque_replay_regression_uses_usage_delta_instead_of_legacy_wire_maximu
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "continue".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )

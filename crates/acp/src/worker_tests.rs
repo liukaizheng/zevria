@@ -67,6 +67,7 @@ impl SessionRuntimeFactory for WorkerFactory {
                             behavior: _,
                             text,
                             mode,
+                            ..
                         }) => {
                             turn += 1;
                             let turn_id = TurnId::new(turn);
@@ -74,6 +75,7 @@ impl SessionRuntimeFactory for WorkerFactory {
                                 turn_id,
                                 mode,
                                 message: text.to_message(),
+                                references: Vec::new(),
                             }))
                             .await
                             .unwrap();
@@ -785,7 +787,7 @@ async fn ready_worker_load_resume_replays_but_continue_dispatches_real_feedback(
     );
     assert_eq!(commands.lock().unwrap().iter().filter(|command| matches!(
         command,
-        SessionCommand::Turn(zevria_session_api::TurnCommand::Submit { behavior: _, text, mode: SessionMode::Plan }) if text == &zevria_content::UserPrompt::from_text("continue")
+        SessionCommand::Turn(zevria_session_api::TurnCommand::Submit { behavior: _, text, mode: SessionMode::Plan, .. }) if text == &zevria_content::UserPrompt::from_text("continue")
     )).count(), 1);
 }
 

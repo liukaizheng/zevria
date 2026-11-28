@@ -18,6 +18,7 @@ pub(crate) enum PaneKind {
     LivePlanWorker,
     HistoricalAgent,
     SubtaskInspect,
+    SideChat,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -47,6 +48,12 @@ impl PaneState {
                 external_context: None,
             }),
         }
+    }
+
+    pub(crate) fn side_chat(title: String, role: ModelRole) -> Self {
+        let mut pane = Self::subtask_inspect(title, role);
+        pane.kind = PaneKind::SideChat;
+        pane
     }
 
     pub(crate) fn set_inspect_model_role(&mut self, role: ModelRole) -> bool {
@@ -87,7 +94,10 @@ impl PaneState {
     }
 
     pub(crate) const fn can_compose(&self) -> bool {
-        matches!(self.kind, PaneKind::Root | PaneKind::LivePlanWorker)
+        matches!(
+            self.kind,
+            PaneKind::Root | PaneKind::LivePlanWorker | PaneKind::SideChat
+        )
     }
 
     pub(crate) const fn is_root(&self) -> bool {

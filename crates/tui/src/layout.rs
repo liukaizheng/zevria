@@ -88,6 +88,7 @@ struct PresentationBlockLayout {
     assistant_header_line: Option<usize>,
     elapsed_seconds: Option<u64>,
     body_line_start: usize,
+    ref_line_count: usize,
     fold_header: Option<FoldHeader>,
     height: usize,
     prefix_height: usize,
@@ -126,6 +127,7 @@ impl PresentationBlockLayout {
             assistant_header_line: rows.assistant_header_line,
             elapsed_seconds: None,
             body_line_start: rows.content_line_start,
+            ref_line_count: 0,
             fold_header: rows.fold_header,
             height,
             prefix_height: 0,
@@ -206,6 +208,31 @@ pub(crate) struct EntryLayout {
 }
 
 impl EntryLayout {
+    pub(crate) fn width(&self) -> u16 {
+        self.width
+    }
+
+    fn text_block(&self, index: usize) -> Option<&PresentationBlockLayout> {
+        let range = self.items.iter().find(|(item, _)| *item == index)?.1;
+        self.conversation_blocks
+            .as_ref()?
+            .iter()
+            .find(|block| block.rows.shifted(block.prefix_height) == range)
+    }
+
+    pub(crate) fn text_body(&self, item: usize) -> Option<(&[Line<'static>], usize)> {
+        if let Some(block) = self.text_block(item) {
+            let lines =
+                &block.lines[block.body_line_start..block.lines.len() - block.ref_line_count];
+            return (!lines.is_empty()).then_some((
+                lines,
+                self.offset() + block.prefix_height + block.rows.start(),
+            ));
+        }
+        (!self.lines.is_empty() && self.conversation_blocks.is_none())
+            .then_some((&self.lines, self.offset()))
+    }
+
     pub(crate) fn offset(&self) -> usize {
         self.prefix_height
     }
@@ -222,6 +249,17 @@ impl EntryLayout {
         start: &mut Option<usize>,
         lines: &mut Vec<Line<'static>>,
     ) {
+        self.append_visible_lines_with_text(offset, window, start, lines, None);
+    }
+
+    pub(crate) fn append_visible_lines_with_text(
+        &self,
+        offset: usize,
+        window: RowRange,
+        start: &mut Option<usize>,
+        lines: &mut Vec<Line<'static>>,
+        text: Option<(usize, &crate::app::text_select::VimTextSelection)>,
+    ) {
         if let Some(blocks) = &self.conversation_blocks
             && !self.message_folded.is_folded()
         {
@@ -236,14 +274,37 @@ impl EntryLayout {
                 }
                 if block.height != 0 {
                     start.get_or_insert(base);
-                    lines.extend(block.lines.iter().cloned());
+                    if let Some((item, selection)) = text
+                        && self
+                            .text_block(item)
+                            .is_some_and(|target| std::ptr::eq(target, block))
+                    {
+                        lines.extend(block.lines[..block.body_line_start].iter().cloned());
+                        let reference_start = block.lines.len() - block.ref_line_count;
+                        lines.extend(crate::app::text_select::highlight_vim_selection(
+                            &block.lines[block.body_line_start..reference_start],
+                            selection,
+                            crate::theme::theme().surfaces.selection_background,
+                        ));
+                        lines.extend(block.lines[reference_start..].iter().cloned());
+                    } else {
+                        lines.extend(block.lines.iter().cloned());
+                    }
                 }
             }
         } else if self.height > 0
             && RowRange::from_start_len(offset, self.height).intersects(window)
         {
             start.get_or_insert(offset);
-            lines.extend(self.lines.iter().cloned());
+            if let Some((_, selection)) = text {
+                lines.extend(crate::app::text_select::highlight_vim_selection(
+                    &self.lines,
+                    selection,
+                    crate::theme::theme().surfaces.selection_background,
+                ));
+            } else {
+                lines.extend(self.lines.iter().cloned());
+            }
         }
     }
 
@@ -810,6 +871,18 @@ fn build_conversation_blocks(
     let mut activity_rows = None;
     let mut items = Vec::new();
     let mut rebuilt = 0;
+    let reference_target = (!entry.references.is_empty())
+        .then(|| {
+            entry
+                .blocks
+                .iter()
+                .rev()
+                .find(|block| {
+                    block.role == Some(PresentationRole::User) && block.visible(diagnostics_visible)
+                })
+                .map(|block| block.id)
+        })
+        .flatten();
     for (index, block, fingerprint) in conversation_fingerprints(
         entry,
         entry_selection,
@@ -823,7 +896,20 @@ fn build_conversation_blocks(
             Some(layout) if layout.width == width && layout.fingerprint == fingerprint => layout,
             _ => {
                 rebuilt += 1;
-                PresentationBlockLayout::render(block, fingerprint, width)
+                let mut layout = PresentationBlockLayout::render(block, fingerprint, width);
+                if reference_target == Some(block.id)
+                    && fingerprint.folded == BlockFold::Expanded
+                    && width > 0
+                {
+                    let count = layout.lines.len();
+                    layout
+                        .lines
+                        .extend(prepare::side_reference_lines(&entry.references, width));
+                    layout.ref_line_count = layout.lines.len() - count;
+                    layout.height += layout.ref_line_count;
+                    layout.decoration = RowRange::new(layout.decoration.start(), layout.height);
+                }
+                layout
             }
         };
         layout.refresh_header(timings);
@@ -1823,6 +1909,7 @@ mod tests {
             conversation.push_entry(entry);
         }
         conversation.push_entry(HistoryEntry::Conversation(ConversationEntry {
+            references: Vec::new(),
             header: Some(NativeHeader::Prompt(DisplayTurn(3))),
             blocks: Vec::new(),
         }));
@@ -2164,6 +2251,7 @@ mod tests {
         history.insert(
             1,
             HistoryEntry::Conversation(ConversationEntry {
+                references: Vec::new(),
                 header: None,
                 blocks: vec![],
             }),

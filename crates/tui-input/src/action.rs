@@ -1,6 +1,19 @@
 //! Semantic input vocabulary shared by routing, help, and reusable forms.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
+    SideChatOverlay,
+    NewSideChat,
+    NewSideChatFromClipboard,
+    SideChatReferenceInsert,
+    AskInSideChat,
+    InsertToMain,
+    TextFirstLine,
+    TextLeft,
+    TextRight,
+    TextUp,
+    TextDown,
+    VisualChar,
+    VisualLine,
     Cancel,
     Close,
     ReturnRoot,

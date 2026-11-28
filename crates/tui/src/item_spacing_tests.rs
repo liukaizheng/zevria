@@ -15,6 +15,7 @@ use selection_tests::plain_block;
 
 fn conversation(blocks: Vec<PresentationBlock>) -> HistoryEntry {
     HistoryEntry::Conversation(ConversationEntry {
+        references: Vec::new(),
         header: None,
         blocks,
     })

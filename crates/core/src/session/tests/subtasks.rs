@@ -143,6 +143,7 @@ async fn failed_children_surface_as_correlated_tool_errors() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "explore it".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )

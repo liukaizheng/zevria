@@ -282,6 +282,7 @@ impl HistoryEntry {
             }),
         }
         (!blocks.is_empty()).then_some(Self::Conversation(ConversationEntry {
+            references: Vec::new(),
             header: None,
             blocks,
         }))
@@ -1018,10 +1019,20 @@ impl ConversationState {
     }
 
     pub fn push_user_turn(&mut self, message: Message, turn: DisplayTurn) {
+        self.push_referenced_user_turn(message, turn, Vec::new());
+    }
+
+    pub fn push_referenced_user_turn(
+        &mut self,
+        message: Message,
+        turn: DisplayTurn,
+        references: Vec<zevria_foundation::SideChatReferenceAttachment>,
+    ) {
         if let Some(HistoryEntry::Conversation(mut entry)) =
             HistoryEntry::from_message(message, ToolCallStatus::Finished)
         {
             entry.header = Some(NativeHeader::Prompt(turn));
+            entry.references = references;
             self.push_entry(HistoryEntry::Conversation(entry));
         }
     }
@@ -1694,6 +1705,7 @@ mod tests {
             )
             .unwrap();
         let empty = conversation.push_entry(HistoryEntry::Conversation(ConversationEntry {
+            references: Vec::new(),
             header: Some(header),
             blocks: Vec::new(),
         }));

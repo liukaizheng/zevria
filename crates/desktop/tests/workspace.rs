@@ -14,6 +14,7 @@ fn start(workspace: &mut WorkspaceModel) {
         turn_id: TURN,
         mode: SessionMode::Build,
         message: Message::user("start"),
+        references: Vec::new(),
     })));
 }
 fn question(kind: QuestionPromptKind) -> QuestionRequest {
@@ -67,6 +68,7 @@ fn child_events_never_promote_root_or_steal_questions() {
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("child"),
+            references: Vec::new(),
         })),
     })));
     assert!(!workspace.root.is_busy());
@@ -659,8 +661,8 @@ mod transcript_edits {
             assert!(
                 matches!(*command, SessionCommand::Turn(TurnCommand::EditTranscript(TranscriptEdit {
                 target: TranscriptEditTarget::PromptOrdinal(0),
-                replacement: TranscriptEditReplacement::Message { text, mode: actual, behavior: actual_behavior },
-            })) if text == UserPrompt::from_text(expected) && actual == mode && actual_behavior == behavior)
+                replacement: TranscriptEditReplacement::Message { text, mode: actual, behavior: actual_behavior, references },
+            })) if text == UserPrompt::from_text(expected) && actual == mode && actual_behavior == behavior && references.is_empty())
             );
             assert!(matches!(
                 route_edit(&mut workspace, "busy"),

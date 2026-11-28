@@ -717,6 +717,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             }
         };
         if let Err(error) = self.conversation.replace_session_models(selections) {
+            self.publish_fork();
             return Ok(Result::Rejected {
                 code: "session_save_failed".into(),
                 message: match scope {
@@ -753,6 +754,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             }
             self.invalidate_request_plans();
             self.invalidate_model_preview();
+            self.publish_fork();
             return Ok(Result::Changed {
                 role,
                 scope,
@@ -777,6 +779,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         }
         self.context.reset_for_model_update(role);
         self.reestimate_context_usage();
+        self.publish_fork();
         let (estimate, _) = self.local_context_candidates(&policy)?;
         let snapshot = ContextTokenSnapshot {
             profile: context.profile.clone(),

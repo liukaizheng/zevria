@@ -48,6 +48,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn limited_command_runs_shell_in_foreground_but_rejects_background() {
+        let directory = tempfile::tempdir().unwrap();
+        let tool =
+            CommandTool::with_limits(directory.path().into(), CommandLimits::default()).unwrap();
+        let output = run(&tool, "printf '%s' foreground-ok | cat").await.unwrap();
+        assert!(output.contains("foreground-ok"), "{output}");
+
+        let error = tool
+            .call(
+                &mut ToolContext::new(),
+                CommandArgs {
+                    command: "printf '%s' not-started".into(),
+                    background: Some(true),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, CommandError::InvalidArgs(reason) if reason.contains("background commands are disabled"))
+        );
+        assert!(!tool.jobs.background_enabled());
+        assert!(tool.jobs.list_model_jobs().is_empty());
+    }
+
+    #[tokio::test]
     async fn uses_the_configured_working_directory() {
         let directory = tempfile::tempdir().expect("temporary directory should create");
         let expected = directory

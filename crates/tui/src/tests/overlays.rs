@@ -126,6 +126,7 @@ fn slash_subtasks_runs_during_a_turn_and_replaces_the_jobs_overlay() {
         turn_id: TEST_TURN_ID,
         mode: SessionMode::Build,
         message: Message::user("Run checks"),
+        references: Vec::new(),
     }));
     let child = launch_listed_subtask(&mut views, "Inspect checks");
     views.handle_event(key(KeyCode::Char('i')));
@@ -398,6 +399,7 @@ fn turn_completed_alone_never_opens_plan_approval() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "plan this".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }
         )))
     );
@@ -410,6 +412,7 @@ fn turn_completed_alone_never_opens_plan_approval() {
             turn_id: TEST_TURN_ID,
             message: Message::user("plan this"),
             mode: SessionMode::Plan,
+            references: Vec::new(),
         }),
     );
     apply_turn_event(
@@ -732,6 +735,7 @@ fn dismissed_ready_plan_composer_feedback_is_a_revision_not_a_decision() {
                 turn_id: TEST_TURN_ID,
                 message: Message::user("next draft"),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }));
             app.reduce_without_effects(SessionEvent::Plan(PlanEvent::StateChanged {
                 state: Box::new(PlanWorkflowState::Planning {
@@ -865,6 +869,7 @@ fn revision_state_reopens_input_and_partial_completion_stays_planning() {
             turn_id: TEST_TURN_ID,
             message: Message::user("revise"),
             mode: SessionMode::Plan,
+            references: Vec::new(),
         }),
     );
     apply_turn_event(
@@ -3243,6 +3248,7 @@ fn typed_skill_invocation_returns_to_normal_and_carries_the_mode() {
             turn_id: TEST_TURN_ID,
             message: Message::user("$commit ship it"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
     );
     let rendered = rendered_text(&mut app, 80, 20);

@@ -8,6 +8,9 @@ pub enum KeyContext {
     Completion,
     Transcript,
     BlockNav,
+    SideBlockNav,
+    TextNav,
+    SideChatsList,
     OverlayList,
     OverlayInspect,
     SkillsList,
@@ -29,7 +32,9 @@ impl KeyContext {
             Self::Composer => "Composer",
             Self::Completion => "Completion",
             Self::Transcript => "Normal",
-            Self::BlockNav => "Selection",
+            Self::BlockNav | Self::SideBlockNav => "Selection",
+            Self::TextNav => "Text selection",
+            Self::SideChatsList => "Side chats",
             Self::OverlayList => "Sessions",
             Self::OverlayInspect => "Inspect",
             Self::SkillsList | Self::SkillsInspect => "Skills",
@@ -42,6 +47,13 @@ impl KeyContext {
             Self::Help => "Help",
         }
     }
+    pub fn in_side_chat(self) -> Self {
+        match self {
+            Self::BlockNav => Self::SideBlockNav,
+            other => other,
+        }
+    }
+
     pub fn has_help(self) -> bool {
         !matches!(self, Self::Composer | Self::Completion | Self::TextEntry)
     }
@@ -285,7 +297,258 @@ const MODELS: &[Binding] = &[b!(
         ..key(Char('m'))
     }
 )];
+const TEXT_NAV: &[Binding] = &[
+    b!(Close, "leave Visual / text", 0, "Selection", key(Esc)),
+    b!(
+        TextLeft,
+        "move cursor",
+        0,
+        "Selection",
+        key(Left),
+        key(Char('h'))
+    ),
+    b!(
+        TextDown,
+        "next line",
+        0,
+        "Selection",
+        key(Down),
+        key(Char('j'))
+    ),
+    b!(
+        TextUp,
+        "previous line",
+        0,
+        "Selection",
+        key(Up),
+        key(Char('k'))
+    ),
+    b!(
+        TextRight,
+        "move right",
+        0,
+        "Selection",
+        key(Right),
+        key(Char('l'))
+    ),
+    b!(
+        VisualChar,
+        "character selection",
+        1,
+        "Selection",
+        key(Char('v'))
+    ),
+    b!(VisualLine, "line selection", 1, "Selection", key(Char('V'))),
+    b!(
+        AskInSideChat,
+        "ask in Side Chat",
+        2,
+        "Selection",
+        key(Char('s'))
+    ),
+    b!(
+        Copy,
+        "yank selection / yy line",
+        2,
+        "Selection",
+        key(Char('y'))
+    ),
+    b!(
+        TextFirstLine,
+        "first line",
+        0,
+        "Motion",
+        Key {
+            prefix: Some('g'),
+            ..key(Char('g'))
+        }
+    ),
+    Binding {
+        action: Action::Type('w'),
+        keys: &[key(Char('w'))],
+        label: "word forward/back/end",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('b'),
+        keys: &[key(Char('b'))],
+        label: "word forward/back/end",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('e'),
+        keys: &[key(Char('e'))],
+        label: "word forward/back/end",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('W'),
+        keys: &[key(Char('W'))],
+        label: "word forward/back/end",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('B'),
+        keys: &[key(Char('B'))],
+        label: "word forward/back/end",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('E'),
+        keys: &[key(Char('E'))],
+        label: "word forward/back/end",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('0'),
+        keys: &[key(Char('0'))],
+        label: "line start/first/end",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('^'),
+        keys: &[key(Char('^'))],
+        label: "line start/first/end",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('$'),
+        keys: &[key(Char('$'))],
+        label: "line start/first/end",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('G'),
+        keys: &[key(Char('G'))],
+        label: "last line",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('f'),
+        keys: &[key(Char('f'))],
+        label: "find/till character",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('t'),
+        keys: &[key(Char('t'))],
+        label: "find/till character",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('F'),
+        keys: &[key(Char('F'))],
+        label: "find/till character",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('T'),
+        keys: &[key(Char('T'))],
+        label: "find/till character",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type(';'),
+        keys: &[key(Char(';'))],
+        label: "repeat/reverse find",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type(','),
+        keys: &[key(Char(','))],
+        label: "repeat/reverse find",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('o'),
+        keys: &[key(Char('o'))],
+        label: "switch selection end",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('i'),
+        keys: &[key(Char('i'))],
+        label: "word object (then w/W)",
+        primary: 0,
+        group: "Motion",
+    },
+    Binding {
+        action: Action::Type('a'),
+        keys: &[key(Char('a'))],
+        label: "word object (then w/W)",
+        primary: 0,
+        group: "Motion",
+    },
+];
+const SIDE_PANE: &[Binding] = &[b!(
+    InsertToMain,
+    "quote in main",
+    3,
+    "Side Chat",
+    key(Char('m'))
+)];
+const SIDE_LIST: &[Binding] = &[
+    b!(
+        SideChatOverlay,
+        "close list",
+        0,
+        "Side Chat",
+        Key {
+            modifiers: KeyModifiers::ALT,
+            ..key(Char('b'))
+        }
+    ),
+    b!(NewSideChat, "new Side Chat", 1, "Side Chat", key(Char('n'))),
+    b!(
+        NewSideChatFromClipboard,
+        "ask about clipboard",
+        1,
+        "Side Chat",
+        key(Char('p'))
+    ),
+    b!(
+        SideChatReferenceInsert,
+        "insert reference",
+        1,
+        "Side Chat",
+        key(Char('r'))
+    ),
+];
+const ASK_IN_SIDE: &[Binding] = &[b!(
+    AskInSideChat,
+    "ask in Side Chat",
+    4,
+    "Selection",
+    key(Char('s'))
+)];
 const OPEN_LISTS: &[Binding] = &[
+    b!(
+        SideChatOverlay,
+        "Side Chat",
+        0,
+        "Session",
+        Key {
+            modifiers: KeyModifiers::ALT,
+            ..key(Char('b'))
+        }
+    ),
     b!(
         JobsOverlay,
         "jobs",
@@ -424,6 +687,22 @@ const HELP_CLOSE: &[Binding] = &[b!(Help, "close", 5, "Help", key(Char('?')))];
 
 pub fn bindings(context: KeyContext) -> impl Iterator<Item = &'static Binding> {
     use KeyContext::*;
+    let selection = [
+        if context == SideBlockNav {
+            SIDE_PANE
+        } else {
+            ASK_IN_SIDE
+        },
+        SELECTION,
+        TRANSCRIPT,
+        PHYSICAL_PAGES,
+        USER_JUMPS,
+        MODELS,
+        OPEN_LISTS,
+        PANES,
+        GLOBAL,
+        HELP,
+    ];
     let groups: &[&[Binding]] = match context {
         Composer => &[EDITOR, MODE, MODELS, OPEN_LISTS, PANES, GLOBAL],
         Completion => &[
@@ -436,19 +715,11 @@ pub fn bindings(context: KeyContext) -> impl Iterator<Item = &'static Binding> {
             GLOBAL,
         ],
         Transcript => &[
-            NORMAL, TRANSCRIPT, PAGES, MODE, MODELS, OPEN_LISTS, PANES, GLOBAL, HELP,
+            NORMAL, TRANSCRIPT, PAGES, MODE, MODELS, OPEN_LISTS, PANES, SIDE_PANE, GLOBAL, HELP,
         ],
-        BlockNav => &[
-            SELECTION,
-            TRANSCRIPT,
-            PHYSICAL_PAGES,
-            USER_JUMPS,
-            MODELS,
-            OPEN_LISTS,
-            PANES,
-            GLOBAL,
-            HELP,
-        ],
+        BlockNav | SideBlockNav => &selection,
+        TextNav => &[TEXT_NAV, PANES, OPEN_LISTS, SIDE_PANE, GLOBAL, HELP],
+        SideChatsList => &[SIDE_LIST, CONFIRM, LIST, PAGES, GLOBAL, HELP],
         OverlayList | SubtasksList => &[CONFIRM, LIST, PAGES, GLOBAL, HELP],
         OverlayInspect => &[LIST, PAGES, GLOBAL, HELP],
         SkillsList => &[CONFIRM, SKILLS, FILTER, LIST, PAGES, GLOBAL, HELP],
@@ -530,7 +801,10 @@ impl ChordState {
             .or_else(|| {
                 if matches!(
                     context,
-                    KeyContext::Composer | KeyContext::Completion | KeyContext::TextEntry
+                    KeyContext::Composer
+                        | KeyContext::Completion
+                        | KeyContext::TextEntry
+                        | KeyContext::TextNav
                 ) && !event.modifiers.intersects(
                     KeyModifiers::CONTROL
                         | KeyModifiers::ALT
@@ -545,7 +819,9 @@ impl ChordState {
             });
         // A first y is immediately useful; the second is an output-copy intent.
         // The selected entity still owns the timed, same-row admission check.
-        if context == KeyContext::BlockNav && action == Some(Action::Copy) {
+        if matches!(context, KeyContext::BlockNav | KeyContext::SideBlockNav)
+            && action == Some(Action::Copy)
+        {
             self.prefix = Some('y');
         }
         action
@@ -670,6 +946,7 @@ mod tests {
     #[test]
     fn overlays_share_keys_but_text_entry_keeps_printable_characters() {
         for context in [
+            KeyContext::SideChatsList,
             KeyContext::OverlayList,
             KeyContext::SkillsList,
             KeyContext::SkillsInspect,
@@ -707,12 +984,33 @@ mod tests {
         }
     }
     #[test]
+    fn side_selection_quotes_without_stealing_the_root_background_binding() {
+        let m = KeyEvent::new(Char('m'), KeyModifiers::NONE);
+        let mut map = ChordState::default();
+        assert_eq!(
+            map.resolve(KeyContext::BlockNav, m),
+            Some(Action::MoveToBackground)
+        );
+        assert_eq!(
+            map.resolve(KeyContext::SideBlockNav, m),
+            Some(Action::InsertToMain)
+        );
+        assert_eq!(
+            map.resolve(KeyContext::TextNav, m),
+            Some(Action::InsertToMain)
+        );
+    }
+
+    #[test]
     fn every_unshadowed_catalogue_binding_resolves_in_its_context() {
         for context in [
             KeyContext::Composer,
             KeyContext::Completion,
             KeyContext::Transcript,
             KeyContext::BlockNav,
+            KeyContext::SideBlockNav,
+            KeyContext::TextNav,
+            KeyContext::SideChatsList,
             KeyContext::OverlayList,
             KeyContext::OverlayInspect,
             KeyContext::SkillsList,

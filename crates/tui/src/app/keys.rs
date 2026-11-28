@@ -1,6 +1,7 @@
 //! Semantic action dispatch. Key spelling and chords live in input/keymap.
 use super::*;
 use crate::input::Action;
+use ratatui::crossterm::event::KeyCode;
 
 impl App {
     pub(super) fn dispatch_input_at(
@@ -30,7 +31,27 @@ impl App {
             return None;
         }
         self.view.clear_pending_repin();
-        let action = self.interaction.resolve(owner.context(), key);
+        if owner.id.kind == SurfaceKind::TextSelection
+            && let Some(selection) = &mut self.text_selection
+            && selection.awaiting_find()
+            && key.modifiers.is_empty()
+            && key.code != KeyCode::Esc
+        {
+            if let KeyCode::Char(ch) = key.code {
+                selection.key(ch);
+            }
+            return None;
+        }
+        if owner.id.kind == SurfaceKind::TextSelection
+            && key.modifiers.is_empty()
+            && key.code == KeyCode::Char('g')
+            && let Some(selection) = &mut self.text_selection
+        {
+            selection.key('g');
+            return None;
+        }
+        let context = self.key_context(owner);
+        let action = self.interaction.resolve(context, key);
         if action != Some(Action::Close) {
             self.interaction.interrupt_escape();
         }
@@ -38,13 +59,56 @@ impl App {
             self.interaction.clear_yank();
         }
         let action = action?;
+        if action == Action::InsertToMain
+            && matches!(self.model.scope(), PaneScope::SideChat { .. })
+        {
+            return Some(UiAction::InsertSideQuote);
+        }
         if action == Action::Help {
             self.help = Some(crate::hints::HelpOverlay::new(
-                owner.context(),
+                context,
                 &self.hint_eligibility(),
             ));
             self.interaction.clear_chords();
             return None;
+        }
+        if owner.id.kind == SurfaceKind::TextSelection && action != Action::Cancel {
+            use text_select::TextAction;
+            let selection = self
+                .text_selection
+                .as_mut()
+                .expect("text selection owns input");
+            let result = match action {
+                Action::Close => selection.escape(),
+                Action::TextLeft => selection.key('h'),
+                Action::TextRight => selection.key('l'),
+                Action::TextUp => selection.key('k'),
+                Action::TextDown => selection.key('j'),
+                Action::TextFirstLine => {
+                    selection.key('g');
+                    selection.key('g')
+                }
+                Action::VisualChar => selection.key('v'),
+                Action::VisualLine => selection.key('V'),
+                Action::AskInSideChat => selection.key('s'),
+                Action::Copy => selection.key('y'),
+                Action::Type(c) => selection.key(c),
+                _ => TextAction::Continue,
+            };
+            return match result {
+                TextAction::Exit => {
+                    self.text_selection = None;
+                    None
+                }
+                TextAction::Yank(text) => Some(UiAction::Copy { text }),
+                TextAction::Ask(text) if self.pane.is_root() && !text.trim().is_empty() => {
+                    Some(UiAction::OpenSideChat {
+                        prompt: None,
+                        excerpt: Some(text),
+                    })
+                }
+                _ => None,
+            };
         }
         if action == Action::Cancel {
             return self.cancel_surface(owner.id.kind);
@@ -475,6 +539,13 @@ impl App {
                     })
             }
             Action::Copy | Action::CopyOutput => self.handle_yank(selection, now),
+            Action::AskInSideChat if self.pane.is_root() => {
+                self.excerpt_for_side_chat()
+                    .map(|text| UiAction::OpenSideChat {
+                        prompt: None,
+                        excerpt: Some(text),
+                    })
+            }
             Action::CopyList if scope == SelectionScope::Block => self
                 .model
                 .conversation
@@ -520,7 +591,7 @@ impl App {
             Action::Confirm
                 if self
                     .selection_fold_key(selection, scope)
-                    .is_some_and(|key| self.folds.mode(key) == crate::fold::FoldMode::Summary) =>
+                    .is_some_and(|key| self.folds.mode(key).is_folded()) =>
             {
                 let key = self.selection_fold_key(selection, scope).unwrap();
                 self.apply_fold(|folds, model, diagnostics| {
@@ -528,17 +599,41 @@ impl App {
                 });
                 None
             }
-            Action::Confirm => self
-                .model
-                .conversation
-                .selected_subtask_id(selection)
-                .map(|id| UiAction::OpenSubtask { id })
-                .or_else(|| {
-                    self.model
-                        .conversation
-                        .selected_agent_run_id(selection)
-                        .map(|id| UiAction::OpenAgentRun { id })
-                }),
+            Action::Confirm => {
+                if let Some(id) = self.model.conversation.selected_subtask_id(selection) {
+                    return Some(UiAction::OpenSubtask { id });
+                }
+                if let Some(id) = self.model.conversation.selected_agent_run_id(selection) {
+                    return Some(UiAction::OpenAgentRun { id });
+                }
+                if let Some(entry) = self
+                    .view
+                    .conversation_cache()
+                    .entries()
+                    .get(selection.history_index)
+                    && let Some((lines, start)) = entry.text_body(selection.content_index)
+                {
+                    let width = entry.width();
+                    let top = self.view.conversation_viewport().top();
+                    let hidden = top.saturating_sub(start);
+                    let mut rows = 0;
+                    let first = lines
+                        .iter()
+                        .position(|line| {
+                            rows += crate::layout::prepare::wrapped_height(
+                                std::slice::from_ref(line),
+                                width,
+                            );
+                            rows > hidden
+                        })
+                        .unwrap_or(0);
+                    self.text_selection = Some(text_select::VimTextSelection::new(
+                        text_select::visible_text(lines),
+                        first,
+                    ));
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -739,6 +834,7 @@ impl App {
 
     /// Snap to the rendered disclosure. Returns whether Block scope was dropped.
     pub(super) fn reconcile_fold_selection(&mut self) -> bool {
+        self.clear_text_selection();
         let Some(active) = self.interaction.active_selection() else {
             return false;
         };

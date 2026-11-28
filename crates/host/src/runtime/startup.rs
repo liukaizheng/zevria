@@ -69,6 +69,7 @@ struct OpenedStorage<'a> {
     initial_items: Vec<TranscriptItem>,
     restored_subtasks: Vec<RestoredSubtask>,
     restored_agent_runs: Vec<RestoredAgentRun>,
+    restored_side_chats: Vec<crate::side_chats::Restore>,
 }
 impl OpenedStorage<'_> {
     fn original_items(&self) -> &[TranscriptItem] {
@@ -259,6 +260,13 @@ async fn open_storage(
     } else {
         None
     };
+    anyhow::ensure!(
+        !loaded.as_ref().is_some_and(|outcome| matches!(
+            outcome.items().first(),
+            Some(TranscriptItem::SideChatOrigin(_))
+        )),
+        "a Side Chat transcript must be opened through its parent session"
+    );
     let inherited = match &resolved.start {
         SessionStart::New { inherited_models }
         | SessionStart::FromPlan {
@@ -272,16 +280,19 @@ async fn open_storage(
         loaded.as_ref(),
         inherited,
     )?;
+    let mut restored_side_chats = Vec::new();
     let (restored_subtasks, restored_agent_runs) =
         if include_children && !resolved.profile.is_worker() {
             match &loaded {
                 Some(outcome) => {
-                    preflight_restoration(
-                        &transcript::subsessions_dir(&resolved.workspace, &resolved.id),
-                        &agent_runs_dir(&resolved.workspace, &resolved.id),
-                        outcome.items(),
-                    )
-                    .await?
+                    let children = transcript::subsessions_dir(&resolved.workspace, &resolved.id);
+                    let agents = agent_runs_dir(&resolved.workspace, &resolved.id);
+                    let (normal, sides) = tokio::join!(
+                        preflight_restoration(&children, &agents, outcome.items()),
+                        super::restore::side_chats(&resolved.workspace, &resolved.id),
+                    );
+                    restored_side_chats = sides?;
+                    normal?
                 }
                 None => (Vec::new(), Vec::new()),
             }
@@ -305,6 +316,7 @@ async fn open_storage(
         initial_items,
         restored_subtasks,
         restored_agent_runs,
+        restored_side_chats,
     })
 }
 
@@ -769,10 +781,11 @@ fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result<Start
         models,
         restored_subtasks,
         restored_agent_runs,
+        restored_side_chats,
         ..
     } = storage;
     let BuiltEngine {
-        engine,
+        mut engine,
         skill_context,
         event_tx,
         event_rx,
@@ -800,6 +813,43 @@ fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result<Start
     }
 
     let (exit_tx, exit_rx) = unbounded_channel();
+    let (side_view, side_loaded): (Vec<_>, Vec<_>) = restored_side_chats.into_iter().unzip();
+    let (side_chats, side_guard) = if let Some((_, config)) = root.as_ref() {
+        let side_stop = tokio_util::sync::CancellationToken::new();
+        let (tx, rx) = unbounded_channel();
+        let parent = engine.enable_side_chats(tx.clone());
+        let task = spawn_observed(
+            "Side Chat supervisor",
+            crate::side_chats::run(
+                parent,
+                rx,
+                event_tx.clone(),
+                crate::side_chats::SideChatServices {
+                    workspace: resolved.workspace.clone(),
+                    profiles: models.routing.catalog().cloned().collect(),
+                    models: models.selections.clone(),
+                    command: config.command_config,
+                    web_search: config.web_search.clone(),
+                    mcp: mcp.clone(),
+                    mcp_tools: engine.side_chat_mcp_tools(),
+                },
+                side_loaded,
+                config.max_concurrent_subtasks.max(4),
+                side_stop.clone(),
+            ),
+            exit_tx.clone(),
+            (),
+        );
+        // Keep the supervisor from seeing EOF before the root engine reports its exit.
+        let guard = (side_stop.clone().drop_guard(), tx);
+        let supervisor = crate::side_chats::SideChatSupervisor {
+            stop: side_stop,
+            task,
+        };
+        (Some(supervisor), Some(guard))
+    } else {
+        (None, None)
+    };
     let (supervisor, child_guard) = if let Some((root, config)) = root {
         let shutdown = tokio_util::sync::CancellationToken::new();
         let task = spawn_observed(
@@ -820,7 +870,7 @@ fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result<Start
         "session engine",
         engine.run(command_rx, engine_events),
         exit_tx,
-        (child_guard, lease.clone()),
+        (child_guard, side_guard, lease.clone()),
     );
     let mcp_prompts = mcp
         .as_ref()
@@ -850,10 +900,12 @@ fn spawn(storage: OpenedStorage<'_>, built: BuiltEngine) -> anyhow::Result<Start
             mcp_prompts,
             plan_state,
             selected_mode,
+            side_chats: side_view,
             subtasks: restored_subtasks,
             agent_runs: restored_agent_runs,
         },
         running: RunningSession {
+            side_chats,
             command_jobs,
             mcp,
             cleanup_abandoned_history,

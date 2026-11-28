@@ -459,6 +459,7 @@ fn readable_y_is_block_only_independent_of_yank_and_fold_chords_in_every_pane() 
         let secondary = task.secondary_copy().unwrap();
         let readable = task.readable_list_copy().unwrap();
         app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+            references: Vec::new(),
             header: None,
             blocks: vec![task],
         }));
@@ -569,6 +570,7 @@ fn readable_y_fallbacks_and_message_copy_preserve_primary_contracts() {
         .collect::<Vec<_>>();
     let mut app = App::new();
     app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+        references: Vec::new(),
         header: None,
         blocks,
     }));
@@ -772,6 +774,7 @@ fn typed_folds_preserve_outcomes_geometry_selection_and_copy_across_cache_paths(
             });
             for width in [0, 1, 2, 5, 12, 40, 80] {
                 let history = [HistoryEntry::Conversation(ConversationEntry {
+                    references: Vec::new(),
                     header: None,
                     blocks: vec![block.clone()],
                 })];
@@ -904,6 +907,7 @@ fn acp_tool_and_hosted_early_return_folds_retain_typed_status_in_single_block_me
         let primary = block.primary_copy();
         let secondary = block.secondary_copy();
         let history = [HistoryEntry::Conversation(ConversationEntry {
+            references: Vec::new(),
             header: None,
             blocks: vec![block.clone()],
         })];

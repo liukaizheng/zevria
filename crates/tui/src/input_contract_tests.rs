@@ -159,6 +159,7 @@ fn failures_and_cancellation_preserve_explicit_insert_reentry_and_newer_draft_hi
                     turn_id: TEST_TURN_ID,
                     message: Message::user("submitted"),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }));
                 assert!(app.interaction().is_insert());
             }
@@ -226,6 +227,7 @@ fn modified_activation_keys_do_not_decide_questions_or_change_plan_focus() {
         turn_id: TEST_TURN_ID,
         message: Message::user("work"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     let request = question_request("exact-activation");
     let request_id = request.id.clone();
@@ -341,6 +343,7 @@ fn stale_questions_cannot_capture_a_new_turn_or_an_idle_pane() {
         turn_id: TEST_TURN_ID,
         message: Message::user("work"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     views.apply(SessionEvent::Question(QuestionEvent::Asked {
         turn_id: TurnId::new(9876),
@@ -367,6 +370,7 @@ fn jobs_overlay_is_global_captures_input_and_dismisses_without_cancelling_busy_r
         turn_id: TEST_TURN_ID,
         message: Message::user("work"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     assert_eq!(
         views.handle_event(modified_key(KeyCode::Char('j'), KeyModifiers::ALT)),
@@ -435,6 +439,7 @@ fn selected_running_command_controls_stay_correlated_with_jobs_overlay_closed() 
         turn_id: TEST_TURN_ID,
         message: Message::user("Run a command"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     views.apply(SessionEvent::Turn(TurnEvent::ModelCallStarted {
         turn_id: TEST_TURN_ID,
@@ -555,6 +560,7 @@ fn question_owns_input_above_a_suspended_picker_and_draft() {
         turn_id: TEST_TURN_ID,
         message: Message::user("work"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     views.open_session_picker(vec![
         session_summary("first", Some("first choice")),

@@ -3,20 +3,20 @@
 use gpui_kit::{AssetSource, SharedString};
 use std::borrow::Cow;
 
-gpui_kit::assets::icon_assets!(EditIcons, [Pencil, X]);
+gpui_kit::assets::icon_assets!(ExtraIcons, [Pencil, X, MessageSquare, Paperclip]);
 
 #[derive(Clone, Copy)]
 pub struct AppAssets;
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
-        if let Some(bytes) = EditIcons.load(path)? {
+        if let Some(bytes) = ExtraIcons.load(path)? {
             return Ok(Some(bytes));
         }
         gpui_kit::assets::Assets.load(path)
     }
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
-        paths.extend(EditIcons.list(path)?);
+        paths.extend(ExtraIcons.list(path)?);
         paths.sort();
         paths.dedup();
         Ok(paths)

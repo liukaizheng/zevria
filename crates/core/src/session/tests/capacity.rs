@@ -66,6 +66,7 @@ async fn blocked_lifecycle_is_sequenced_only_after_capacity_is_reserved() {
             turn_id,
             message: Message::user("question"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }))
         .expect("queue starts available");
 
@@ -133,6 +134,7 @@ async fn provider_failure_after_submit_plan_leaves_workflow_planning() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "plan it".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -216,6 +218,7 @@ async fn model_proposed_skill_uses_exact_capacity_instead_of_legacy_tracker_tota
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "load review".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -277,6 +280,7 @@ async fn provider_failure_resets_provider_and_next_prompt_recovers() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "first".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -297,6 +301,7 @@ async fn provider_failure_resets_provider_and_next_prompt_recovers() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "second".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -352,6 +357,7 @@ async fn finite_tool_continuations_complete_with_sequential_calls_and_preserved_
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "continue until finished".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )

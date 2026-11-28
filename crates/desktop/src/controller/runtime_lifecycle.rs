@@ -76,6 +76,7 @@ impl SessionController {
                 match ready.take().unwrap() {
                     Ok(Ok((running, model))) => {
                         this.running = Some(running);
+                        this.session_generation = this.session_generation.wrapping_add(1);
                         this.model = model;
                         if this.quit_requested
                             || this.pending.is_some()
@@ -130,6 +131,7 @@ impl SessionController {
         self.draft_generation = 0;
         self.draft_slot = Default::default();
         self.cancelling = false;
+        self.pending_side_chat_draft = None;
         self.set_capturing_dialog(false, cx);
         self.orchestrate = false;
         let job = cx.global::<EngineRuntime>().spawn(Self::open(
@@ -160,7 +162,11 @@ impl SessionController {
         cx.notify();
     }
     pub fn new_session(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.quit_requested || self.model.controls.models.is_open() || self.config.is_none() {
+        if self.quit_requested
+            || self.capturing_dialog
+            || self.model.controls.models.is_open()
+            || self.config.is_none()
+        {
             return false;
         }
         let Some(workspace) = self.workspace.clone() else {
@@ -205,6 +211,8 @@ impl SessionController {
         self.pump.take();
         self.tick.take();
         self.command.take();
+        self.pending_side_chat_draft = None;
+        self.set_capturing_dialog(false, cx);
         // Unexpected disconnects have already settled the draft. Clearing the
         // pending preview during intentional shutdown must not recover it.
         self.draft_slot.accept();

@@ -151,6 +151,7 @@ fn shortcut_and_slash_open_subtasks_while_busy_and_escape_closes(cx: &mut TestAp
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("Run checks"),
+            references: Vec::new(),
         }),
         cx,
     );

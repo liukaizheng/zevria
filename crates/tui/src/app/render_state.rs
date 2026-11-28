@@ -87,6 +87,9 @@ pub(crate) struct RenderParts<'a> {
     pub(crate) turn_starts: Vec<super::conversation::TurnStartTarget>,
     pub(crate) folds: &'a FoldState,
     pub(crate) selected: Option<ActiveSelection>,
+    pub(crate) side_excerpt: Option<&'a str>,
+    pub(crate) side_error: Option<&'a str>,
+    pub(crate) text_selection: Option<&'a super::text_select::VimTextSelection>,
     pub(crate) selection_reveal: bool,
     pub(crate) diagnostics_visible: bool,
     pub(crate) appearance: crate::presentation::TranscriptAppearance,
@@ -149,6 +152,7 @@ impl App {
         eligibility: &crate::hints::Eligibility,
     ) -> RenderParts<'_> {
         let accent = self.status_accent();
+        let context = self.key_context(surface);
         let work_pending = self.work_pending();
         let composer_locked = !self.can_edit_draft();
         #[cfg(test)]
@@ -189,10 +193,14 @@ impl App {
             folds,
             composer,
             interaction,
+            text_selection,
             edit,
             pane,
             view,
             active_subtasks,
+            side_chat_count,
+            side_excerpt,
+            side_error,
             ..
         } = self;
         let SessionModel {
@@ -325,7 +333,7 @@ impl App {
                 }
             )
         };
-        let (primary, tone, detail) = if session.persistence_error().is_some() {
+        let (mut primary, tone, detail) = if session.persistence_error().is_some() {
             (
                 "Persistence degraded".to_string(),
                 StatusTone::Warning,
@@ -340,9 +348,11 @@ impl App {
         } else {
             (ordinary_primary, StatusTone::Normal, None)
         };
+        if let Some(text) = text_selection.as_ref().filter(|_| selected.is_some()) {
+            primary.insert_str(0, &format!("{}  ", text.mode_label()));
+        }
         let controls = pane.title().map(|_| {
-            let generated_controls =
-                crate::hints::hint_line(surface.context(), eligibility, 100).to_string();
+            let generated_controls = crate::hints::hint_line(context, eligibility, 100).to_string();
             if !pane.can_compose() {
                 format!("inspect only · {generated_controls}")
             } else {
@@ -361,6 +371,7 @@ impl App {
         let status = StatusBarView {
             jobs: running_jobs,
             subtasks: if pane.is_root() { *active_subtasks } else { 0 },
+            side_chats: if pane.is_root() { *side_chat_count } else { 0 },
             primary,
             accent,
             tone,
@@ -383,6 +394,9 @@ impl App {
             turn_starts: conversation.turn_starts(diagnostics_visible),
             folds,
             selected,
+            side_excerpt: side_excerpt.as_deref(),
+            side_error: side_error.as_deref(),
+            text_selection: text_selection.as_ref().filter(|_| selected.is_some()),
             selection_reveal: interaction.selection_reveal(),
             diagnostics_visible,
             appearance: pane.appearance(),

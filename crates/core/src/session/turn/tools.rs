@@ -417,6 +417,7 @@ pub(in crate::session) async fn dispatch_tool_call(
 }
 
 pub(in crate::session) struct ToolExecutionScope<'a> {
+    side_chat: Option<&'a crate::session::SideChatReadOnlyConfig>,
     pub(in crate::session) tools: &'a ToolServerHandle,
     pub(in crate::session) mcp: Option<&'a dyn zevria_session_api::mcp::McpSessionService>,
     pub(in crate::session) mode: SessionMode,
@@ -433,12 +434,74 @@ pub(in crate::session) struct ToolExecutionScope<'a> {
     pub(in crate::session) planning: Option<PlanWorkflowState>,
 }
 
+async fn execute_side_chat_call(
+    scope: &ToolExecutionScope<'_>,
+    side: &crate::session::SideChatReadOnlyConfig,
+    call: &EngineCall<'_>,
+    active: &ActiveSkills,
+) -> ToolCallSlot {
+    use zevria_foundation::McpToolAccess;
+    if scope.turn.is_cancelled() {
+        return cancelled_slot(call);
+    }
+    let name = call.function.name.as_str();
+    let access = McpToolAccess::ReadOnlyPlanScoped;
+    let has_builtin = matches!(name, "command" | "read_image" | "web_search" | "skill_read")
+        && (name != "skill_read" || side.skills_enabled)
+        && scope.tools.snapshot().contains(name)
+        && !(name == "command"
+            && call
+                .function
+                .arguments
+                .get("background")
+                .is_some_and(|v| !v.is_null() && v.as_bool() != Some(false)));
+    let target = if has_builtin {
+        Some((scope.tools, McpToolAccess::None))
+    } else if zevria_foundation::is_mcp_tool_name(name)
+        && side
+            .mcp
+            .as_ref()
+            .is_some_and(|mcp| mcp.tool_allowed(access, name))
+    {
+        side.mcp_tools.as_ref().map(|tools| (tools, access))
+    } else {
+        None
+    };
+    let Some((tools, access)) = target else {
+        return ToolCallSlot::local_diagnostic(
+            call,
+            ToolCallOutcome::Denied,
+            "status: denied\nreason: ",
+            format!("the tool `{name}` is unavailable in a read-only Side Chat"),
+        );
+    };
+    let skills = (name == "skill_read").then(|| zevria_instructions::skill::SkillContext {
+        catalog: scope.catalog.clone(),
+        pins: active.clone(),
+        mode_enabled: side.skills_enabled,
+    });
+    dispatch_tool_call(
+        tools,
+        call,
+        scope.turn,
+        None,
+        skills.as_ref(),
+        None,
+        access,
+        scope.events,
+    )
+    .await
+}
+
 pub(in crate::session) async fn execute_ordinary_tool_call(
     scope: &ToolExecutionScope<'_>,
     call: &EngineCall<'_>,
     active: &mut ActiveSkills,
     plan_scope: Option<&PlanDraftScope>,
 ) -> ToolCallSlot {
+    if let Some(side) = scope.side_chat {
+        return execute_side_chat_call(scope, side, call, active).await;
+    }
     if scope.turn.is_cancelled() {
         return cancelled_slot(call);
     }
@@ -666,6 +729,13 @@ pub(in crate::session) async fn execute_planned_tool_calls(
     let _timing = LifecycleTiming::new("execute_tool_calls", calls.len());
     // Validate the entire response before constructing concurrent futures or
     // launching any call. A failed boundary may not partially apply a skill.
+    if let Some(side) = scope.side_chat {
+        let mut slots = Vec::with_capacity(calls.len());
+        for call in calls {
+            slots.push(execute_side_chat_call(scope, side, call, &active_skills).await);
+        }
+        return assemble_tool_result_batch(slots, None);
+    }
     if plan.policy == BatchPolicy::MixedRejected {
         return assemble_tool_result_batch(calls.iter().map(|call| {
             if scope.turn.is_cancelled() {
@@ -950,6 +1020,7 @@ impl<'a> ToolExecutionScope<'a> {
     ) -> Self {
         let plan = engine.request_plan(policy);
         Self {
+            side_chat: engine.side_chat.as_ref(),
             tools: &engine.tools,
             mcp: engine.capabilities.mcp.as_deref(),
             mode,

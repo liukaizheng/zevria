@@ -8,6 +8,7 @@ use crate::{
     actions::{self, Shortcut},
     controller::{Phase, SessionController, SessionRequest},
 };
+use gpui_kit::base::ElementExt;
 use gpui_kit::component::{
     Disableable, IconName, Sizable, TitleBar,
     button::{Button, ButtonVariants},
@@ -26,8 +27,10 @@ pub(super) enum Replacement {
 pub struct DesktopWindow {
     pub controller: Entity<SessionController>,
     pub(super) composer: Entity<TextareaState>,
+    pub(super) side_ui: super::side_chat::SideChatPanelView,
     composer_mode: zevria_foundation::SessionMode,
     last_recall_generation: u64,
+    last_main_draft_focus: u64,
     last_rejected_edit_generation: u64,
     last_resume_reveal_generation: u64,
     pub(super) transcript: Entity<TranscriptView>,
@@ -138,8 +141,10 @@ impl DesktopWindow {
         let mut this = Self {
             controller,
             composer,
+            side_ui: Default::default(),
             composer_mode: zevria_foundation::SessionMode::Build,
             last_recall_generation: 0,
+            last_main_draft_focus: 0,
             last_rejected_edit_generation: 0,
             last_resume_reveal_generation: 0,
             transcript,
@@ -288,6 +293,13 @@ impl DesktopWindow {
         self.sync_mcp_panel(window, cx);
         self.sync_question(window, cx);
         self.sync_model_picker(window, cx);
+        self.sync_side_chat(window, cx);
+        let focus = self.controller.read(cx).main_draft_focus_generation;
+        if self.last_main_draft_focus != focus {
+            self.last_main_draft_focus = focus;
+            self.composer
+                .update(cx, |input, cx| input.focus(window, cx));
+        }
     }
     pub(super) fn sync_composer_draft(
         &mut self,
@@ -315,10 +327,13 @@ impl DesktopWindow {
     }
 
     pub(super) fn request_replace(&mut self, replacement: Replacement, cx: &mut Context<Self>) {
-        if self.controller.read(cx).model.controls.models.is_open() {
+        let controller = self.controller.read(cx);
+        if controller.capturing_dialog() || controller.model.controls.models.is_open() {
             return;
         }
-        if self.controller.read(cx).model.root.is_busy() {
+        if self.controller.read(cx).model.root.is_busy()
+            || self.controller.read(cx).side_chat_running()
+        {
             self.controller
                 .update(cx, |this, cx| this.set_capturing_dialog(true, cx));
             self.pending_replace = Some(replacement);
@@ -456,6 +471,11 @@ impl DesktopWindow {
             });
             return;
         }
+        if controller.model.controls.side_chat_open && !controller.edit.is_awaiting_acceptance() {
+            self.controller
+                .update(cx, |this, cx| this.close_side_chat_panel(cx));
+            return;
+        }
         self.controller.update(cx, |this, cx| this.cancel(cx));
     }
 }
@@ -557,6 +577,17 @@ impl DesktopWindow {
         }
         main = main.child(div().flex_1());
         if transcript_shown {
+            main = main.child(
+                div().keep_text_selection("preserve-title-selection").child(
+                    style::icon_button(
+                        "open-side-chat",
+                        gpui_kit::assets::IconName::MessageSquare,
+                        format!("Side Chat {}", Shortcut::TOGGLE_SIDE_CHAT.label()),
+                    )
+                    .tab_stop(false)
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_side_chat(window, cx))),
+                ),
+            );
             let (label, shortcut) = if self.transcript.read(cx).has_expanded_details() {
                 ("Collapse details", Shortcut::COLLAPSE_ALL)
             } else {
@@ -588,6 +619,7 @@ impl DesktopWindow {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.controller.update(cx, |this, cx| {
                             if this.edit.is_none() && this.model.root.workflow.open_review() {
+                                this.model.controls.side_chat_open = false;
                                 cx.notify();
                             }
                         })
@@ -653,9 +685,13 @@ impl Render for DesktopWindow {
         self.plan_width = (width * 0.36).clamp(400., 560.);
         let model = &self.controller.read(cx).model;
         let main_width = width - if visible { style::SIDEBAR } else { 0. };
+        if model.controls.side_chat_open {
+            self.plan_width = (main_width * 0.36).clamp(400., 560.);
+        }
         let panel_open = model.root.workflow.dialog().is_some()
             || model.jobs_panel_visible()
-            || model.subtasks_panel_visible();
+            || model.subtasks_panel_visible()
+            || model.controls.side_chat_open;
         self.plan_overlay = panel_open && main_width - self.plan_width < 560.;
         self.plan_width = self.plan_width.min(main_width);
         let compact = main_width
@@ -703,8 +739,30 @@ impl Render for DesktopWindow {
                 this.controller
                     .update(cx, |controller, cx| controller.toggle_subtasks(cx));
             }))
-            .on_action(cx.listener(|this, _: &actions::Cancel, _, cx| this.cancel(cx)))
-            .on_action(cx.listener(|this, _: &actions::Stop, _, cx| {
+            .on_action(
+                cx.listener(|this, _: &actions::ToggleSideChat, window, cx| {
+                    this.toggle_side_chat(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &actions::NewSideChat, _, cx| {
+                this.controller.update(cx, |controller, cx| {
+                    controller.create_side_chat(None, None, cx)
+                });
+            }))
+            .on_action(cx.listener(|this, _: &actions::Cancel, window, cx| {
+                let controller = this.controller.read(cx);
+                let modal = controller.model.controls.models.is_open()
+                    || this.pending_replace.is_some()
+                    || controller.model.controls.question.is_some()
+                    || controller.model.root.workflow.dialog().is_some();
+                if modal || !this.stop_side_if_focused(true, window, cx) {
+                    this.cancel(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &actions::Stop, window, cx| {
+                if this.stop_side_if_focused(false, window, cx) {
+                    return;
+                }
                 this.controller
                     .update(cx, |controller, cx| controller.cancel(cx));
             }))
@@ -834,7 +892,9 @@ impl Render for DesktopWindow {
                 body = body.child(self.sidebar(window, cx));
             }
             body = body.child(center);
-            if let Some(plan) = self.plan_panel(cx) {
+            if let Some(side) = self.side_chat_panel(cx) {
+                body = body.child(side);
+            } else if let Some(plan) = self.plan_panel(cx) {
                 body = body.child(plan);
             } else if let Some(mcp) = self.mcp_panel(window, cx) {
                 body = body.child(mcp);

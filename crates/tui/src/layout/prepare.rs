@@ -44,6 +44,26 @@ pub(crate) fn wrapped_height(lines: &[Line<'static>], width: u16) -> usize {
         .line_count(width)
 }
 
+pub(super) fn side_reference_lines(
+    references: &[zevria_foundation::SideChatReferenceAttachment],
+    width: u16,
+) -> impl Iterator<Item = Line<'static>> + '_ {
+    references.iter().map(move |reference| {
+        let turn = reference
+            .turn_ordinal
+            .map_or_else(String::new, |turn| format!("#{turn}"));
+        let label = format!(
+            "  ↳ @side:{}{turn}  {}",
+            reference.short_id,
+            reference.title.lines().next().unwrap_or_default()
+        );
+        Line::styled(
+            crate::text::truncate_display_width(&label, usize::from(width)),
+            Style::new().fg(theme().text.muted),
+        )
+    })
+}
+
 pub(crate) fn role_header(label: &str, color: Color) -> Line<'static> {
     Line::from(Span::styled(
         format!("● {label}"),

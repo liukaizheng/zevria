@@ -402,6 +402,7 @@ fn narrow_native_child_panes_keep_inline_order_through_hidden_updates_and_switch
         turn_id: TEST_TURN_ID,
         message: Message::user("launch child"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     views.apply(SessionEvent::Turn(TurnEvent::Intermediate {
         turn_id: TEST_TURN_ID,
@@ -421,6 +422,7 @@ fn narrow_native_child_panes_keep_inline_order_through_hidden_updates_and_switch
             turn_id: TEST_TURN_ID,
             message: Message::user("child task"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         })),
     }));
     let mut attempt = ordered_attempt();

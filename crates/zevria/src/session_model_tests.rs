@@ -412,6 +412,7 @@ async fn session_header_follows_persistent_identity_across_modes_resume_and_fres
                         behavior: zevria_foundation::RequestBehavior::Standard,
                         text: "no-tools diagnostic".into(),
                         mode,
+                        references: Vec::new(),
                     },
                 ))
                 .unwrap();
@@ -470,6 +471,7 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "retained prompt".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             },
         ))
         .unwrap();
@@ -536,6 +538,7 @@ async fn resumed_roots_pin_build_plan_but_refresh_other_roles_and_current_limits
                             behavior: zevria_foundation::RequestBehavior::Standard,
                             text: "continue".into(),
                             mode,
+                            references: Vec::new(),
                         },
                     ))
                     .unwrap();
@@ -636,6 +639,7 @@ async fn immediate_model_change_resume_and_global_session_divergence_are_durable
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "before selection".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             },
         ))
         .unwrap();
@@ -710,6 +714,7 @@ async fn immediate_model_change_resume_and_global_session_divergence_are_durable
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "after resume".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             },
         ))
         .unwrap();
@@ -806,6 +811,7 @@ async fn immediate_model_change_resume_and_global_session_divergence_are_durable
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "Plan after durable selection".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             },
         ))
         .unwrap();
@@ -866,6 +872,7 @@ async fn session_only_switches_inherit_fresh_handoffs_without_affecting_config_o
                         behavior: zevria_foundation::RequestBehavior::Standard,
                         text: "established session before local selection".into(),
                         mode,
+                        references: Vec::new(),
                     },
                 ))
                 .unwrap();
@@ -981,6 +988,7 @@ async fn session_only_switches_inherit_fresh_handoffs_without_affecting_config_o
                             behavior: zevria_foundation::RequestBehavior::Standard,
                             text: "independent root".into(),
                             mode: other_mode,
+                            references: Vec::new(),
                         },
                     ))
                     .unwrap();
@@ -1237,6 +1245,7 @@ async fn production_acp_factory_restores_models_and_reports_legacy_errors() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "ACP durable turn".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             },
         ))
         .unwrap();
@@ -1268,6 +1277,7 @@ async fn production_acp_factory_restores_models_and_reports_legacy_errors() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "ACP restored Plan".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             },
         ))
         .unwrap();

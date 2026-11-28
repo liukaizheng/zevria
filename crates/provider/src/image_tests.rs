@@ -613,6 +613,7 @@ async fn retained_screenshots_404_counting_resume_and_same_mode_followup_use_rea
                         behavior: zevria_foundation::RequestBehavior::Standard,
                         text: text.into(),
                         mode: SessionMode::Build,
+                        references: Vec::new(),
                     }),
                     &events,
                 ),

@@ -7,7 +7,35 @@ impl App {
         if self.pane.is_worker() {
             return self.submit_worker();
         }
-        if !self.pane.is_root() || self.composer.is_paste_pending() {
+        if self.composer.is_paste_pending() {
+            return None;
+        }
+        if let PaneScope::SideChat { id, role } = self.model.scope() {
+            if self.side_starting {
+                return None;
+            }
+            let text = self.composer.prompt();
+            let mode = if role == ModelRole::Plan {
+                SessionMode::Plan
+            } else {
+                SessionMode::Build
+            };
+            self.model.submit_in_mode(
+                text.clone(),
+                zevria_foundation::RequestBehavior::SideChat,
+                mode,
+            )?;
+            self.after_admission();
+            self.stage_draft();
+            return Some(UiAction::Session(
+                zevria_session_api::SessionCommand::Control(
+                    zevria_session_api::ControlCommand::SideChat(
+                        zevria_session_api::SideChatCommand::Submit { id, text },
+                    ),
+                ),
+            ));
+        }
+        if !self.pane.is_root() {
             return None;
         }
         if self.composer.is_blank() {
@@ -15,6 +43,22 @@ impl App {
         }
         // Frontend-only lists are admitted before busy/queue gates.
         let classified = self.composer.classify();
+        if let Ok(ClassifiedInput::SideChat(prompt)) = classified {
+            if self.edit.is_recalling() {
+                return None;
+            }
+            self.composer.clear();
+            if prompt
+                .as_ref()
+                .is_some_and(|p| !p.has_images() && p.text_projection() == "--clip")
+            {
+                return Some(UiAction::ReadSideChatExcerpt);
+            }
+            return Some(UiAction::OpenSideChat {
+                prompt,
+                excerpt: None,
+            });
+        }
         if let Ok(ClassifiedInput::Builtin(
             command @ (SlashCommand::Jobs | SlashCommand::Subtasks | SlashCommand::Mcp),
         )) = classified
@@ -70,11 +114,13 @@ impl App {
         if self.edit.is_recalling() {
             let replacement = match classified {
                 ClassifiedInput::Message(text) => TranscriptEditReplacement::Message {
+                    references: Vec::new(),
                     text,
                     mode: self.model.session.next_mode(),
                     behavior: zevria_foundation::RequestBehavior::Standard,
                 },
                 ClassifiedInput::Orchestrate(text) => TranscriptEditReplacement::Message {
+                    references: Vec::new(),
                     text,
                     mode: self.model.session.next_mode(),
                     behavior: zevria_foundation::RequestBehavior::Orchestrate,
@@ -87,7 +133,9 @@ impl App {
                 ClassifiedInput::Ensemble { workflow, prompt } => {
                     TranscriptEditReplacement::Ensemble { workflow, prompt }
                 }
-                ClassifiedInput::Builtin(_) | ClassifiedInput::McpPrompt { .. } => {
+                ClassifiedInput::Builtin(_)
+                | ClassifiedInput::SideChat(_)
+                | ClassifiedInput::McpPrompt { .. } => {
                     self.push_error(
                         "Built-in commands cannot replace transcript items; cancel the recall to run the command."
                             .to_string(),
@@ -106,6 +154,10 @@ impl App {
     ) -> Option<UiAction> {
         use zevria_presentation::workspace::{InputRoute, admit_work};
         match classified {
+            ClassifiedInput::SideChat(prompt) => Some(UiAction::OpenSideChat {
+                prompt,
+                excerpt: None,
+            }),
             work @ (ClassifiedInput::Message(_)
             | ClassifiedInput::Orchestrate(_)
             | ClassifiedInput::McpPrompt { .. }
@@ -257,11 +309,13 @@ impl App {
                 text,
                 mode,
                 behavior,
+                references,
             } => UiAction::Session(zevria_session_api::SessionCommand::Turn(
                 TurnCommand::Submit {
                     text,
                     mode,
                     behavior,
+                    references,
                 },
             )),
             TurnCommand::InvokeSkill { name, args, mode } => {

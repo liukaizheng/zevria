@@ -1432,6 +1432,7 @@ fn prompt_message_edit(
             behavior: zevria_foundation::RequestBehavior::Standard,
             text: text.into(),
             mode,
+            references: Vec::new(),
         },
     }))
 }

@@ -654,6 +654,7 @@ async fn mid_turn_partial_checkpoint_preserves_a_complete_batch_even_if_dispatch
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "use tools".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -827,6 +828,7 @@ async fn explore_partial_checkpoint_dispatch_or_capacity_failure_is_durable_with
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "next Explore request".into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )

@@ -98,6 +98,7 @@ async fn prompt_metadata_opts_in_without_parsing_text_or_changing_mode() {
                 text,
                 mode,
                 behavior,
+                ..
             }) => Some((text.text_projection(), *mode, *behavior)),
             _ => None,
         })
@@ -252,6 +253,7 @@ async fn set_mode_replies_after_ack_and_keeps_terminal_mode_commands_literal() {
                 behavior: _,
                 text,
                 mode,
+                ..
             }) => Some((text.text_projection(), *mode)),
             _ => None,
         })

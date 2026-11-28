@@ -21,9 +21,11 @@ mod replay;
 #[doc(hidden)]
 pub mod replay_probe;
 mod request_replay;
+mod side_chat;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_support;
+pub use side_chat::*;
 pub mod transcript;
 pub mod worker_log;
 pub use display::{committed_display, restored_attempt};

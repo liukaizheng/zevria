@@ -353,6 +353,7 @@ async fn gateway_http_search_is_durable_model_inert_and_portable_without_local_d
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "Search".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )

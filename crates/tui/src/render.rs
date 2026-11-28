@@ -11,6 +11,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
+use unicode_segmentation::UnicodeSegmentation as _;
 use zevria_foundation::SessionMode;
 
 use crate::app::{App, ComposerChrome, ConversationTail, PlanChoice, RetryCountdown};
@@ -47,6 +48,7 @@ impl App {
         cursor_owned: bool,
     ) -> FrameLayout {
         let surface = self.surface();
+        let context = self.key_context(surface);
         let eligibility = self.hint_eligibility();
         let mut parts = self.render_parts_with_hints(surface, &eligibility);
         let frame_area = frame.area();
@@ -93,7 +95,49 @@ impl App {
                 requested_height: rows_to_u16(requested_height),
             }
         };
-        let layout = FrameLayout::compute(frame_area, inspect, lower, workspace_header_required);
+        let mut layout =
+            FrameLayout::compute(frame_area, inspect, lower, workspace_header_required);
+        let banner_width = layout.conversation_content.width;
+        let max_height = layout.conversation_content.height.saturating_sub(1);
+        if banner_width > 0 && max_height > 0 {
+            let mut lines = Vec::new();
+            // Errors are actionable; never let a wrapped excerpt push them out.
+            if let Some(error) = parts.side_error {
+                let style = Style::new().fg(theme().feedback.error);
+                for line in error.lines().filter(|line| !line.is_empty()).take(3) {
+                    lines.push(Line::styled(line.to_owned(), style));
+                }
+            }
+            if let Some(excerpt) = parts.side_excerpt {
+                let preview = excerpt.lines().take(2).collect::<Vec<_>>().join(" ");
+                lines.push(Line::styled(
+                    format!("↳ Selected excerpt: {preview}"),
+                    Style::new().fg(theme().text.muted),
+                ));
+            }
+            if !lines.is_empty() {
+                let height = rows_to_u16(wrapped_height(&lines, banner_width))
+                    .min(3)
+                    .min(max_height);
+                frame.render_widget(
+                    Paragraph::new(lines).wrap(Wrap { trim: false }),
+                    Rect {
+                        height,
+                        ..layout.conversation_content
+                    },
+                );
+                for area in [
+                    &mut layout.conversation,
+                    &mut layout.conversation_content,
+                    &mut layout.conversation_scrollbar,
+                    &mut layout.selection_band,
+                ] {
+                    let offset = height.min(area.height);
+                    area.y += offset;
+                    area.height -= offset;
+                }
+            }
+        }
 
         if layout.status.height > 0 {
             render_status_bar(frame, layout.status, &parts.status);
@@ -107,7 +151,7 @@ impl App {
             cache.refresh_with_revisions(
                 parts.history,
                 Some(parts.conversation),
-                parts.selected,
+                parts.selected.filter(|_| parts.text_selection.is_none()),
                 wrap_width,
                 parts.diagnostics_visible,
                 parts.folds,
@@ -172,6 +216,23 @@ impl App {
                 Some(crate::fold::SpanRole::Hidden { start }) => &cache.entries()[start],
                 _ => entry,
             };
+            if let Some(text) = parts.text_selection
+                && let Some((lines, start)) =
+                    representative.text_body(active.selection.content_index)
+            {
+                let line = text.cursor.line.min(lines.len() - 1);
+                let delta = wrapped_height(&lines[..line], wrap_width);
+                let display = lines[line].to_string();
+                let gutter = crate::app::text_select::gutter(&lines[line]);
+                let cursor = display[gutter..]
+                    .grapheme_indices(true)
+                    .nth(text.cursor.grapheme)
+                    .map_or(display.len(), |(offset, _)| gutter + offset);
+                let subrow = ComposerLayout::new(&display, cursor, wrap_width)
+                    .caret()
+                    .row;
+                return Some(RowRange::from_start_len(start + delta + subrow, 1));
+            }
             representative
                 .selection
                 .map(|range| range.shifted(representative.offset()))
@@ -192,7 +253,7 @@ impl App {
         parts.view.reconcile_conversation_viewport(
             total,
             viewport_height,
-            selection_range.filter(|_| parts.selection_reveal),
+            selection_range.filter(|_| parts.selection_reveal || parts.text_selection.is_some()),
             parts.selected.is_some(),
         );
 
@@ -222,7 +283,25 @@ impl App {
             let separator = usize::from(entry.height > 0);
             let end = offset.saturating_add(entry.extent());
             if RowRange::new(offset, end).intersects(window) {
-                entry.append_visible_lines(offset, window, &mut window_start, &mut visible);
+                let text = parts
+                    .selected
+                    .filter(|active| active.selection.history_index == index)
+                    .and_then(|active| {
+                        parts
+                            .text_selection
+                            .map(|text| (active.selection.content_index, text))
+                    });
+                if text.is_some() {
+                    entry.append_visible_lines_with_text(
+                        offset,
+                        window,
+                        &mut window_start,
+                        &mut visible,
+                        text,
+                    );
+                } else {
+                    entry.append_visible_lines(offset, window, &mut window_start, &mut visible);
+                }
                 if let Some((prompt_index, probe)) = parts.accepted_prompt_paint
                     && prompt_index == index
                     && entry_range.intersects(window)
@@ -333,7 +412,8 @@ impl App {
                 );
             }
         }
-        if let Some(selection) = selection_range
+        if parts.text_selection.is_none()
+            && let Some(selection) = selection_range
             && let Some(rows) = project_rows(selection, window, layout.conversation)
         {
             paint_selection(
@@ -355,11 +435,8 @@ impl App {
         }
 
         if layout.hints.height > 0 {
-            let hints = crate::hints::hint_line(
-                surface.context(),
-                &eligibility,
-                usize::from(layout.hints.width),
-            );
+            let hints =
+                crate::hints::hint_line(context, &eligibility, usize::from(layout.hints.width));
             frame.render_widget(Paragraph::new(hints), layout.hints);
         }
 

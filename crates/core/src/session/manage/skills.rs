@@ -169,7 +169,10 @@ impl<P: ModelProvider> SessionEngine<P> {
                                 })
                             })
                             .collect::<Vec<_>>();
-                        if let Err(error) = self.commit(revocations) {
+                        let committed = self.commit(revocations);
+                        // A catalog-only change (no revocations) still changes the fork context.
+                        self.publish_fork();
+                        if let Err(error) = committed {
                             self.persistence_failed(&error, events).await?;
                             let _ = events.send(SessionEvent::Manage(ManagementEvent::SkillsResult { request_id, result: Box::new(Result::error("persistence_failed", format!("management changed but revocation persistence failed; generation requires reconciliation: {error:#}"))) })).await;
                             return Ok(());

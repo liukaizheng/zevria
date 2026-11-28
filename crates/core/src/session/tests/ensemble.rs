@@ -494,6 +494,7 @@ async fn ensemble_to_message_edit_runs_build_or_plan_from_the_retained_prefix() 
                         behavior: zevria_foundation::RequestBehavior::Standard,
                         text: "ordinary replacement".into(),
                         mode,
+                        references: Vec::new(),
                     },
                 ),
                 &events,
@@ -754,6 +755,7 @@ async fn ensemble_edit_validation_failures_preserve_the_original_tail() {
             behavior: zevria_foundation::RequestBehavior::Standard,
             text: "   ".into(),
             mode: SessionMode::Build,
+            references: Vec::new(),
         },
     ] {
         let provider = ScriptedProvider::new(std::iter::empty::<anyhow::Result<Message>>());

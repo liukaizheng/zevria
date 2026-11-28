@@ -60,6 +60,8 @@ pub enum McpToolAccess {
     #[default]
     None,
     PlanScoped,
+    /// Plan policy intersected with non-destructive MCP annotations.
+    ReadOnlyPlanScoped,
     AllEnabled,
 }
 

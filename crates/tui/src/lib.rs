@@ -15,6 +15,7 @@ mod picker;
 pub(crate) use zevria_presentation::blocks as presentation;
 mod render;
 mod runtime;
+mod side_chats;
 mod skills;
 mod status;
 mod status_icon;

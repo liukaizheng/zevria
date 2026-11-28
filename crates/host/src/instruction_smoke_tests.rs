@@ -1,6 +1,8 @@
 //! Production Responses smoke: mode switching, tool activation, shutdown, and resume.
 #[path = "command_job_smoke_tests.rs"]
 mod command_jobs;
+#[path = "side_chat_smoke_tests.rs"]
+mod side_chat;
 use super::*;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -163,6 +165,7 @@ async fn interactive_root_publishes_engine_idle_after_prompt_completion() {
             text: "one prompt".into(),
             mode: SessionMode::Build,
             behavior: zevria_foundation::RequestBehavior::Standard,
+            references: Vec::new(),
         }))
         .unwrap();
     completed(&mut events).await; // Asserts TurnCompleted precedes EngineIdle.
@@ -268,6 +271,7 @@ async fn responses_instruction_modules_survive_modes_skill_activation_and_resume
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: format!("smoke turn {index}").into(),
                 mode,
+                references: Vec::new(),
             }))
             .unwrap();
         completed(&mut events).await;
@@ -285,6 +289,7 @@ async fn responses_instruction_modules_survive_modes_skill_activation_and_resume
             behavior: zevria_foundation::RequestBehavior::Standard,
             text: "resume smoke".into(),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }))
         .unwrap();
     completed(&mut events).await;

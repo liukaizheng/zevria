@@ -10,7 +10,6 @@ use std::{
     time::Instant,
 };
 
-#[cfg(test)]
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::{crossterm::event::Event, style::Style};
 use tokio::sync::mpsc::UnboundedSender;
@@ -18,11 +17,16 @@ use zevria_foundation::subtask::SubtaskId;
 use zevria_foundation::subtask::SubtaskKind;
 use zevria_foundation::subtask::SubtaskLaunchMetadata;
 use zevria_foundation::subtask::SubtaskStatus;
+use zevria_foundation::{SideChatDescriptor, SideChatId, SideChatStatus};
 use zevria_model::models::ModelSelectionScope;
+use zevria_presentation::side_chats::{
+    RestoredSidePane, SideChatPane, extract_side_chat_references_from, format_quote_for_main,
+    new_side_chat, side_chat_answers,
+};
 use zevria_presentation::subtasks::active_count;
-use zevria_session_api::SessionCommand;
 use zevria_session_api::SessionEvent;
 use zevria_session_api::SessionStreamBatch;
+use zevria_session_api::{ControlCommand, SessionCommand, SideChatCommand, SideChatEvent};
 use zevria_transcript::AgentRunTranscriptRecord;
 use zevria_transcript::transcript::SessionSummary;
 use zevria_transcript::transcript::TranscriptItem;
@@ -203,11 +207,14 @@ impl AgentPane {
 #[derive(Clone, Debug)]
 pub(crate) enum ClipboardOrigin {
     Root,
+    SideChat(SideChatId),
+    SideChatExcerpt,
     Agent(EnsembleRunId, AgentRunId),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VisiblePane {
+    SideChat(SideChatId),
     Subtask(PaneId),
     Agent(PaneId),
 }
@@ -228,6 +235,11 @@ impl ChildPane {
     }
 }
 
+struct NativeSidePane {
+    descriptor: SideChatDescriptor,
+    app: App,
+}
+
 /// The root pane plus live/historical child panes and their navigation state.
 pub struct SessionViews {
     pub(crate) workspace: zevria_presentation::workspace::WorkspaceModel<
@@ -236,6 +248,11 @@ pub struct SessionViews {
         AgentPane,
         OverlayController,
     >,
+    side_threads: Vec<NativeSidePane>,
+    side_completion: usize,
+    dismissed_side_query: Option<String>,
+    pending_side_request: Option<String>,
+    side_command: Option<SessionCommand>,
     model_profiles: Arc<ConfiguredModelProfiles>,
     workspace_header: WorkspaceHeader,
     pub(crate) startup_workspace: PathBuf,
@@ -274,10 +291,12 @@ impl SessionViews {
         if self.surface_snapshot(&self.workspace.root).owner.captures {
             return None;
         }
-        self.workspace
+        let action = self
+            .workspace
             .root
             .dispatch_next_queued()
-            .or_else(|| self.workspace.root.dispatch_job_continuation())
+            .or_else(|| self.workspace.root.dispatch_job_continuation());
+        self.consume_view_action(action)
     }
 
     pub fn new(mut root: App, startup_workspace: PathBuf) -> Self {
@@ -293,6 +312,11 @@ impl SessionViews {
                 root,
                 OverlayController::default(),
             ),
+            side_threads: Vec::new(),
+            side_completion: 0,
+            dismissed_side_query: None,
+            pending_side_request: None,
+            side_command: None,
             model_profiles,
             workspace_header: WorkspaceHeader::new(startup_workspace.clone()),
             startup_workspace,
@@ -621,6 +645,12 @@ impl SessionViews {
                     .find(|agent| agent.app.surface().id.pane == previous)
                 {
                     agent.app.suspend_file_completion();
+                } else if let Some(thread) = self
+                    .side_threads
+                    .iter_mut()
+                    .find(|thread| thread.app.surface().id.pane == previous)
+                {
+                    thread.app.suspend_file_completion();
                 }
             }
             self.file_owner = pane;
@@ -649,6 +679,10 @@ impl SessionViews {
         )
     }
 
+    pub(crate) fn take_side_command(&mut self) -> Option<SessionCommand> {
+        self.side_command.take()
+    }
+
     pub(crate) fn clipboard_origin(&self) -> Option<ClipboardOrigin> {
         match self.visible {
             None => Some(ClipboardOrigin::Root),
@@ -659,6 +693,7 @@ impl SessionViews {
                 .find(|pane| pane.app.surface().id.pane == id)
                 .map(|pane| ClipboardOrigin::Agent(pane.ensemble_run_id.clone(), pane.id.clone())),
             Some(VisiblePane::Subtask(_)) => None,
+            Some(VisiblePane::SideChat(id)) => Some(ClipboardOrigin::SideChat(id)),
         }
     }
 
@@ -670,6 +705,23 @@ impl SessionViews {
         result: crate::clipboard::ClipboardResult,
     ) {
         let app = match origin {
+            ClipboardOrigin::SideChatExcerpt => {
+                match result {
+                    crate::clipboard::ClipboardResult::Text(text) if !text.trim().is_empty() => {
+                        self.side_command = Some(self.create_side(None, Some(text)));
+                    }
+                    crate::clipboard::ClipboardResult::Error(error) => self.show_root_error(error),
+                    _ => self.show_root_error(
+                        "Copy text in your terminal before asking in Side Chat.".into(),
+                    ),
+                }
+                return;
+            }
+            ClipboardOrigin::SideChat(id) => self
+                .side_threads
+                .iter_mut()
+                .find(|pane| pane.descriptor.id == id)
+                .map(|pane| &mut pane.app),
             ClipboardOrigin::Root => Some(&mut self.workspace.root),
             ClipboardOrigin::Agent(run, id) => self
                 .workspace
@@ -685,6 +737,14 @@ impl SessionViews {
 
     fn visible_app_mut(&mut self) -> &mut App {
         match self.visible {
+            Some(VisiblePane::SideChat(id)) => {
+                &mut self
+                    .side_threads
+                    .iter_mut()
+                    .find(|pane| pane.descriptor.id == id)
+                    .expect("live side pane")
+                    .app
+            }
             Some(VisiblePane::Subtask(id)) => {
                 &mut self
                     .workspace
@@ -711,6 +771,11 @@ impl SessionViews {
         if self.visible != visible {
             // Tail rewrites may already have removed the outgoing worker.
             let outgoing = match self.visible {
+                Some(VisiblePane::SideChat(id)) => self
+                    .side_threads
+                    .iter_mut()
+                    .find(|pane| pane.descriptor.id == id)
+                    .map(|pane| &mut pane.app),
                 Some(VisiblePane::Subtask(index)) => self
                     .workspace
                     .children
@@ -726,6 +791,7 @@ impl SessionViews {
                 None => Some(&mut self.workspace.root),
             };
             if let Some(app) = outgoing {
+                app.clear_text_selection();
                 app.close_composer_edit_group();
             }
             self.visible = visible;
@@ -736,6 +802,14 @@ impl SessionViews {
 
     fn visible_app(&self) -> &App {
         match self.visible {
+            Some(VisiblePane::SideChat(id)) => {
+                &self
+                    .side_threads
+                    .iter()
+                    .find(|pane| pane.descriptor.id == id)
+                    .expect("live side pane")
+                    .app
+            }
             Some(VisiblePane::Subtask(id)) => {
                 &self
                     .workspace
@@ -761,10 +835,19 @@ impl SessionViews {
     /// Observe only the visible pane; hidden native panes still observe lifecycle receipt.
     pub(crate) fn observe_clock(&mut self, now: Instant) {
         self.visible_app_mut().observe_clock(now);
+        for pane in &mut self.side_threads {
+            if self.visible != Some(VisiblePane::SideChat(pane.descriptor.id)) {
+                pane.app.observe_clock(now);
+            }
+        }
     }
 
     pub(crate) fn clock_required(&self) -> bool {
         self.visible_app().is_busy()
+            || self
+                .side_threads
+                .iter()
+                .any(|pane| pane.descriptor.status == SideChatStatus::Running)
             || self.workspace.root.jobs_inspector().is_open()
             || (self.workspace.controls.subtasks.is_open()
                 && self.workspace.controls.subtasks.has_active_rows())
@@ -831,12 +914,17 @@ impl SessionViews {
     /// modal overlay above the protected header row.
     pub fn render(&mut self, frame: &mut ratatui::Frame) {
         self.refresh_subtask_rows();
+        self.workspace
+            .root
+            .set_side_chat_count(self.side_threads.len());
+        if self.overlay_owns(SurfaceKind::SideChats) {
+            self.workspace.controls.update_side_chats(self.side_rows());
+        }
         let accent = self.visible_app().status_accent().color();
         let snapshot = self.surface_snapshot(self.visible_app());
         let owner = snapshot.owner;
-        let layout =
-            self.visible_app_mut()
-                .render_surface(frame, true, !owner.captures && owner.cursor);
+        let cursor = !owner.captures && owner.cursor;
+        let layout = self.visible_app_mut().render_surface(frame, true, cursor);
         if layout.workspace_header_enabled {
             self.workspace_header
                 .render(frame.buffer_mut(), layout.workspace_header, accent);
@@ -854,6 +942,16 @@ impl SessionViews {
             frame,
             layout.modal_body,
         );
+        if !owner.captures {
+            let matches = self.side_completions();
+            crate::side_chats::render_completions(
+                frame,
+                layout.modal_body,
+                layout.prompt,
+                &matches,
+                self.side_completion,
+            );
+        }
     }
 
     pub(crate) fn open_model_picker(&mut self, scope: ModelSelectionScope) {
@@ -907,6 +1005,14 @@ impl SessionViews {
     }
 
     fn apply_event(&mut self, event: SessionEvent) {
+        if let SessionEvent::SideChat(event) = event {
+            self.apply_side(event);
+            return;
+        }
+        if matches!(&event, SessionEvent::Plan(zevria_session_api::PlanEvent::StateChanged { state }) if matches!(state.as_ref(), zevria_workflow::PlanWorkflowState::Ready { .. }))
+        {
+            self.workspace.controls.close_side_chats();
+        }
         if matches!(
             &event,
             SessionEvent::Job(JobEvent::Updated { .. } | JobEvent::ControlResult { .. })
@@ -1332,6 +1438,10 @@ impl SessionViews {
 
     fn contains_pane(&self, pane: VisiblePane) -> bool {
         match pane {
+            VisiblePane::SideChat(id) => self
+                .side_threads
+                .iter()
+                .any(|pane| pane.descriptor.id == id),
             VisiblePane::Subtask(id) => self
                 .workspace
                 .children
@@ -1346,6 +1456,15 @@ impl SessionViews {
     }
 
     pub fn apply_streams(&mut self, batch: SessionStreamBatch) {
+        for (id, stream) in batch.side_chats {
+            if let Some(pane) = self
+                .side_threads
+                .iter_mut()
+                .find(|pane| pane.descriptor.id == id)
+            {
+                pane.app.apply_stream(stream);
+            }
+        }
         let child_count = self.workspace.children.len();
         if let Some(stream) = batch.root {
             let effects = self.workspace.root.apply_stream(stream);
@@ -1377,6 +1496,15 @@ impl SessionViews {
     /// ignored keys; pane shortcuts are allowed only by that owner's policy.
     pub fn handle_event(&mut self, event: Event) -> Option<UiAction> {
         let action = self.handle_workspace_event(event);
+        if self
+            .workspace
+            .root
+            .side_reference_query()
+            .map(|(query, _)| query)
+            != self.dismissed_side_query.as_deref()
+        {
+            self.dismissed_side_query = None;
+        }
         self.file_search_request();
         action
     }
@@ -1429,13 +1557,45 @@ impl SessionViews {
             return self.consume_view_action(action);
         }
         if let UserInput::Key(key) = &input {
+            let matches = self.side_completions();
+            if !matches.is_empty() {
+                match (key.code, key.modifiers) {
+                    (KeyCode::Up, KeyModifiers::NONE) => {
+                        self.side_completion = self.side_completion.saturating_sub(1);
+                        return None;
+                    }
+                    (KeyCode::Down, KeyModifiers::NONE) => {
+                        self.side_completion = (self.side_completion + 1).min(matches.len() - 1);
+                        return None;
+                    }
+                    (KeyCode::Tab | KeyCode::Enter, KeyModifiers::NONE)
+                    | (KeyCode::Char('i'), KeyModifiers::CONTROL) => {
+                        let item = &matches[self.side_completion.min(matches.len() - 1)];
+                        self.workspace.root.complete_side_reference(&item.insertion);
+                        self.side_completion = 0;
+                        return None;
+                    }
+                    (KeyCode::Esc, KeyModifiers::NONE) => {
+                        self.dismissed_side_query = self
+                            .workspace
+                            .root
+                            .side_reference_query()
+                            .map(|(query, _)| query.to_owned());
+                        return None;
+                    }
+                    _ => self.side_completion = 0,
+                }
+            }
             match owner.action(*key) {
-                Some(Action::Help) => {
+                Some(Action::Help) if !self.visible_app().has_pending_text_find() => {
                     let eligibility = self.visible_app().hint_eligibility();
+                    let context = self.visible_app().key_context(owner);
                     self.visible_app_mut().close_composer_edit_group();
-                    self.workspace
-                        .controls
-                        .show_help(owner.context(), &eligibility);
+                    self.workspace.controls.show_help(context, &eligibility);
+                    return None;
+                }
+                Some(Action::SideChatOverlay) => {
+                    self.show_side_chats();
                     return None;
                 }
                 Some(Action::ModelPicker) => {
@@ -1469,6 +1629,92 @@ impl SessionViews {
 
     fn consume_view_action(&mut self, action: Option<UiAction>) -> Option<UiAction> {
         match action {
+            Some(UiAction::OpenSideChat {
+                prompt: None,
+                excerpt: None,
+            }) => {
+                self.show_side_chats();
+                None
+            }
+            Some(UiAction::NewSideChat) => Some(UiAction::Session(self.create_side(None, None))),
+            Some(UiAction::OpenSidePane { id }) => {
+                self.open_side(id);
+                None
+            }
+            Some(UiAction::InsertSideReference { id }) => {
+                let short = self
+                    .side_threads
+                    .iter()
+                    .find(|pane| pane.descriptor.id == id)?
+                    .descriptor
+                    .short_id
+                    .clone();
+                self.insert_in_root(&format!(" @side:{short} "));
+                None
+            }
+            Some(UiAction::InsertSideQuote) => {
+                let Some(VisiblePane::SideChat(id)) = self.visible else {
+                    return None;
+                };
+                let pane = self
+                    .side_threads
+                    .iter()
+                    .find(|pane| pane.descriptor.id == id)?;
+                let answer = pane.app.excerpt_for_side_chat().or_else(|| {
+                    side_chat_answers(pane.app.side_model())
+                        .pop()
+                        .map(|(_, _, answer)| answer)
+                })?;
+                let quote = format_quote_for_main(&pane.descriptor.title, &answer);
+                self.insert_in_root(&quote);
+                None
+            }
+            Some(UiAction::Session(SessionCommand::Turn(
+                zevria_session_api::TurnCommand::EditTranscript(mut edit),
+            ))) => {
+                if let zevria_session_api::TranscriptEditReplacement::Message {
+                    text,
+                    references,
+                    ..
+                } = &mut edit.replacement
+                {
+                    *references = extract_side_chat_references_from(
+                        text,
+                        self.side_threads
+                            .iter()
+                            .map(|pane| (&pane.descriptor, pane.app.side_model())),
+                    );
+                }
+                Some(UiAction::Session(SessionCommand::Turn(
+                    zevria_session_api::TurnCommand::EditTranscript(edit),
+                )))
+            }
+            Some(UiAction::OpenSideChat { prompt, excerpt }) => {
+                Some(UiAction::Session(self.create_side(prompt, excerpt)))
+            }
+            Some(UiAction::Session(SessionCommand::Turn(
+                zevria_session_api::TurnCommand::Submit {
+                    text,
+                    mode,
+                    behavior,
+                    ..
+                },
+            ))) => {
+                let references = extract_side_chat_references_from(
+                    &text,
+                    self.side_threads
+                        .iter()
+                        .map(|pane| (&pane.descriptor, pane.app.side_model())),
+                );
+                Some(UiAction::Session(SessionCommand::Turn(
+                    zevria_session_api::TurnCommand::Submit {
+                        text,
+                        mode,
+                        behavior,
+                        references,
+                    },
+                )))
+            }
             Some(UiAction::OpenSubtask { id }) => {
                 self.open_child(&id);
                 None
@@ -1491,6 +1737,168 @@ impl SessionViews {
             }
             action => action,
         }
+    }
+
+    pub fn restore_side_chat(
+        &mut self,
+        descriptor: SideChatDescriptor,
+        quoted_excerpt: Option<String>,
+        items: Vec<TranscriptItem>,
+    ) {
+        let side = SideChatPane::restore(RestoredSidePane {
+            descriptor,
+            quoted_excerpt,
+            items,
+        });
+        self.add_side(side, false);
+    }
+
+    fn add_side(&mut self, side: SideChatPane, focus: bool) {
+        let descriptor = side.descriptor.clone();
+        let id = descriptor.id;
+        let app = App::from_side_chat(side, focus)
+            .with_shared_model_profiles(Arc::clone(&self.model_profiles));
+        self.side_threads.push(NativeSidePane { descriptor, app });
+        if focus {
+            self.open_side(id);
+        }
+    }
+
+    fn create_side(
+        &mut self,
+        prompt: Option<zevria_content::UserPrompt>,
+        excerpt: Option<String>,
+    ) -> SessionCommand {
+        let command = new_side_chat(prompt, excerpt);
+        if let SideChatCommand::Create { request_id, .. } = &command {
+            self.pending_side_request = Some(request_id.clone());
+        }
+        SessionCommand::Control(ControlCommand::SideChat(command))
+    }
+
+    fn apply_side(&mut self, event: SideChatEvent) {
+        let id = match event {
+            SideChatEvent::Created {
+                request_id,
+                descriptor,
+                quoted_excerpt,
+                awaiting_initial_turn,
+            } => {
+                let focus = self.pending_side_request.as_deref() == Some(&request_id);
+                if focus {
+                    self.pending_side_request = None;
+                }
+                let mut side = SideChatPane::new(*descriptor, quoted_excerpt);
+                side.awaiting_initial_turn = awaiting_initial_turn;
+                if awaiting_initial_turn {
+                    side.descriptor.status = SideChatStatus::Running;
+                }
+                let focus = focus
+                    && self.surface_snapshot(self.visible_app()).owner.id.kind
+                        != SurfaceKind::PlanReview
+                    && !self.surface_snapshot(self.visible_app()).owner.captures;
+                self.add_side(side, focus);
+                return;
+            }
+            SideChatEvent::CreateFailed { request_id, error } => {
+                if self.pending_side_request.as_deref() == Some(&request_id) {
+                    self.pending_side_request = None;
+                }
+                self.show_root_error(format!("Side Chat could not open: {error}"));
+                return;
+            }
+            SideChatEvent::Session { id, .. }
+            | SideChatEvent::Status { id, .. }
+            | SideChatEvent::Unloaded { id }
+            | SideChatEvent::Failed { id, .. }
+            | SideChatEvent::SubmitRejected { id, .. } => id,
+        };
+        if let Some(pane) = self
+            .side_threads
+            .iter_mut()
+            .find(|pane| pane.descriptor.id == id)
+        {
+            match event {
+                SideChatEvent::Session { event, .. } => {
+                    if matches!(
+                        *event,
+                        SessionEvent::Turn(
+                            TurnEvent::Started { .. }
+                                | TurnEvent::Rejected { .. }
+                                | TurnEvent::Failed { .. }
+                                | TurnEvent::Cancelled { .. }
+                        )
+                    ) {
+                        pane.app.side_chat_started_or_settled();
+                    }
+                    if matches!(*event, SessionEvent::Turn(TurnEvent::Started { .. })) {
+                        pane.descriptor.turn_count += 1;
+                        pane.descriptor.status = SideChatStatus::Running;
+                    }
+                    pane.app.reduce(*event);
+                }
+                SideChatEvent::Status { status, .. } => pane.descriptor.status = status,
+                SideChatEvent::Unloaded { .. } => pane.descriptor.status = SideChatStatus::Idle,
+                SideChatEvent::Failed { error, .. } => {
+                    pane.descriptor.status = SideChatStatus::Failed;
+                    pane.app.stop_side_with_error(error);
+                }
+                SideChatEvent::SubmitRejected { error, .. } => {
+                    if pane.app.side_model().active_turn_id().is_none() {
+                        pane.descriptor.status = SideChatStatus::Failed;
+                        pane.app.stop_side_with_error(error);
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    fn side_completions(&self) -> Vec<zevria_presentation::side_chats::SideChatCompletionItem> {
+        if self.visible.is_some() {
+            return Vec::new();
+        }
+        let Some((query, _)) = self.workspace.root.side_reference_query() else {
+            return Vec::new();
+        };
+        if self.dismissed_side_query.as_deref() == Some(query) {
+            return Vec::new();
+        }
+        zevria_presentation::side_chats::side_chat_completions_from(
+            self.side_threads.iter().rev().map(|pane| &pane.descriptor),
+            query,
+        )
+    }
+
+    fn open_side(&mut self, id: SideChatId) {
+        let pane = VisiblePane::SideChat(id);
+        self.last_entered = Some(pane);
+        self.workspace.controls.close_side_chats();
+        self.set_visible(Some(pane));
+    }
+
+    fn insert_in_root(&mut self, text: &str) {
+        self.workspace.controls.close_side_chats();
+        self.set_visible(None);
+        self.workspace.root.insert_side_quote(text);
+    }
+
+    fn show_side_chats(&mut self) {
+        let owner = self.surface_snapshot(self.visible_app()).owner;
+        if owner.captures || owner.id.kind == SurfaceKind::PlanReview {
+            return;
+        }
+        self.workspace.root.jobs_inspector_mut().close();
+        self.visible_app_mut().close_composer_edit_group();
+        self.workspace.controls.show_side_chats(self.side_rows());
+    }
+
+    fn side_rows(&self) -> Vec<SideChatDescriptor> {
+        self.side_threads
+            .iter()
+            .rev()
+            .map(|pane| pane.descriptor.clone())
+            .collect()
     }
 
     fn open_child(&mut self, id: &SubtaskId) {
@@ -1548,7 +1956,10 @@ impl SessionViews {
                         Some(if child.0 > agent.0 { child.1 } else { agent.1 })
                     }
                     (Some((_, pane)), None) | (None, Some((_, pane))) => Some(pane),
-                    (None, None) => None,
+                    (None, None) => self
+                        .side_threads
+                        .last()
+                        .map(|pane| VisiblePane::SideChat(pane.descriptor.id)),
                 }
             });
         if let Some(pane) = target {
@@ -1571,7 +1982,7 @@ impl SessionViews {
                 .iter()
                 .find(|pane| pane.app.surface().id.pane == id)
                 .map(|pane| &pane.id),
-            Some(VisiblePane::Agent(_)) | None => None,
+            Some(VisiblePane::Agent(_) | VisiblePane::SideChat(_)) | None => None,
         }
     }
 
@@ -1593,7 +2004,7 @@ impl SessionViews {
                 .iter()
                 .find(|pane| pane.app.surface().id.pane == id)
                 .map(|pane| &pane.id),
-            Some(VisiblePane::Subtask(_)) | None => None,
+            Some(VisiblePane::Subtask(_) | VisiblePane::SideChat(_)) | None => None,
         }
     }
 
@@ -1604,5 +2015,200 @@ impl SessionViews {
             .iter()
             .find(|agent| &agent.id == id)
             .map(|agent| &agent.app)
+    }
+}
+
+#[cfg(test)]
+mod side_chat_tests {
+    use super::*;
+    use ratatui::crossterm::event::KeyEvent;
+    use zevria_foundation::{ModelProfileRef, ReasoningLevel, SessionMode, TurnId};
+
+    fn descriptor(id: SideChatId, mode: SessionMode) -> SideChatDescriptor {
+        SideChatDescriptor {
+            id,
+            short_id: id.short(),
+            title: "fixture".into(),
+            forked_mode: mode,
+            forked_profile: ModelProfileRef::new("fixture", "profile"),
+            forked_reasoning: ReasoningLevel::Medium,
+            inherited_turn_count: 0,
+            turn_count: 0,
+            status: SideChatStatus::Idle,
+        }
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn side_reference_completion_yields_to_plan_review_and_its_escape() {
+        use zevria_session_api::PlanEvent;
+        use zevria_workflow::{PlanArtifact, PlanId, PlanVersion, PlanWorkflowState};
+        let mut views = SessionViews::new(App::new(), PathBuf::from("."));
+        views.add_side(
+            SideChatPane::new(descriptor(SideChatId::random(), SessionMode::Build), None),
+            false,
+        );
+        views.handle_event(key(KeyCode::Char('i')));
+        views.handle_event(Event::Paste("Read @side:".into()));
+        assert_eq!(views.side_completions().len(), 1);
+        views.apply(SessionEvent::Plan(PlanEvent::StateChanged {
+            state: Box::new(PlanWorkflowState::Ready {
+                artifact: PlanArtifact {
+                    version: PlanVersion {
+                        id: PlanId::new(),
+                        revision: 1,
+                    },
+                    title: "Plan review".into(),
+                    markdown: "Check the parser".into(),
+                    source_turn_id: TurnId::new(1),
+                },
+            }),
+        }));
+        assert_eq!(views.root().surface().id.kind, SurfaceKind::PlanReview);
+        assert!(views.side_completions().is_empty());
+        views.handle_event(key(KeyCode::Esc));
+        assert_ne!(views.root().surface().id.kind, SurfaceKind::PlanReview);
+        assert_eq!(views.root().input(), "Read @side:");
+    }
+
+    #[test]
+    fn plan_side_selection_quotes_and_a_long_excerpt_cannot_hide_an_error() {
+        use ratatui::{Terminal, backend::TestBackend};
+        use rig_core::message::Message;
+        let mut views = SessionViews::new(App::new(), PathBuf::from("."));
+        let id = SideChatId::random();
+        views.restore_side_chat(
+            descriptor(id, SessionMode::Plan),
+            Some("A selected line from the main conversation. ".repeat(20)),
+            vec![
+                TranscriptItem::Message(Message::user("Question")),
+                TranscriptItem::Message(Message::assistant("Side reply")),
+            ],
+        );
+        views.open_side(id);
+        assert_eq!(
+            views.visible_app().side_model().next_mode(),
+            SessionMode::Plan
+        );
+        views.apply(SessionEvent::SideChat(SideChatEvent::Failed {
+            id,
+            error: "Side reply failed".into(),
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(44, 24)).unwrap();
+        terminal.draw(|frame| views.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(
+            (0..buffer.area.height).any(|y| {
+                let row: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                row.contains("Side reply failed")
+            }),
+            "the side error must be rendered before the excerpt"
+        );
+        views.handle_event(key(KeyCode::Char('v')));
+        assert_eq!(
+            views.visible_app().surface().id.kind,
+            SurfaceKind::Selection
+        );
+        let mut wide = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        wide.draw(|frame| views.render(frame)).unwrap();
+        let wide_buf = wide.backend().buffer();
+        assert!(
+            (0..wide_buf.area.height - 1).any(|y| {
+                let row: String = (0..wide_buf.area.width)
+                    .map(|x| wide_buf[(x, y)].symbol())
+                    .collect();
+                row.contains("m quote in main")
+            }),
+            "Side Chat Selection hints row should expose SideBlockNav bindings"
+        );
+        views.handle_event(key(KeyCode::Char('m')));
+        assert!(views.visible.is_none());
+        assert!(views.root().input().contains("Side reply"));
+    }
+
+    #[test]
+    fn side_chat_list_uses_capturing_surface_and_normalized_keys() {
+        use ratatui::crossterm::event::KeyEventKind;
+        let mut views = SessionViews::new(App::new(), PathBuf::from("."));
+        views.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::ALT,
+        )));
+        let owner = views.surface_snapshot(views.visible_app()).owner;
+        assert_eq!(owner.id.kind, SurfaceKind::SideChats);
+        assert!(owner.captures);
+        assert_eq!(views.handle_event(Event::Resize(50, 20)), None);
+        assert_eq!(
+            views.handle_event(Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('n'),
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat
+            ))),
+            None
+        );
+        assert!(views.overlay_owns(SurfaceKind::SideChats));
+        assert!(matches!(
+            views.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('n'),
+                KeyModifiers::NONE
+            ))),
+            Some(UiAction::Session(SessionCommand::Control(
+                ControlCommand::SideChat(SideChatCommand::Create {
+                    initial_prompt: None,
+                    ..
+                })
+            )))
+        ));
+        assert!(!views.overlay_owns(SurfaceKind::SideChats));
+    }
+
+    #[test]
+    fn side_chat_slash_routes_to_control_and_cancel_is_pane_local() {
+        let mut views = SessionViews::new(App::new(), PathBuf::from("."));
+        let key = |code, modifiers| Event::Key(KeyEvent::new(code, modifiers));
+        views.apply(SessionEvent::Turn(TurnEvent::Started {
+            turn_id: zevria_foundation::TurnId::new(8),
+            mode: zevria_foundation::SessionMode::Build,
+            message: rig_core::message::Message::user("Main turn stays active"),
+            references: Vec::new(),
+        }));
+        views.handle_event(key(KeyCode::Char('i'), KeyModifiers::NONE));
+        views.handle_event(Event::Paste("/btw why is this isolated?".into()));
+        let Some(UiAction::Session(SessionCommand::Control(ControlCommand::SideChat(
+            SideChatCommand::Create {
+                request_id,
+                initial_prompt,
+                ..
+            },
+        )))) = views.handle_event(key(KeyCode::Enter, KeyModifiers::CONTROL))
+        else {
+            panic!("expected a non-turn Side Chat control")
+        };
+        assert_eq!(
+            initial_prompt.unwrap().text_projection(),
+            "why is this isolated?"
+        );
+        let id = SideChatId::random();
+        views.apply(SessionEvent::SideChat(SideChatEvent::Created {
+            request_id,
+            descriptor: Box::new(descriptor(id, SessionMode::Build)),
+            quoted_excerpt: None,
+            awaiting_initial_turn: true,
+        }));
+        assert!(views.visible == Some(VisiblePane::SideChat(id)));
+        assert_eq!(
+            views.handle_event(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(UiAction::Session(SessionCommand::Control(
+                ControlCommand::SideChat(SideChatCommand::Cancel { id })
+            )))
+        );
+        assert!(views.workspace.root.is_busy());
+        views.handle_event(key(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert!(views.visible.is_none());
     }
 }

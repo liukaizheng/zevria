@@ -108,6 +108,7 @@ pub(in crate::session) enum PromptTurnInput {
     Message {
         text: UserPrompt,
         behavior: zevria_foundation::RequestBehavior,
+        references: Vec<zevria_foundation::SideChatReferenceAttachment>,
     },
     Skill {
         name: SkillName,
@@ -136,6 +137,7 @@ pub(in crate::session) struct PreparedPrompt {
     pub(in crate::session) anchor: TurnAnchor,
     pub(in crate::session) records: Vec<TranscriptItem>,
     pub(in crate::session) display: Message,
+    pub(in crate::session) references: Vec<zevria_foundation::SideChatReferenceAttachment>,
     pub(in crate::session) kind: PromptTurnKind,
     pub(in crate::session) request: Option<zevria_foundation::RequestMetadata>,
     pub(in crate::session) plan_transition: Option<PlanRecord>,
@@ -250,6 +252,21 @@ impl<P: ModelProvider> SessionEngine<P> {
         mode: SessionMode,
     ) -> Result<PromptPreflight, Rejection> {
         self.ensure_replay_valid()?;
+        if let PromptTurnInput::Message {
+            behavior,
+            references,
+            ..
+        } = &input
+        {
+            zevria_foundation::SideChatReferenceAttachment::validate_all(references)?;
+            if (*behavior == zevria_foundation::RequestBehavior::SideChat)
+                != self.side_chat.is_some()
+            {
+                return Err("Side Chat requests require an isolated fork"
+                    .to_string()
+                    .into());
+            }
+        }
         let policy = self.policies.policy(mode).clone();
         if matches!(
             &input,
@@ -312,6 +329,8 @@ impl<P: ModelProvider> SessionEngine<P> {
                 }
             };
             Some(PlanRecord::RevisionRequested { artifact })
+        } else if self.side_chat.is_some() {
+            None
         } else {
             self.prepare_prompt_plan_workflow(&captured.plan, mode)?
         };
@@ -324,6 +343,10 @@ impl<P: ModelProvider> SessionEngine<P> {
             PromptTurnInput::Message { behavior, .. } => *behavior,
             _ => zevria_foundation::RequestBehavior::Standard,
         };
+        let references = match &input {
+            PromptTurnInput::Message { references, .. } => references.clone(),
+            _ => Vec::new(),
+        };
         let (display, kind, request) = match input {
             PromptTurnInput::Message { text, .. }
             | PromptTurnInput::RevisionMessage { text, .. } => {
@@ -335,8 +358,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 }
                 let prompt = text.trimmed();
                 let message = prompt.to_message();
-                let request = context
-                    .request_boundaries
+                let request = (context.request_boundaries || !references.is_empty())
                     .then(|| zevria_foundation::RequestMetadata::new(behavior));
                 let display = if behavior == zevria_foundation::RequestBehavior::Orchestrate {
                     prompt.with_prefix("/orchestrate ").to_message()
@@ -348,14 +370,29 @@ impl<P: ModelProvider> SessionEngine<P> {
                     message.clone()
                 };
                 if let Some(request) = &request {
+                    let excerpt = self
+                        .side_chat
+                        .as_ref()
+                        .filter(|_| captured.instructions.side_prompt_count() == 0)
+                        .and_then(|side| side.quoted_excerpt.clone());
+                    let references = zevria_transcript::ReferencedPrompt::with_excerpt(
+                        &message,
+                        references.clone(),
+                        excerpt,
+                    )?;
                     records.push(TranscriptItem::RequestPrompt {
                         message,
                         request: request.clone(),
+                        references,
                     });
                     records.push(TranscriptItem::RequestDirective(Box::new(
                         RequestDirective::boundary_with_file_mutation_scope(
                             request.clone(),
-                            context.policy.file_mutation_scope,
+                            if self.side_chat.is_some() {
+                                zevria_foundation::FileMutationScope::WorkspaceOnly
+                            } else {
+                                context.policy.file_mutation_scope
+                            },
                         ),
                     )));
                 } else {
@@ -435,6 +472,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 anchor,
                 records,
                 display,
+                references,
                 kind,
                 request,
                 plan_transition,
@@ -507,7 +545,15 @@ impl<P: ModelProvider> SessionEngine<P> {
                 text,
                 mode,
                 behavior,
-            } => (PromptTurnInput::Message { text, behavior }, mode),
+                references,
+            } => (
+                PromptTurnInput::Message {
+                    text,
+                    behavior,
+                    references,
+                },
+                mode,
+            ),
             TranscriptEditReplacement::Skill { name, args, mode } => {
                 (PromptTurnInput::Skill { name, args }, mode)
             }
@@ -736,13 +782,19 @@ impl<P: ModelProvider> SessionEngine<P> {
                 .iter()
                 .any(zevria_transcript::transcript::is_compaction_prompt_item),
         };
-        let state = match checkpoint {
-            Some(CheckpointPlacement::FoldedIntoCommit(_)) => {
-                CapacityCompactionState::PreparedForEdit
+        let state = if self.side_chat.is_some() {
+            CapacityCompactionState::DisabledForSideChat
+        } else {
+            match checkpoint {
+                Some(CheckpointPlacement::FoldedIntoCommit(_)) => {
+                    CapacityCompactionState::PreparedForEdit
+                }
+                Some(CheckpointPlacement::InstalledBeforeCommit) => {
+                    CapacityCompactionState::Completed
+                }
+                None if available => CapacityCompactionState::NotAttempted,
+                None => CapacityCompactionState::Unavailable,
             }
-            Some(CheckpointPlacement::InstalledBeforeCommit) => CapacityCompactionState::Completed,
-            None if available => CapacityCompactionState::NotAttempted,
-            None => CapacityCompactionState::Unavailable,
         };
         Err(Rejection::Rejected(format!(
             "{}; the prompt was not committed",
@@ -790,7 +842,9 @@ impl<P: ModelProvider> SessionEngine<P> {
             self.measure_prompt(&context, &prepared, None, false, progress.turn())
                 .await?
         };
-        let due = self.context.is_armed(role) && initial.assessment.band != CapacityBand::Fits;
+        let due = self.side_chat.is_none()
+            && self.context.is_armed(role)
+            && initial.assessment.band != CapacityBand::Fits;
         // At most one checkpoint attempt. An unavailable checkpoint does not
         // change the request and must not repeat an Unsupported exact count.
         let checkpoint = {
@@ -893,6 +947,7 @@ impl<P: ModelProvider> SessionEngine<P> {
                 turn_id: turn.id,
                 message: prepared.display,
                 mode: context.mode,
+                references: prepared.references,
             }))
             .await;
         self.emit_plan_state_if_changed(previous, events).await?;

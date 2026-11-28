@@ -120,6 +120,7 @@ fn metadata_cannot_split_a_typed_prompt_and_its_boundary() {
     let prompt = TranscriptItem::RequestPrompt {
         message: Message::user("typed prompt"),
         request: request.clone(),
+        references: None,
     };
     let boundary = TranscriptItem::RequestDirective(Box::new(RequestDirective::boundary(request)));
     let initial = TranscriptItem::SessionModels(Box::new(models("initial")));

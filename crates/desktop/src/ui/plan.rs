@@ -27,6 +27,9 @@ impl DesktopWindow {
         let dialog = model.workflow.dialog()?;
         let artifact = model.workflow.dialog_artifact()?;
         let title = artifact.title.clone();
+        let plan_text = artifact.markdown.clone();
+        let ask_controller = self.controller.downgrade();
+        use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
         let revision = artifact.version.revision;
         let busy = model.is_busy();
         let recovering = dialog.recovering();
@@ -125,7 +128,34 @@ impl DesktopWindow {
                             .style(style::markdown(cx, true))
                             .font_family(style::DOCUMENT_FONT)
                             .map(|view| style::DOCUMENT.apply(view)),
-                    ),
+                    )
+                    .context_menu(move |menu, window, cx| {
+                        let selected = gpui_kit::base::TextSelection::selected_text(window, cx);
+                        let exact = !selected.trim().is_empty();
+                        let text = if exact { selected } else { plan_text.clone() };
+                        let excerpt = zevria_foundation::bound_side_chat_text(
+                            &text,
+                            zevria_foundation::SIDE_CHAT_EXCERPT_BYTES,
+                        )
+                        .to_owned();
+                        let controller = ask_controller.clone();
+                        menu.item(PopupMenuItem::new("Copy").on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
+                        }))
+                        .item(
+                            PopupMenuItem::new(if exact {
+                                "Ask in Side Chat"
+                            } else {
+                                "Ask about this Plan in Side Chat"
+                            })
+                            .on_click(move |_, _, cx| {
+                                let excerpt = excerpt.clone();
+                                let _ = controller.update(cx, |this, cx| {
+                                    this.create_side_chat(None, Some(excerpt), cx)
+                                });
+                            }),
+                        )
+                    }),
             )
             .child(
                 div()

@@ -86,7 +86,7 @@ log directories, and provider addresses must be usable from Windows.
 | Project guidance | `<workspace>/AGENTS.md` |
 | Project skills | `<workspace>/.zevria/skills/` |
 | State root | `<workspace>/.zevria/` |
-| State directories | `sessions/`, `subsessions/`, `plans/`, `agent-runs/`, `ensemble-sessions/` directly under the state root |
+| State directories | `sessions/`, `subsessions/`, `plans/`, `agent-runs/`, `ensemble-sessions/`, `side-chats/` directly under the state root |
 
 Continue, resume, ACP listing, leases, and crash recovery use the unified paths,
 including history already present there. Sharing a directory layout does not
@@ -95,7 +95,7 @@ compatible filesystem locking. Startup reports the platform and effective
 configuration and state paths on stderr, not in ACP stdout or the provider's
 stable application prefix.
 
-`zevria clean` deletes the five directories above without confirmation, regardless
+`zevria clean` deletes the six directories above without confirmation, regardless
 of which operating system wrote the data. It leaves `.zevria/windows/`, project
 skills and guidance, and other unlisted files alone. Stop all sessions and
 workers using the workspace and back up any state you want to keep before

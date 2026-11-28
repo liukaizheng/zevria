@@ -388,6 +388,7 @@ async fn non_success_terminal_size_body_does_not_start_core_compaction_or_replay
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "ordinary pending round".into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             ),

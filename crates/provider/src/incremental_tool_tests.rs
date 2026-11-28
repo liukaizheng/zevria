@@ -237,6 +237,7 @@ async fn full_history_engine_summary_continues_websocket_with_only_trigger_then_
             text: "task".into(),
             behavior: zevria_foundation::RequestBehavior::Standard,
             mode: SessionMode::Build,
+            references: Vec::new(),
         },
         zevria_session_api::TurnCommand::Compact {
             mode: SessionMode::Build,

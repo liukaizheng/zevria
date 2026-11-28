@@ -115,7 +115,9 @@ impl LiveSession {
             return Ok(());
         }
         match event {
-            SessionEvent::EngineIdle | SessionEvent::Job(JobEvent::ContinuationChanged { .. }) => {}
+            SessionEvent::SideChat(_)
+            | SessionEvent::EngineIdle
+            | SessionEvent::Job(JobEvent::ContinuationChanged { .. }) => {}
             SessionEvent::Job(JobEvent::Reported { turn_id, notice })
             | SessionEvent::Job(JobEvent::ContinuationStarted {
                 turn_id, notice, ..

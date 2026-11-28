@@ -616,6 +616,25 @@ impl ComposerState {
         self.images.sort_by_key(|image| image.range.start);
         Ok(())
     }
+    /// Replace a token selected by an external completion provider, preserving
+    /// image tokens and the editor's normal undo transaction semantics.
+    pub fn accept_external_completion(&mut self, range: Range<usize>, text: &str) {
+        if self.text.get(range.clone()).is_none()
+            || self
+                .images
+                .iter()
+                .any(|image| range.start < image.range.end && range.end > image.range.start)
+        {
+            return;
+        }
+        self.transact(EditKind::Atomic, |this| {
+            let end = range.start + text.len();
+            this.edit_range(range, text);
+            this.cursor = end;
+        });
+        self.suspend_file_completion();
+    }
+
     fn edit_range(&mut self, range: Range<usize>, replacement: &str) {
         let removed = range.end - range.start;
         self.images.retain_mut(|image| {
@@ -644,6 +663,10 @@ impl ComposerState {
         )],
     ) {
         self.commands.set_mcp_prompts(prompts);
+    }
+
+    pub fn disable_commands(&mut self) {
+        self.commands = CommandRegistry::disabled();
     }
 
     pub fn worker_commands(&mut self) {
@@ -697,6 +720,9 @@ impl ComposerState {
     }
 
     fn file_identity(&self) -> Option<FileQueryIdentity> {
+        if zevria_presentation::side_chats::side_chat_query(&self.text, self.cursor).is_some() {
+            return None;
+        }
         Some(FileQueryIdentity {
             generation: self.generation,
             cursor: clamp_cursor(&self.text, self.cursor),
@@ -711,6 +737,9 @@ impl ComposerState {
     pub fn completion_query(&self) -> Option<CompletionQuery> {
         if let Some(identity) = self.file_identity() {
             return (self.files.dismissed.as_ref() != Some(&identity)).then_some(identity.query);
+        }
+        if self.commands.is_disabled() {
+            return None;
         }
         command_query(&self.text, self.cursor).filter(|query| {
             !query.prefix.starts_with("prompt ")
@@ -1354,6 +1383,19 @@ mod tests {
             display_ranges(&layout),
             vec![0..2, 2..4, 4..6, 7..9, 9..10, 11..11]
         );
+    }
+
+    #[test]
+    fn external_completion_advances_the_caret_without_starting_a_file_search() {
+        let mut composer = ComposerState::default();
+        composer.insert_text("See @side:缓存_#1");
+        assert!(composer.completion_query().is_none());
+        assert!(composer.file_identity().is_none());
+        let insertion = "@side:sc-a1b2c3#1 ";
+        composer.accept_external_completion(4..composer.text().len(), insertion);
+        assert_eq!(composer.cursor(), 4 + insertion.len());
+        composer.insert_text("now");
+        assert_eq!(composer.text(), "See @side:sc-a1b2c3#1 now");
     }
 
     #[test]

@@ -299,6 +299,7 @@ fn jobs_shortcut_keeps_draft_and_slash_opens_during_a_turn(cx: &mut TestAppConte
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("Run checks"),
+            references: Vec::new(),
         }),
         cx,
     );
@@ -354,6 +355,7 @@ fn command_row_controls_background_then_stop_without_cancelling_the_turn(cx: &mu
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("Start a command"),
+            references: Vec::new(),
         }),
         cx,
     );
@@ -506,6 +508,7 @@ fn job_notice_copies_original_model_visible_text(cx: &mut TestAppContext) {
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("Read jobs notice"),
+            references: Vec::new(),
         }),
         cx,
     );
@@ -632,6 +635,7 @@ fn live_notice_settles_without_history_changes_or_collapsing(cx: &mut TestAppCon
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("Run both checks"),
+            references: Vec::new(),
         }),
         cx,
     );
@@ -797,6 +801,7 @@ fn plan_review_hides_notice_inspection_without_hiding_stop(cx: &mut TestAppConte
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("Run checks"),
+            references: Vec::new(),
         }),
         cx,
     );
@@ -1002,6 +1007,7 @@ fn resumed_session_keeps_old_notice_folded_when_new_notice_arrives(cx: &mut Test
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("New work after resuming"),
+            references: Vec::new(),
         }),
         cx,
     );
@@ -1125,6 +1131,7 @@ fn returned_background_command_ticks_settles_and_restores_static(cx: &mut TestAp
             turn_id: TURN,
             mode: SessionMode::Build,
             message: prompt.clone(),
+            references: Vec::new(),
         }),
         E::Turn(TurnEvent::ModelCallStarted {
             turn_id: TURN,

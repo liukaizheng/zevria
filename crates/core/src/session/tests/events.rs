@@ -23,6 +23,7 @@ async fn simple_turn_has_authoritative_event_order() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "hi".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -104,6 +105,7 @@ async fn loop_calls_count_dispatches_not_tools_and_restart_for_each_turn() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: text.into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &sender,
             )
@@ -212,6 +214,7 @@ async fn replay_message_drives_tools_events_history_and_persistence() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "use the replay".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -346,6 +349,7 @@ async fn provider_failures_are_recorded_and_emit_an_authoritative_terminal_event
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "will fail".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -423,6 +427,7 @@ async fn usage_events_report_the_active_profile_role_and_window() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "report usage".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )

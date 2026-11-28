@@ -1716,7 +1716,7 @@ remains a legitimate interruption rather than an unsupported format.
 
 ## Offline workspace cleanup
 
-Run `zevria clean` from the workspace to irreversibly remove these five directories
+Run `zevria clean` from the workspace to irreversibly remove these six directories
 and everything inside them, in this order, on Windows, Linux, and macOS:
 
 - `.zevria/agent-runs`
@@ -1724,6 +1724,7 @@ and everything inside them, in this order, on Windows, Linux, and macOS:
 - `.zevria/sessions`
 - `.zevria/subsessions`
 - `.zevria/ensemble-sessions`
+- `.zevria/side-chats`
 
 **Stop every session and agent worker using the workspace and back up any state
 you want to keep before invoking this command.** Deletion starts immediately
@@ -1752,14 +1753,14 @@ Missing directories are successful no-ops; repeated invocations succeed without
 creating configuration, logs, storage directories, or replacement ignore guards.
 Normal session startup can recreate the storage it needs later. Before deleting
 anything, cleanup uses `symlink_metadata` to validate the resolved `.zevria` root
-and all five targets. Symlinks (including dangling links), Windows reparse points,
+and all six targets. Symlinks (including dangling links), Windows reparse points,
 non-directory roots, and inspection failures other than `NotFound` reject the
 operation without deleting any target. Recursive removal of valid directories
 removes nested symlinks without following them or modifying their referents. These static checks do not claim protection against
 hostile concurrent filesystem replacement or arbitrary external writers.
 
 Output identifies the canonical workspace and each removed or already-absent
-directory. The five removals are not atomic: on the first genuine removal error,
+directory. The six removals are not atomic: on the first genuine removal error,
 the command stops with a nonzero exit, the failing path, and progress counts.
 Earlier removals are not rolled back, the failing directory may be partly removed,
 and later targets are not attempted. Interruption can likewise leave partial

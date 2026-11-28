@@ -323,6 +323,7 @@ async fn production_mode_selection_does_not_allocate_turns_or_call_the_provider(
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "first real prompt after mode management".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             },
         ))
         .unwrap();

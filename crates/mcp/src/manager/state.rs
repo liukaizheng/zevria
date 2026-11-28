@@ -48,9 +48,10 @@ impl Connection {
         connection_live(&self.stop, &self.closed, &self.peer)
     }
 
-    fn policy_flags(&self, plan_allowed: bool) -> ToolPolicyFlags {
+    fn policy_flags(&self, plan_allowed: bool, read_only: bool) -> ToolPolicyFlags {
         ToolPolicyFlags {
             plan_allowed,
+            read_only,
             peer: self.peer.clone(),
             stop: self.stop.clone(),
             closed: self.closed.clone(),
@@ -60,6 +61,7 @@ impl Connection {
 
 pub(super) struct ToolPolicyFlags {
     plan_allowed: bool,
+    read_only: bool,
     peer: Peer<RoleClient>,
     stop: CancellationToken,
     closed: CancellationToken,
@@ -68,7 +70,8 @@ pub(super) struct ToolPolicyFlags {
 impl ToolPolicyFlags {
     pub(super) fn allows(&self, access: McpToolAccess) -> bool {
         (access == McpToolAccess::AllEnabled
-            || (access == McpToolAccess::PlanScoped && self.plan_allowed))
+            || (access == McpToolAccess::PlanScoped && self.plan_allowed)
+            || (access == McpToolAccess::ReadOnlyPlanScoped && self.plan_allowed && self.read_only))
             && connection_live(&self.stop, &self.closed, &self.peer)
     }
 }
@@ -166,7 +169,9 @@ impl Entry {
     pub(super) fn allows_read(&self, access: McpToolAccess) -> bool {
         match access {
             McpToolAccess::None => false,
-            McpToolAccess::PlanScoped => self.config.plan_mode != PlanMcpPolicy::None,
+            McpToolAccess::PlanScoped | McpToolAccess::ReadOnlyPlanScoped => {
+                self.config.plan_mode != PlanMcpPolicy::None
+            }
             McpToolAccess::AllEnabled => true,
         }
     }
@@ -192,15 +197,17 @@ impl State {
             };
             if entry.catalog.resource_capability {
                 self.resource_access
-                    .push(conn.policy_flags(entry.allows_read(McpToolAccess::PlanScoped)));
+                    .push(conn.policy_flags(entry.allows_read(McpToolAccess::PlanScoped), true));
             }
             for (name, wire) in &entry.wire_names {
                 if entry.config.tool_enabled(name) {
                     let plan_allowed = entry
                         .config
                         .plan_tool_allowed(name, read_only(&entry.catalog.tools[name]));
-                    self.wire_index
-                        .insert(wire.clone(), conn.policy_flags(plan_allowed));
+                    self.wire_index.insert(
+                        wire.clone(),
+                        conn.policy_flags(plan_allowed, read_only(&entry.catalog.tools[name])),
+                    );
                 }
             }
         }

@@ -283,6 +283,7 @@ pub(super) async fn run_child_session(
                 text: zevria_content::UserPrompt::from_text(request.prompt),
                 mode: SessionMode::Build,
                 behavior: zevria_foundation::RequestBehavior::Standard,
+                references: Vec::new(),
             },
             &child_turn,
             &child_events,

@@ -62,4 +62,5 @@ mod notice_tests {
 }
 
 pub mod question;
+pub mod side_chats;
 pub mod workspace;

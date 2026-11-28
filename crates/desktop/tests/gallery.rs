@@ -39,8 +39,9 @@ mod native {
     };
     use zevria_model::{ContextTokenSnapshot, ContextTokenSource, TokenUsage};
     use zevria_session_api::{
-        CommandControlAction, CommandControlResult, ControlCommand, JobEvent, SessionCommand,
-        SessionEvent as E, TurnEvent,
+        CommandControlAction, CommandControlResult, ControlCommand, JobEvent, ManagementEvent,
+        PlanEvent, QuestionEvent, SessionCommand, SessionEvent as E, SessionStreamState,
+        SubtaskEvent, TurnEvent,
     };
     use zevria_workflow::{PlanArtifact, PlanId, PlanVersion, PlanWorkflowState};
 
@@ -57,6 +58,7 @@ mod native {
         Working,
         Jobs,
         Subtasks,
+        SideChat,
         ThinkingLive,
         ThinkingRestored,
         ThinkingInterrupted,
@@ -92,6 +94,7 @@ mod native {
                 Self::Working => "working",
                 Self::Jobs => "jobs",
                 Self::Subtasks => "subtasks",
+                Self::SideChat => "side-chat",
                 Self::ThinkingLive => "thinking-live",
                 Self::ThinkingRestored => "thinking-restored",
                 Self::ThinkingInterrupted => "thinking-interrupted",
@@ -124,6 +127,20 @@ mod native {
             });
         std::fs::create_dir_all(&directory)?;
         let light = zevria_theme::ZEVRIA_GRAPHITE_LIGHT;
+        if std::env::var_os("ZEVRIA_DESKTOP_GALLERY_SIDE_CHAT_ONLY").is_some() {
+            for width in [1240., 720.] {
+                for (suffix, tokens) in [("", zevria_theme::ZEVRIA_GRAPHITE), ("-light", light)] {
+                    capture(
+                        Scene::SideChat,
+                        width,
+                        840.,
+                        tokens,
+                        &directory.join(format!("side-chat{suffix}-{}.png", width as u32)),
+                    )?;
+                }
+            }
+            return Ok(());
+        }
         if std::env::var_os("ZEVRIA_DESKTOP_GALLERY_MODELS_ONLY").is_some() {
             let configured = zevria_theme::generate_theme("#1E1E2E".parse()?)?
                 .palette
@@ -177,6 +194,7 @@ mod native {
                 Scene::Working,
                 Scene::Jobs,
                 Scene::Subtasks,
+                Scene::SideChat,
                 Scene::WebSearch,
                 Scene::WebSearchLive,
                 Scene::ImageRead,
@@ -211,6 +229,7 @@ mod native {
                 Scene::Working,
                 Scene::Jobs,
                 Scene::Subtasks,
+                Scene::SideChat,
                 Scene::ImageRead,
                 Scene::ThinkingLive,
                 Scene::ThinkingRestored,
@@ -377,7 +396,7 @@ mod native {
             if let Some((items, replay)) = restored {
                 controller.update(cx, |c, cx| {
                     c.model.root.restore_transcript(items);
-                    c.model.root.apply_plan_snapshot(replay.plan);
+                    c.model.root.apply_plan_snapshot((*replay.plan).clone());
                     c.model.root.apply_selected_mode(replay.instructions.persisted_mode().unwrap_or_default());
                     cx.notify();
                 });
@@ -434,6 +453,46 @@ mod native {
             if matches!(scene,Scene::Working | Scene::Question | Scene::Confirm) { working(&controller,cx); }
             if scene == Scene::Jobs { jobs_scene(&controller, &mut receiver, cx)?; }
             if scene == Scene::Subtasks { subtasks_scene(&controller, cx); }
+            if scene == Scene::SideChat {
+                use zevria_foundation::{SideChatDescriptor, SideChatId, SideChatStatus};
+                use zevria_session_api::SideChatEvent;
+                controller.update(cx, |c, cx| {
+                    let id: SideChatId = serde_json::from_str("\"52b8a180-5696-43cb-9db0-e3e2c401f4b7\"").unwrap();
+                    let profile = zevria_foundation::ModelProfileRef::new("openai", "responses");
+                    c.model.root.conversation.restore(vec![
+                        zevria_transcript::TranscriptItem::Message(Message::user("Document how an edited conversation is replayed.")),
+                        zevria_transcript::TranscriptItem::Message(Message::assistant("The transcript is the source of truth. An edit replaces the selected tail before any new work starts.")),
+                    ]);
+                    c.fixture_event(E::SideChat(SideChatEvent::Created { request_id: "gallery-side".into(),
+                        descriptor: Box::new(SideChatDescriptor { id, short_id: id.short(), title: "Native replay at the fork".into(),
+                            forked_mode: SessionMode::Build, forked_profile: profile, forked_reasoning: zevria_foundation::ReasoningLevel::Medium, inherited_turn_count: 8,
+                            turn_count: 0, status: SideChatStatus::Idle }), quoted_excerpt: Some("An edit replaces the selected tail before any new work starts.".into()), awaiting_initial_turn: false }), cx);
+                    let turn_id = TurnId::new(1);
+                    for event in [
+                        TurnEvent::Started { turn_id, mode: SessionMode::Build, message: Message::user("Does this branch keep the old conversation?"), references: Vec::new(), },
+                        TurnEvent::ModelCallStarted { turn_id, call: 1 },
+                        TurnEvent::Completed { turn_id, attempt_id: None, message: Message::assistant(
+                            "Yes. The side thread saves a **self-contained prefix**. Editing or compacting the main conversation later doesn't change what this thread inherited.") },
+                    ] {
+                        c.fixture_event(E::SideChat(SideChatEvent::Session { id, event: Box::new(E::Turn(event)) }), cx);
+                    }
+                    c.fixture_event(E::SideChat(SideChatEvent::Status { id, status: SideChatStatus::Idle }), cx);
+                    let message = Message::user(format!("Fold this finding into the replay notes: @side:{}#1", id.short()));
+                    c.fixture_event(E::Turn(TurnEvent::Started {
+                        turn_id: TurnId::new(2), mode: SessionMode::Build, message,
+                        references: vec![zevria_foundation::SideChatReferenceAttachment {
+                            id, short_id: id.short(), title: "Native replay at the fork".into(), turn_ordinal: Some(1),
+                            question_preview: "Does this branch keep the old conversation?".into(),
+                            excerpt: "The side thread saves an independent copy of the inherited prefix. Editing the main history does not change it.".into(),
+                        }],
+                    }), cx);
+                    c.fixture_event(E::Turn(TurnEvent::Completed { turn_id: TurnId::new(2), attempt_id: None,
+                        message: Message::assistant("I’ll document when the inherited prefix is fixed.") }), cx);
+                    let pane = c.model.side_chats.last_mut().expect("Side Chat gallery fixture");
+                    pane.draft_images.push(image_read_raster(480, 320, zevria_theme::ZEVRIA_GRAPHITE));
+                    cx.notify();
+                });
+            }
             if matches!(scene, Scene::WebSearch | Scene::WebSearchLive) {
                 web_scene(&controller, scene == Scene::WebSearchLive, cx)?;
             }
@@ -443,10 +502,10 @@ mod native {
                         zevria_transcript::transcript::TranscriptItem::Message(Message::user("Plan the desktop redesign before changing files.")),
                         zevria_transcript::transcript::TranscriptItem::Message(Message::assistant("The plan is ready. Review the document before implementation.")),
                     ]);
-                    c.fixture_event(E::Plan(PlanEvent::StateChanged { state: PlanWorkflowState::Ready { artifact: PlanArtifact {
+                    c.fixture_event(E::Plan(PlanEvent::StateChanged { state: Box::new(PlanWorkflowState::Ready { artifact: PlanArtifact {
                         version: PlanVersion { id: PlanId::new(), revision: 4 }, title: "A single-column session timeline of Zevria Desktop".into(),
                         markdown: PLAN.into(),source_turn_id: TurnId::new(1),
-                    }}}),cx);
+                    }})}),cx);
                 });
             }
             if scene == Scene::Question {
@@ -465,7 +524,7 @@ mod native {
                 controller.update(cx, |c, cx| {
                     let turn_id = TurnId::new(8);
                     c.fixture_event(E::Turn(TurnEvent::Started { turn_id, mode: SessionMode::Plan,
-                        message: Message::user("Plan validation for the new question preview.") }), cx);
+                        message: Message::user("Plan validation for the new question preview."), references: Vec::new(), }), cx);
                     c.fixture_event(E::Question(QuestionEvent::Asked { turn_id, request: QuestionRequest {
                         id: QuestionRequestId::new("gallery-question-detail"), source_label: None,
                         dismissible: true, allow_choice_notes: true,
@@ -488,7 +547,7 @@ mod native {
             if scene == Scene::QuestionNote {
                 controller.update(cx, |c, cx| {
                     let turn_id = TurnId::new(8);
-                    c.fixture_event(E::Turn(TurnEvent::Started { turn_id, mode: SessionMode::Plan, message: Message::user("Plan the transcript redesign.") }), cx);
+                    c.fixture_event(E::Turn(TurnEvent::Started { turn_id, mode: SessionMode::Plan, message: Message::user("Plan the transcript redesign."), references: Vec::new(), }), cx);
                     c.fixture_event(E::Question(QuestionEvent::Asked { turn_id, request: QuestionRequest {
                         id: QuestionRequestId::new("gallery-question-note"), source_label: None,
                         dismissible: true, allow_choice_notes: true,
@@ -568,6 +627,12 @@ mod native {
             Scene::ThinkingLive | Scene::ThinkingInterrupted | Scene::ThinkingUnsaved
         ) {
             cx.update(|cx| thinking_scene(scene, &controller, cx));
+            settle(&mut cx, window)?;
+        }
+        if scene == Scene::SideChat && width == 1240. {
+            cx.update_window(window, |_, window, cx| {
+                window.click(("side-reference-chip", 0usize), cx)
+            })?;
             settle(&mut cx, window)?;
         }
         if scene == Scene::QuestionNote {
@@ -725,9 +790,9 @@ mod native {
             T::Message(Message::user("Plan the regression coverage before adding it.")),
             T::Message(Message::assistant("I'll cover the restore boundary without changing the transcript format.")),
             thought("Include metadata, Unicode and an empty conversation."),
-            T::Plan(zevria_workflow::PlanRecord::Ready { artifact: PlanArtifact {
+            T::Plan(Box::new(zevria_workflow::PlanRecord::Ready { artifact: PlanArtifact {
                 version: PlanVersion { id: PlanId::new(), revision: 1 }, title: "Cover restored prompt previews".into(), markdown: "## Regression coverage\n\nTest a long metadata prefix, a Unicode prompt and an empty conversation. Keep the persisted format unchanged.".into(), source_turn_id: TurnId::new(2),
-            }}),
+            }})),
             tool("coverage-read", "command", serde_json::json!({"command":"rtk rg -n restore_roundtrip crates/transcript"})),
             T::Message(Message::assistant("The plan keeps the tests at the restore boundary. No persisted format change is needed.")),
             T::Message(Message::user("Run the workspace checks.")),
@@ -829,11 +894,11 @@ mod native {
             c.draft = "Keep this draft while choosing a model.".into();
             c.open_model_picker(ModelSelectionScope::SessionOnly, cx);
             let request_id = c.model.controls.models.request_id.clone();
-            c.fixture_event(E::Manage(ManagementEvent::ModelsResult { request_id: request_id.clone(), result: ModelManagementResult::Catalog { mode: SessionMode::Build, scope: ModelSelectionScope::SessionOnly, current: ModelSelection::new(context.profile.clone(), Level::Medium), profiles: vec![ModelCandidate { context: context.clone(), reasoning_levels: vec![Level::Low, Level::Medium, Level::High] }, ModelCandidate { context: other.clone(), reasoning_levels: vec![Level::Medium, Level::High] }], revision: "gallery-revision".into() } }), cx);
+            c.fixture_event(E::Manage(ManagementEvent::ModelsResult { request_id: request_id.clone(), result: Box::new(ModelManagementResult::Catalog { mode: SessionMode::Build, scope: ModelSelectionScope::SessionOnly, current: ModelSelection::new(context.profile.clone(), Level::Medium), profiles: vec![ModelCandidate { context: context.clone(), reasoning_levels: vec![Level::Low, Level::Medium, Level::High] }, ModelCandidate { context: other.clone(), reasoning_levels: vec![Level::Medium, Level::High] }], revision: "gallery-revision".into() }) }), cx);
             c.select_model(usize::from(conversion), cx);
             if conversion {
                 c.apply_model_selection(cx);
-                c.fixture_event(E::Manage(ManagementEvent::ModelsResult { request_id: request_id.clone(), result: ModelManagementResult::ConfirmationRequired(ModelSelectionPreview { request_id, session_generation: "gallery-runtime".into(), generation: 1, mode: SessionMode::Build, scope: ModelSelectionScope::SessionOnly, source: ModelSelection::new(context.profile, Level::Medium), target: ModelSelection::new(other.profile, Level::Medium), revision: "gallery-revision".into(), reason: "The effective checkpoint contains source-model-only opaque context. The destination cannot replay it without a portable source-model summary.".into() }) }), cx);
+                c.fixture_event(E::Manage(ManagementEvent::ModelsResult { request_id: request_id.clone(), result: Box::new(ModelManagementResult::ConfirmationRequired(ModelSelectionPreview { request_id, session_generation: "gallery-runtime".into(), generation: 1, mode: SessionMode::Build, scope: ModelSelectionScope::SessionOnly, source: ModelSelection::new(context.profile, Level::Medium), target: ModelSelection::new(other.profile, Level::Medium), revision: "gallery-revision".into(), reason: "The effective checkpoint contains source-model-only opaque context. The destination cannot replay it without a portable source-model summary.".into() })) }), cx);
             }
             cx.notify();
         });
@@ -852,7 +917,7 @@ mod native {
     ) {
         controller.update(cx, |c, cx| {
             let turn_id = TurnId::new(31);
-            c.fixture_event(E::Turn(TurnEvent::Started { turn_id, mode: SessionMode::Build, message: Message::user("Fix the failing transcript preview test.") }), cx);
+            c.fixture_event(E::Turn(TurnEvent::Started { turn_id, mode: SessionMode::Build, message: Message::user("Fix the failing transcript preview test."), references: Vec::new(), }), cx);
             c.fixture_event(E::Turn(TurnEvent::ModelCallStarted { turn_id, call: 1 }), cx);
             if scene == Scene::ThinkingInterrupted {
                 let mut attempt = zevria_content::ResponseAttempt::new(zevria_foundation::ModelProfileRef::new("fixture", "fixture"));
@@ -861,7 +926,7 @@ mod native {
                     content: zevria_content::AssistantPresentationContent::Reasoning { text: "The restored preview only scans sixteen lines. I was tracing the reader when the response stopped.".into() },
                 });
                 attempt.close(zevria_content::ResponseAttemptOutcome::Interrupted);
-                c.fixture_event(E::Turn(TurnEvent::ResponseAttemptUpdated { turn_id, attempt }), cx);
+                c.fixture_event(E::Turn(TurnEvent::ResponseAttemptUpdated { turn_id, attempt: Box::new(attempt) }), cx);
                 c.fixture_event(E::Turn(TurnEvent::Cancelled { turn_id }), cx);
             } else {
                 c.fixture_event(SessionStreamState::new(turn_id, zevria_content::AssistantStreamSnapshot { message: Some(thinking_message()), attempt: None }), cx);
@@ -900,6 +965,7 @@ mod native {
                         turn_id,
                         mode: SessionMode::Build,
                         message: prompt,
+                        references: Vec::new(),
                     }),
                     cx,
                 );
@@ -955,7 +1021,7 @@ mod native {
         controller.update(cx, |c, cx| {
             let turn_id = TurnId::new(8);
             c.fixture_event(E::Turn(TurnEvent::Started { turn_id, mode: SessionMode::Build,
-                message: Message::user("Run the release checks and watch the trace while the tests finish.") }), cx);
+                message: Message::user("Run the release checks and watch the trace while the tests finish."), references: Vec::new(), }), cx);
             c.fixture_event(E::Turn(TurnEvent::ModelCallStarted { turn_id, call: 1 }), cx);
             c.fixture_event(E::Turn(TurnEvent::Intermediate { turn_id,
                 message: Message::assistant("The UI bundle built successfully. The release tests and trace are still running."), attempt_id: None }), cx);
@@ -1019,6 +1085,7 @@ mod native {
                     turn_id,
                     mode: SessionMode::Build,
                     message: Message::user("Fix the failing transcript preview test."),
+                    references: Vec::new(),
                 }),
                 cx,
             );
@@ -1050,14 +1117,14 @@ mod native {
                         turn_id,
                         call_id: format!("call-{id}"),
                         entry_index: 0,
-                        descriptor: SubtaskDescriptor {
+                        descriptor: Box::new(SubtaskDescriptor {
                             id: SubtaskId::new(id),
                             parent_session_id: "gallery".into(),
                             title: title.into(),
                             kind,
                             workspace: Some(workspace.into()),
                             status: SubtaskStatus::Starting,
-                        },
+                        }),
                     }),
                     cx,
                 );
@@ -1077,7 +1144,7 @@ mod native {
     fn working(controller: &Entity<SessionController>, cx: &mut gpui_kit::App) {
         controller.update(cx, |c,cx| {
             let turn_id = TurnId::new(8);
-            c.fixture_event(E::Turn(TurnEvent::Started { turn_id,mode: SessionMode::Build,message: Message::user("Fix the failing transcript preview test.") }),cx);
+            c.fixture_event(E::Turn(TurnEvent::Started { turn_id,mode: SessionMode::Build,message: Message::user("Fix the failing transcript preview test."), references: Vec::new(), }),cx);
             c.fixture_event(E::Turn(TurnEvent::ModelCallStarted { turn_id, call: 1 }), cx);
             c.fixture_event(E::Turn(TurnEvent::Intermediate { turn_id,message: Message::assistant("I'll reproduce the failure, then trace the restored prompt."),attempt_id: None }),cx);
             let profile = ModelProfileRef::new("fixture", "fixture");
@@ -1087,12 +1154,12 @@ mod native {
                 profile: profile.clone(), model_role: ModelRole::Build,
                 input_token_limit: 100_000, context_window_tokens: 128_000,
             }), cx);
-            c.fixture_event(E::Turn(TurnEvent::ContextUsageUpdated { turn_id, snapshot: ContextTokenSnapshot {
+            c.fixture_event(E::Turn(TurnEvent::ContextUsageUpdated { turn_id, snapshot: Box::new(ContextTokenSnapshot {
                 profile, model_role: ModelRole::Build,
                 projected_input_tokens: Some(14_800), known_input_tokens: 14_800,
                 unresolved_media: Default::default(), source: ContextTokenSource::UsagePlusDelta,
                 automatic_trigger: 80_000, input_token_limit: 100_000, context_window_tokens: 128_000,
-            }}), cx);
+            })}), cx);
             for (id,name,args) in [
                 ("command-ok","command",serde_json::json!({"command":"rtk cargo test -p zevria-transcript"})),
                 ("command-fail","command",serde_json::json!({"command":"rtk proxy cargo test restore_roundtrip -- --nocapture 2>&1 | tail -20"})),
@@ -1117,8 +1184,3 @@ mod native {
         });
     }
 }
-
-use zevria_session_api::SessionStreamState;
-use zevria_session_api::{
-    JobEvent, ManagementEvent, PlanEvent, QuestionEvent, SubtaskEvent, TurnEvent,
-};

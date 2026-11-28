@@ -1,6 +1,7 @@
 pub mod assets;
 pub mod blocks;
 pub mod composer;
+mod images;
 mod jobs;
 pub mod math;
 mod mcp;
@@ -9,6 +10,7 @@ pub mod plan;
 pub mod question;
 pub use crate::rows;
 pub mod screens;
+mod side_chat;
 pub mod sidebar;
 pub mod status;
 pub mod style;

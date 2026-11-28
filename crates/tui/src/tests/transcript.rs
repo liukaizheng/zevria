@@ -12,6 +12,7 @@ fn unread_intermediate_fences_reasoning_tool_preview_without_a_stale_tail() {
             turn_id: TEST_TURN_ID,
             message: Message::user("use a tool"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }))
         .expect("turn starts");
     apply_transport_update(
@@ -59,6 +60,7 @@ fn a_preview_consumed_before_intermediate_is_cleared_by_the_commit() {
             turn_id: TEST_TURN_ID,
             message: Message::user("use a tool"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }))
         .expect("turn starts");
     apply_transport_update(
@@ -108,6 +110,7 @@ fn a_new_preview_after_intermediate_remains_visible() {
             turn_id: TEST_TURN_ID,
             message: Message::user("continue after the tool"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }))
         .expect("turn starts");
     apply_transport_update(
@@ -151,6 +154,7 @@ fn stale_turn_events_cannot_mutate_an_idle_or_newer_turn() {
         turn_id: old_turn,
         message: Message::user("old question"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Completed {
         attempt_id: None,
@@ -181,6 +185,7 @@ fn stale_turn_events_cannot_mutate_an_idle_or_newer_turn() {
         turn_id: new_turn,
         message: Message::user("new question"),
         mode: SessionMode::Plan,
+        references: Vec::new(),
     }));
     let active_history_len = app.history().len();
     app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Rejected {
@@ -214,6 +219,7 @@ fn recovered_turn_unlocks_without_duplicating_restored_assistant_message() {
             content: Vec::new(),
         },
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
 
     app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Recovered { turn_id }));
@@ -3195,6 +3201,7 @@ fn launch_rows_render_compactly_with_lifecycle_without_leaking_private_details()
             turn_id: TEST_TURN_ID,
             message: Message::user("investigate the config"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
     );
     apply_turn_event(
@@ -3302,6 +3309,7 @@ fn partial_launch_notices_appear_only_after_execution_stops() {
                     turn_id: TEST_TURN_ID,
                     message: Message::user("launch two children"),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
             );
             apply_turn_event(
@@ -3405,6 +3413,7 @@ fn successful_launch_batches_have_only_child_rows_and_skip_the_batch_in_navigati
             turn_id: TEST_TURN_ID,
             message: Message::user("launch two children"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
     );
     apply_turn_event(
@@ -3545,6 +3554,7 @@ fn live_prelaunch_failures_show_status_and_reason_without_opening_a_child() {
                 turn_id: TEST_TURN_ID,
                 message: Message::user("inspect synthetic fixtures"),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
         );
         apply_turn_event(
@@ -3621,6 +3631,7 @@ fn descriptorless_interrupted_launches_do_not_invent_a_failure_or_child() {
             turn_id: TEST_TURN_ID,
             message: Message::user("inspect a fixture"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
     );
     apply_turn_event(
@@ -3981,6 +3992,7 @@ fn concurrent_launch_rows_update_independently_before_the_result_batch() {
             turn_id: TEST_TURN_ID,
             message: Message::user("investigate both paths"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
     );
     apply_turn_event(
@@ -4316,6 +4328,7 @@ fn launch_result_metadata_reconciles_restore_outcomes_and_preserves_terminal_eve
             turn_id: TEST_TURN_ID,
             message: Message::user("launch live child"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
     );
     apply_turn_event(
@@ -4376,6 +4389,7 @@ fn late_terminal_status_updates_an_interrupted_row_after_turn_teardown() {
             turn_id: TEST_TURN_ID,
             message: Message::user("launch then cancel"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
     );
     apply_turn_event(
@@ -4449,6 +4463,7 @@ fn explore_panes_inherit_profiles_and_override_nominal_build_turns() {
             turn_id: TEST_TURN_ID,
             message: Message::user("child prompt"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         })),
     }));
     assert_eq!(
@@ -4511,6 +4526,7 @@ fn session_views_route_child_events_navigate_and_never_cancel_or_submit() {
         turn_id: TEST_TURN_ID,
         message: Message::user("kick off the explore"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     views.apply(SessionEvent::Turn(TurnEvent::Intermediate {
         attempt_id: None,
@@ -4532,6 +4548,7 @@ fn session_views_route_child_events_navigate_and_never_cancel_or_submit() {
             turn_id: TEST_TURN_ID,
             message: Message::user("child prompt"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         })),
     }));
     let child_findings = (0..20)
@@ -4650,6 +4667,7 @@ fn status_before_launch_is_reconciled_into_running_and_terminal_root_rows() {
             turn_id: TEST_TURN_ID,
             message: Message::user("launch racing child"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }));
         views.apply(SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
@@ -6088,6 +6106,7 @@ fn automatic_compaction_completion_keeps_the_surrounding_turn_active() {
         turn_id,
         message: Message::user("question"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     app.reduce_without_effects(SessionEvent::Turn(TurnEvent::CompactionStarted {
         turn_id,

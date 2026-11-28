@@ -808,6 +808,7 @@ async fn production_build_rejects_builder_launch_before_workspace_or_child_provi
                     text: "implement one page".into(),
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 },
                 &TurnContext::new(TurnId::new(1), SessionMode::Build, CancellationToken::new()),
                 &events,
@@ -938,6 +939,7 @@ async fn ten_real_response_launches_share_limits_and_return_original_slots() {
                         text: "ten books".into(),
                         behavior: zevria_foundation::RequestBehavior::Orchestrate,
                         mode: SessionMode::Build,
+                        references: Vec::new(),
                     },
                     &TurnContext::new(TurnId::new(1), SessionMode::Build, CancellationToken::new())
                         .with_build_subtasks(true),

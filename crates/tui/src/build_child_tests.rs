@@ -31,6 +31,7 @@ fn late_build_descriptor_reconciles_activity_compaction_and_keeps_telemetry_sepa
             turn_id: TEST_TURN_ID,
             message: Message::user("launch"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }));
         views.apply(SessionEvent::Turn(TurnEvent::Intermediate {
             attempt_id: None,
@@ -43,6 +44,7 @@ fn late_build_descriptor_reconciles_activity_compaction_and_keeps_telemetry_sepa
                 turn_id: TEST_TURN_ID,
                 message: Message::user("child"),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             })),
         }));
         if compacting {

@@ -147,7 +147,8 @@ impl<P: ModelProvider> SessionEngine<P> {
                     )
                 })?;
             state.force_exact_recheck = false;
-            let compaction_available = self.conversation.has_compaction_prompt();
+            let compaction_available =
+                self.side_chat.is_none() && self.conversation.has_compaction_prompt();
             let over_limit = snapshot
                 .projected_input_tokens
                 .is_some_and(|tokens| tokens > snapshot.input_token_limit);
@@ -177,7 +178,9 @@ impl<P: ModelProvider> SessionEngine<P> {
                 continue;
             }
             if over_limit {
-                let compaction_state = if state.compaction_attempted {
+                let compaction_state = if self.side_chat.is_some() {
+                    CapacityCompactionState::DisabledForSideChat
+                } else if state.compaction_attempted {
                     CapacityCompactionState::Completed
                 } else if compaction_available {
                     CapacityCompactionState::NotAttempted
@@ -266,6 +269,7 @@ impl<P: ModelProvider> SessionEngine<P> {
         let checkpoint_records = checkpoint_writer.into_records();
         self.conversation
             .install_attempt_checkpoints(checkpoint_records);
+        self.publish_fork();
         Ok(DispatchedModel {
             completion_result,
             checkpointed,
@@ -594,7 +598,8 @@ impl<P: ModelProvider> SessionEngine<P> {
                         error,
                         retained,
                         usage,
-                    }) if zevria_model::ModelInputTooLarge::safe_to_replay(&error)
+                    }) if self.side_chat.is_none()
+                        && zevria_model::ModelInputTooLarge::safe_to_replay(&error)
                         && retained.is_empty()
                         && usage.is_none()
                         && !state.compaction_attempted
@@ -647,9 +652,9 @@ impl<P: ModelProvider> SessionEngine<P> {
                         retained,
                         usage,
                     }) if error.is::<zevria_model::ModelInputTooLarge>() => {
-                        let diagnostic = if !zevria_model::ModelInputTooLarge::safe_to_replay(
-                            &error,
-                        ) {
+                        let diagnostic = if self.side_chat.is_some() {
+                            "the Side Chat exceeded its inherited model's context window; shorten the question or fork again from a smaller main context"
+                        } else if !zevria_model::ModelInputTooLarge::safe_to_replay(&error) {
                             "token-window failure was not confirmed pre-execution (or followed an ambiguous transport attempt); refusing automatic replay of possible upstream work"
                         } else if state.compaction_attempted {
                             "token-window rejection: the pending model round has already spent its one compaction/retry budget; select a larger compatible model or reduce input"

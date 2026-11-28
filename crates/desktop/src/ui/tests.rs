@@ -9,6 +9,8 @@ mod jobs;
 mod models;
 #[path = "prompt_preview_tests.rs"]
 mod prompt_preview;
+#[path = "side_chat_tests.rs"]
+mod side_chats;
 #[path = "subtask_tests.rs"]
 mod subtasks;
 #[path = "turn_tests.rs"]
@@ -152,6 +154,7 @@ mod status {
                 turn_id: TURN,
                 mode: SessionMode::Build,
                 message: Message::user("Check cache usage"),
+                references: Vec::new(),
             }),
             cx,
         );
@@ -437,6 +440,7 @@ fn busy_stop_and_escape_use_the_promoted_turn_id(cx: &mut TestAppContext) {
             turn_id: TurnId::new(8),
             mode: SessionMode::Build,
             message: Message::user("busy"),
+            references: Vec::new(),
         }),
         cx,
     );
@@ -583,6 +587,7 @@ fn dismissed_ready_plan_feedback_recovers_only_before_acceptance(cx: &mut TestAp
             turn_id,
             mode: SessionMode::Plan,
             message: Message::user("next draft"),
+            references: Vec::new(),
         }),
         cx,
     );
@@ -801,6 +806,7 @@ fn question_dialog_emits_answer_question(cx: &mut TestAppContext) {
             turn_id,
             mode: SessionMode::Build,
             message: Message::user("ask"),
+            references: Vec::new(),
         }),
         cx,
     );
@@ -858,6 +864,7 @@ fn native_choice_note_editor_keeps_drafts_and_sends_the_chosen_note(cx: &mut Tes
             turn_id,
             mode: SessionMode::Plan,
             message: Message::user("ask"),
+            references: Vec::new(),
         }),
         cx,
     );
@@ -1115,6 +1122,7 @@ fn shift_enter_never_submits_and_acceptance_does_not_overwrite_a_new_draft(
             turn_id: TurnId::new(11),
             mode: SessionMode::Build,
             message: Message::user("submitted"),
+            references: Vec::new(),
         }),
         cx,
     );
@@ -1179,6 +1187,7 @@ fn shared_palette_drives_syntax_and_native_diff_card_expansion(cx: &mut TestAppC
             turn_id,
             mode: SessionMode::Build,
             message: Message::user("edit file"),
+            references: Vec::new(),
         }),
         cx,
     );
@@ -1793,6 +1802,7 @@ fn ask_multi_select_with_previews(controller: &Entity<SessionController>, cx: &m
             turn_id,
             mode: SessionMode::Plan,
             message: Message::user("Plan validation"),
+            references: Vec::new(),
         }),
         cx,
     );
@@ -1933,6 +1943,7 @@ fn radio_question_options_other_and_optional_skip_keep_the_authoritative_form(
             turn_id,
             mode: SessionMode::Build,
             message: Message::user("choose"),
+            references: Vec::new(),
         }),
         cx,
     );

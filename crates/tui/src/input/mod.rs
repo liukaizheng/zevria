@@ -29,6 +29,7 @@ impl Default for PaneId {
 pub(crate) enum SurfaceKind {
     Transcript,
     Selection,
+    TextSelection,
     Composer,
     Completion,
     PlanReview,
@@ -38,6 +39,7 @@ pub(crate) enum SurfaceKind {
     Jobs,
     Mcp,
     Subtasks,
+    SideChats,
     Question,
     Help,
 }
@@ -45,11 +47,11 @@ pub(crate) enum SurfaceKind {
 impl SurfaceKind {
     pub(crate) const fn layer(self) -> u8 {
         match self {
-            Self::Transcript | Self::Selection | Self::Composer => 0,
+            Self::Transcript | Self::Selection | Self::TextSelection | Self::Composer => 0,
             Self::Completion | Self::PlanReview => 1,
             Self::Skills => 2,
             Self::Sessions => 3,
-            Self::Jobs | Self::Subtasks | Self::Mcp => 4,
+            Self::Jobs | Self::Subtasks | Self::Mcp | Self::SideChats => 4,
             Self::Models => 5,
             Self::Question => 6,
             Self::Help => 7,
@@ -85,13 +87,15 @@ impl Surface {
     pub(crate) fn new(pane: PaneId, kind: SurfaceKind) -> Self {
         use SurfaceKind::*;
         let (captures, pane_navigation, scroll, cursor) = match kind {
-            Transcript | Selection => (false, true, ScrollTarget::Transcript, false),
+            Transcript | Selection | TextSelection => {
+                (false, true, ScrollTarget::Transcript, false)
+            }
             Composer => (false, true, ScrollTarget::Editor, true),
             Completion => (false, true, ScrollTarget::List, true),
             PlanReview => (false, true, ScrollTarget::Transcript, false),
             Skills => (true, false, ScrollTarget::List, false),
             Sessions => (true, false, ScrollTarget::List, false),
-            Models | Jobs | Subtasks | Mcp => (true, false, ScrollTarget::List, false),
+            Models | Jobs | Subtasks | Mcp | SideChats => (true, false, ScrollTarget::List, false),
             Question => (true, false, ScrollTarget::Form, true),
             Help => (true, false, ScrollTarget::List, false),
         };
@@ -111,12 +115,14 @@ impl Surface {
             SurfaceKind::Completion => KeyContext::Completion,
             SurfaceKind::Transcript => KeyContext::Transcript,
             SurfaceKind::Selection => KeyContext::BlockNav,
+            SurfaceKind::TextSelection => KeyContext::TextNav,
             SurfaceKind::PlanReview => KeyContext::PlanDecision,
             SurfaceKind::Question => KeyContext::Question,
             SurfaceKind::Skills => KeyContext::SkillsList,
             SurfaceKind::Models => KeyContext::ModelList,
             SurfaceKind::Jobs => KeyContext::JobsList,
             SurfaceKind::Subtasks => KeyContext::SubtasksList,
+            SurfaceKind::SideChats => KeyContext::SideChatsList,
             SurfaceKind::Sessions | SurfaceKind::Mcp => KeyContext::OverlayList,
             SurfaceKind::Help => KeyContext::Help,
         }

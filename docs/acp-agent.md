@@ -413,7 +413,7 @@ Listing, load, resume, and recovery never look under the old `.zevria/windows/`
 location. For existing Windows history there, see the
 [optional offline transfer](windows.md#optional-offline-transfer-of-legacy-windows-state).
 The CLI's [offline cleanup](architecture.md#offline-workspace-cleanup) removes
-only the five unified state directories and preserves the legacy subtree.
+only the six unified state directories and preserves the legacy subtree.
 
 A new session creates no `.jsonl` file while idle, browsing commands, changing
 mode/model, refreshing guidance, or rejecting blank/invalid input. The first

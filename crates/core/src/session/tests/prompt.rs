@@ -39,6 +39,7 @@ async fn image_only_messages_and_skill_arguments_are_durable_before_provider_fai
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: prompt.clone(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }
         };
         let (events, mut receiver) = session_event_channel(64);
@@ -116,6 +117,7 @@ async fn recalled_new_submission_and_intentional_edit_prepare_only_the_new_suffi
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: recalled.clone(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -179,6 +181,7 @@ async fn failed_or_cancelled_preparation_never_commits_a_new_prompt() {
                 crate::session::workflow::prompt::PromptTurnInput::Message {
                     text: prompt,
                     behavior: zevria_foundation::RequestBehavior::Standard,
+                    references: Vec::new(),
                 },
                 SessionMode::Build,
                 &events,
@@ -228,7 +231,7 @@ async fn ready_message_revision_commits_before_feedback_and_runs_only_in_plan_mo
             matches!(tail[0].plan_record(), Some(PlanRecord::RevisionRequested { artifact: revised }) if revised == &artifact)
         );
         let prompt_index = tail.iter().position(|item| matches!(item,
-            TranscriptItem::RequestPrompt { message, request }
+            TranscriptItem::RequestPrompt { message, request, .. }
                 if message == &Message::user(text) && request.behavior == zevria_foundation::RequestBehavior::Standard
         )).unwrap();
         assert!(prompt_index > 0);
@@ -588,6 +591,7 @@ async fn cancelled_child_admission_uses_parent_identity_without_a_transcript_row
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "child".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             },
             &turn,
             &events,

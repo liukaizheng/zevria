@@ -10,6 +10,45 @@ use zevria_session_api::{EnsembleEvent, PlanEvent, TurnEvent};
 
 const SELECTION_SHORTCUTS: [fn(&mut App); 2] = [double_escape, press_v];
 
+#[test]
+fn single_row_visual_keeps_character_highlight_and_fixed_mode_label() {
+    let mut app = App::new();
+    app.reduce(SessionEvent::Turn(TurnEvent::Started {
+        turn_id: TEST_TURN_ID,
+        message: Message::user("quartz sapphire yellow"),
+        mode: SessionMode::Build,
+        references: Vec::new(),
+    }));
+    rendered_buffer(&mut app, 80, 16);
+    press_v(&mut app);
+    app.handle_event(key(KeyCode::Enter));
+    app.handle_event(key(KeyCode::Enter));
+    app.handle_event(key(KeyCode::Char('v')));
+    app.handle_event(key(KeyCode::Char('l')));
+    let buffer = rendered_buffer(&mut app, 80, 16);
+    let area = conversation_content_area(&buffer, false);
+    let row = (area.y..area.bottom())
+        .find(|&y| {
+            let row = (area.x..area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>();
+            row.contains("quartz sapphire yellow")
+        })
+        .unwrap();
+    let start = (area.x..area.right())
+        .find(|&x| buffer[(x, row)].symbol() == "q")
+        .unwrap();
+    assert_eq!(
+        buffer[(start, row)].bg,
+        crate::theme::theme().surfaces.selection_background
+    );
+    assert_ne!(
+        buffer[(start + 3, row)].bg,
+        crate::theme::theme().surfaces.selection_background
+    );
+    assert!(rendered_text(&mut app, 80, 16).contains("VISUAL"));
+}
+
 fn assert_no_target(app: &mut App) {
     let before = (app.view_scroll(), app.view_follow());
     let rebuilds = app.view_cache().rebuilds;
@@ -65,6 +104,7 @@ fn elapsed_header_wrapping_keeps_selected_and_folded_body_paint_separate() {
                         content: Vec::new(),
                     },
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 SessionEvent::Turn(TurnEvent::ModelCallStarted {
                     turn_id: TEST_TURN_ID,
@@ -227,6 +267,7 @@ fn live_and_restored_user_jumps_include_both_ensemble_prompts_but_not_workers() 
                     turn_id: TEST_TURN_ID,
                     message: first,
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }));
                 app.reduce_without_effects(SessionEvent::Turn(TurnEvent::Recovered {
                     turn_id: TEST_TURN_ID,
@@ -245,6 +286,7 @@ fn live_and_restored_user_jumps_include_both_ensemble_prompts_but_not_workers() 
                     turn_id: TurnId::new(3),
                     message: last,
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }));
             }
             app.detach_follow_for_test();
@@ -396,6 +438,7 @@ fn message_scope_reconciles_cursor_when_its_block_is_hidden() {
     for scope in [SelectionScope::Message, SelectionScope::Block] {
         let mut app = App::new();
         app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+            references: Vec::new(),
             header: None,
             blocks: vec![
                 plain_block(0, PresentationRole::Assistant, "first"),
@@ -457,10 +500,12 @@ fn message_navigation_skips_entries_without_visible_selectable_blocks() {
     app.seed_history_entry(history_message(Message::user("first")));
     app.seed_history_entry(HistoryEntry::CompactionDivider);
     app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+        references: Vec::new(),
         header: None,
         blocks: vec![hidden.clone()],
     }));
     app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+        references: Vec::new(),
         header: None,
         blocks: vec![
             hidden,
@@ -555,6 +600,7 @@ fn user_jump_targets_start_at_first_visible_user_content_not_diagnostics() {
     });
     let mut app = App::new();
     app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+        references: Vec::new(),
         header: None,
         blocks: vec![
             hidden,
@@ -1062,10 +1108,12 @@ fn cached_ranges_exclude_headers_separators_gaps_dividers_and_hidden_blocks() {
     diagnostic.visibility = BlockVisibility::Diagnostics;
     let history = vec![
         HistoryEntry::Conversation(ConversationEntry {
+            references: Vec::new(),
             header: None,
             blocks: vec![diagnostic.clone()],
         }),
         HistoryEntry::Conversation(ConversationEntry {
+            references: Vec::new(),
             header: None,
             blocks: vec![
                 plain_block(0, PresentationRole::User, "first"),
@@ -1164,6 +1212,7 @@ fn single_row_headers_separators_and_dividers_do_not_substitute_nearby_items() {
     for row in [0, 2, 3, 5, 6, 7, 8] {
         let mut app = App::subtask_inspect("one-row pane");
         app.seed_history_entry(HistoryEntry::Conversation(ConversationEntry {
+            references: Vec::new(),
             header: None,
             blocks: vec![
                 plain_block(0, PresentationRole::User, "first"),
@@ -1306,6 +1355,7 @@ fn native_and_presentation_families_keep_their_copy_actions_on_visible_entry() {
         ),
         (
             HistoryEntry::Conversation(ConversationEntry {
+                references: Vec::new(),
                 header: None,
                 blocks: vec![placeholder],
             }),
@@ -1314,6 +1364,7 @@ fn native_and_presentation_families_keep_their_copy_actions_on_visible_entry() {
         ),
         (
             HistoryEntry::Conversation(ConversationEntry {
+                references: Vec::new(),
                 header: None,
                 blocks: vec![image_block],
             }),

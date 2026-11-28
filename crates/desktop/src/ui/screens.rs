@@ -156,11 +156,16 @@ impl DesktopWindow {
         )
     }
     pub(super) fn confirm_replace(&self, cx: &mut Context<Self>) -> AnyElement {
+        let side_running = self.controller.read(cx).side_chat_running();
         style::scrim(cx).id("confirm-replacement")
             .child(style::sheet(cx).w(px(420.))
-                .child(div().text_size(px(18.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD).child("Stop the current turn?"))
+                .child(div().text_size(px(18.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD).child(if side_running { "Stop active work?" } else { "Stop the current turn?" }))
                 .child(div().text_size(px(14.)).line_height(px(20.)).text_color(palette(cx).text.secondary)
-                    .child("Zevria is still working. Switching sessions stops this turn first."))
+                    .child(if side_running {
+                        "Switching sessions stops active Side Chats and any running main turn. Saved threads stay with this session."
+                    } else {
+                        "Zevria is still working. Switching sessions stops this turn first."
+                    }))
                 .child(div().flex().justify_end().gap(px(8.))
                     .child(Button::new("cancel-replace").ghost().label("Keep working")
                         .on_click(cx.listener(|this, _, _, cx| {

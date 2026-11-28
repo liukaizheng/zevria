@@ -12,7 +12,7 @@ use crate::config::Config;
 
 mod running;
 mod storage;
-mod tools;
+pub(crate) mod tools;
 
 use running::{MCP_SHUTDOWN_GRACE, SubtaskSupervisor, spawn_observed};
 pub use running::{RunningSession, RuntimeTaskExit};
@@ -176,6 +176,7 @@ pub struct SessionIdentity {
 /// One-time, host-loaded frontend restoration payload. Frontends never reopen
 /// transcript files; the runtime retains paths and lease metadata for shutdown.
 pub struct RestoredSession {
+    pub side_chats: Vec<crate::RestoredSideChat>,
     pub model_contexts: [zevria_foundation::ModelContextPolicy; ModelRole::COUNT],
     pub reasoning_levels: [zevria_foundation::ReasoningLevel; ModelRole::COUNT],
     pub model_snapshots: Vec<zevria_model::ContextTokenSnapshot>,
@@ -637,6 +638,7 @@ mod tests {
                         text: "must not be accepted".into(),
                         mode: SessionMode::Build,
                         behavior: zevria_foundation::RequestBehavior::Standard,
+                        references: Vec::new(),
                     },
                 ))
                 .unwrap();
@@ -786,6 +788,7 @@ mod tests {
         .await
         .expect("background job must publish its PID before shutdown");
         let running = RunningSession {
+            side_chats: None,
             mcp: None,
             command_jobs: Some(jobs),
             cleanup_abandoned_history: true,
@@ -841,6 +844,7 @@ mod tests {
         });
         let supervisor_task = tokio::spawn(async {});
         let running = RunningSession {
+            side_chats: None,
             mcp: None,
             command_jobs: None,
             cleanup_abandoned_history: true,

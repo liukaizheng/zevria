@@ -27,6 +27,7 @@ async fn submit_edit_replaces_the_message_and_rewrites_the_transcript() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "first".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -38,6 +39,7 @@ async fn submit_edit_replaces_the_message_and_rewrites_the_transcript() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "second".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -90,6 +92,115 @@ async fn submit_edit_replaces_the_message_and_rewrites_the_transcript() {
 }
 
 #[tokio::test]
+async fn edit_references_survive_acceptance_and_replay_and_invalidate_the_old_fork() {
+    use zevria_foundation::{RequestBehavior, SideChatId, SideChatReferenceAttachment};
+    use zevria_session_api::{TranscriptEditReplacement, TranscriptEditTarget};
+
+    let provider = ScriptedProvider::new([
+        Ok(Message::assistant("first answer")),
+        Ok(Message::assistant("revised answer")),
+    ]);
+    let requests = provider.requests.clone();
+    let (_directory, transcript) = test_transcript();
+    let mut engine = SessionEngine::new(
+        provider,
+        ToolServer::new().run(),
+        test_policies(),
+        transcript,
+        Arc::new(SkillCatalog::default()),
+    )
+    .unwrap()
+    .with_mode_management();
+    let (side, _commands) = tokio::sync::mpsc::unbounded_channel();
+    let parent = engine.enable_side_chats(side);
+    let empty = parent.borrow().clone().unwrap();
+    assert_eq!(empty.inherited_turn_count, 0);
+    let (events, mut receiver) = session_event_channel(64);
+    engine
+        .handle_command(
+            SessionCommand::Turn(TurnCommand::Submit {
+                text: "first".into(),
+                mode: SessionMode::Build,
+                behavior: RequestBehavior::Standard,
+                references: Vec::new(),
+            }),
+            &events,
+        )
+        .await
+        .unwrap();
+    let committed = parent.borrow().clone().unwrap();
+    assert_eq!(committed.inherited_turn_count, 1);
+    assert_eq!(committed.safe_len, engine.conversation.items().len());
+    assert!(committed.safe_len > empty.safe_len && empty.still_current());
+
+    engine
+        .handle_command(
+            SessionCommand::Manage(ManagementCommand::SetMode {
+                request_id: "plan-before-fork".into(),
+                mode: SessionMode::Plan,
+            }),
+            &events,
+        )
+        .await
+        .unwrap();
+    let plan = parent.borrow().clone().unwrap();
+    assert_eq!(
+        (plan.mode, plan.policy.model_role),
+        (SessionMode::Plan, ModelRole::Plan)
+    );
+    assert_eq!(plan.inherited_turn_count, 1);
+
+    let id = SideChatId::random();
+    let reference = SideChatReferenceAttachment {
+        id,
+        short_id: id.short(),
+        title: "Review notes".into(),
+        turn_ordinal: Some(1),
+        question_preview: "What was checked?".into(),
+        excerpt: "The parser handles empty records.".into(),
+    };
+    engine
+        .handle_command(
+            SessionCommand::Turn(TurnCommand::EditTranscript(
+                zevria_session_api::TranscriptEdit {
+                    target: TranscriptEditTarget::PromptOrdinal(0),
+                    replacement: TranscriptEditReplacement::Message {
+                        text: format!("Revisit @side:{}#1", id.short()).into(),
+                        mode: SessionMode::Plan,
+                        behavior: RequestBehavior::Standard,
+                        references: vec![reference.clone()],
+                    },
+                },
+            )),
+            &events,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !committed.still_current(),
+        "a rewrite must invalidate a captured fork"
+    );
+    let rewritten = parent.borrow().clone().unwrap();
+    assert!(rewritten.still_current());
+    assert_eq!(rewritten.inherited_turn_count, 1);
+    assert_eq!(rewritten.safe_len, engine.conversation.items().len());
+    let events = collect_events(&mut receiver).await;
+    assert!(events.iter().any(|event| matches!(event,
+        SessionEvent::Turn(TurnEvent::Started { references, .. }) if references == std::slice::from_ref(&reference)
+    )));
+    let items = zevria_transcript::transcript::load(engine.conversation.path()).unwrap();
+    assert!(items.iter().any(|item| matches!(item,
+        TranscriptItem::RequestPrompt { references: Some(references), .. }
+            if references.attachments() == std::slice::from_ref(&reference)
+    )));
+    let requests = requests.lock().unwrap();
+    let sent = zevria_content::UserPrompt::from_message(&requests[1].prompt)
+        .unwrap()
+        .text_projection();
+    assert!(sent.contains(&reference.excerpt));
+}
+
+#[tokio::test]
 async fn submit_edit_out_of_range_fails_without_touching_history_or_transcript() {
     let provider = ScriptedProvider::new([Ok(Message::assistant("answer"))]);
     let tools = ToolServer::new().run();
@@ -109,6 +220,7 @@ async fn submit_edit_out_of_range_fails_without_touching_history_or_transcript()
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "question".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -244,6 +356,7 @@ async fn submit_edit_addresses_the_numbered_prompt_not_the_last_matching_text() 
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: text.into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )

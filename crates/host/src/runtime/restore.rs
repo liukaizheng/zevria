@@ -118,6 +118,25 @@ pub(super) async fn preflight(
     Ok((subtasks, agent_runs))
 }
 
+pub(super) async fn side_chats(
+    workspace: &Path,
+    root_id: &str,
+) -> anyhow::Result<Vec<crate::side_chats::Restore>> {
+    let directory = transcript::side_chats_dir(workspace, root_id);
+    let files =
+        tokio::task::spawn_blocking(move || transcript::side_chat_files(&directory)).await??;
+    join_loads(
+        files
+            .into_iter()
+            .map(|(id, path)| {
+                let root_id = root_id.to_owned();
+                move || crate::side_chats::read_restored(&path, &root_id, &id)
+            })
+            .collect(),
+    )
+    .await
+}
+
 async fn join_loads<T, F>(loads: Vec<F>) -> anyhow::Result<Vec<T>>
 where
     T: Send + 'static,

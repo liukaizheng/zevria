@@ -380,6 +380,9 @@ async fn run_session(
     for child in restoration.subtasks {
         views.restore_child(child.id, child.launch, child.items);
     }
+    for side in restoration.side_chats {
+        views.restore_side_chat(side.descriptor, side.origin.quoted_excerpt, side.items);
+    }
     for agent in restoration.agent_runs {
         views.restore_agent_run(agent.records);
     }

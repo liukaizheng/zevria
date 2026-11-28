@@ -108,6 +108,7 @@ fn hosted_header_stays_live_while_its_native_command_executes() {
             turn_id: TEST_TURN_ID,
             message: Message::user("search then run"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
         SessionEvent::Turn(TurnEvent::ModelCallStarted {
             turn_id: TEST_TURN_ID,
@@ -214,6 +215,7 @@ fn native_web_content_replaces_pending_header_and_keeps_its_call_on_revisions() 
         turn_id: TEST_TURN_ID,
         message: Message::user("search"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     app.reduce_without_effects(SessionEvent::Turn(TurnEvent::ModelCallStarted {
         turn_id: TEST_TURN_ID,
@@ -275,6 +277,7 @@ fn hosted_headers_keep_ticking_in_history_without_rebuilding_bodies_and_freeze_o
                     turn_id: TEST_TURN_ID,
                     message: Message::user("search"),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 SessionEvent::Turn(TurnEvent::ModelCallStarted {
                     turn_id: TEST_TURN_ID,
@@ -384,6 +387,7 @@ fn every_accepted_terminal_freezes_retained_hosted_output_and_stale_terminals_do
                 turn_id: TEST_TURN_ID,
                 message: Message::user("search"),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             SessionEvent::Turn(TurnEvent::ModelCallStarted {
                 turn_id: TEST_TURN_ID,

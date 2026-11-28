@@ -5,6 +5,7 @@ use super::{
     SessionController, SessionRequest, SessionStart, SessionUpdate,
 };
 use zevria_presentation::session::OperationKind;
+use zevria_session_api::{SessionEvent, SideChatEvent};
 
 fn is_prompt_submission(kind: OperationKind) -> bool {
     // Plan feedback uses the same Submit or Skill operation as a fresh turn.
@@ -137,6 +138,7 @@ impl SessionController {
         update: SessionUpdate,
         cx: &mut Context<Self>,
     ) -> Option<zevria_workflow::PlanHandoff> {
+        self.settle_side_chat_draft(&update);
         self.model.observe_clock(Instant::now());
         let reduction = self.model.apply(update);
         if let Some(root) = reduction.root {
@@ -163,6 +165,27 @@ impl SessionController {
         }
         reduction.fresh
     }
+    fn settle_side_chat_draft(&mut self, update: &SessionUpdate) {
+        let SessionUpdate::Lifecycle(SessionEvent::SideChat(event)) = update else {
+            return;
+        };
+        let (request_id, created) = match event {
+            SideChatEvent::Created { request_id, .. } => (request_id, true),
+            SideChatEvent::CreateFailed { request_id, .. } => (request_id, false),
+            _ => return,
+        };
+        if self
+            .pending_side_chat_draft
+            .as_ref()
+            .is_some_and(|draft| &draft.request_id == request_id)
+        {
+            let draft = self.pending_side_chat_draft.take().unwrap();
+            if created && draft.generation == self.draft_generation {
+                self.clear_draft();
+            }
+        }
+    }
+
     pub(super) fn dispatch_job_continuation(&mut self, cx: &mut Context<Self>) {
         if self.phase == Phase::Live
             && self.edit.is_none()

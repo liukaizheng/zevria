@@ -133,6 +133,7 @@ async fn unified_reasoning_scopes_all_modes_resume_exactly_and_reject_removed_le
                         behavior: zevria_foundation::RequestBehavior::Standard,
                         mode,
                         text: "persist this session".into(),
+                        references: Vec::new(),
                     },
                 ))
                 .unwrap();

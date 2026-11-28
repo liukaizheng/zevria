@@ -84,6 +84,19 @@ pub(crate) fn build_tools(
     Ok(append_web_search(server, web_search).run())
 }
 
+pub(crate) fn build_side_chat_tools(
+    workspace: &Path,
+    config: CommandConfig,
+    web_search: Option<Arc<dyn WebSearchExecutor>>,
+) -> anyhow::Result<ToolServerHandle> {
+    // Use private foreground-only jobs, never the parent's session registry.
+    let server = ToolServer::new()
+        .tool(command_tool(workspace.into(), config)?)
+        .tool(ReadImageTool::new(workspace.into()))
+        .tool(SkillReadTool);
+    Ok(append_web_search(server, web_search).run())
+}
+
 fn append_web_search(
     server: ToolServer,
     executor: Option<Arc<dyn WebSearchExecutor>>,

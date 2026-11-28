@@ -354,6 +354,10 @@ impl<P: ModelProvider> SessionEngine<P> {
         events: &SessionEventSender,
         turn: &TurnContext,
     ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.side_chat.is_none(),
+            "Side Chat cannot compact its forked history"
+        );
         if !self.conversation.has_compaction_prompt() {
             anyhow::bail!("cannot compact a conversation before its first user prompt");
         }

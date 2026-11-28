@@ -57,6 +57,7 @@ pub(crate) enum StatusTone {
 pub(crate) struct StatusBarView {
     pub(crate) jobs: usize,
     pub(crate) subtasks: usize,
+    pub(crate) side_chats: usize,
     pub(crate) primary: String,
     pub(crate) accent: StatusAccent,
     pub(crate) tone: StatusTone,
@@ -246,6 +247,9 @@ fn build_candidate(view: &StatusBarView, options: RenderOptions) -> StatusCandid
         }
         if view.subtasks > 0 {
             left.push(zevria_presentation::subtasks::chip_label(view.subtasks));
+        }
+        if view.side_chats > 0 {
+            left.push(format!("{} side", view.side_chats));
         }
     }
     if options.optional_left {

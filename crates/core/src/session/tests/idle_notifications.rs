@@ -33,6 +33,7 @@ async fn idle_barrier_follows_completion_and_ready_plan_publication() {
             text: "make a plan".into(),
             mode: SessionMode::Plan,
             behavior: zevria_foundation::RequestBehavior::Standard,
+            references: Vec::new(),
         })],
         events,
         receiver,

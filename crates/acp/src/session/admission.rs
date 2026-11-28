@@ -91,6 +91,7 @@ impl SessionInput {
                 text,
                 mode,
                 behavior,
+                references: Vec::new(),
             },
             Self::Skill { name, args } => {
                 zevria_session_api::TurnCommand::InvokeSkill { name, args, mode }

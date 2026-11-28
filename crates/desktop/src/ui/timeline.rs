@@ -123,6 +123,7 @@ impl Step {
 pub enum BlockKind {
     Prompt {
         images: Vec<Attachment>,
+        references: Vec<zevria_foundation::SideChatReferenceAttachment>,
         preparing: bool,
     },
     ThoughtGroup(ThoughtGroup),
@@ -578,6 +579,7 @@ impl Projector {
                         format!("{epoch}-preparing-{}", preview.id()),
                         history.len(),
                         &blocks,
+                        preview.references(),
                         true,
                         preview.id(),
                     ),
@@ -694,6 +696,7 @@ fn project_entry(
                         format!("{epoch}-{}", block.id.0),
                         index,
                         &group,
+                        &entry.references,
                         false,
                         revision,
                     )));
@@ -797,6 +800,7 @@ fn project_entry(
                 index,
                 BlockKind::Prompt {
                     images: vec![],
+                    references: Vec::new(),
                     preparing: false,
                 },
                 ensemble.command(),
@@ -862,6 +866,7 @@ fn prompt(
     key: String,
     index: usize,
     blocks: &[&PresentationBlock],
+    references: &[zevria_foundation::SideChatReferenceAttachment],
     preparing: bool,
     stamp: u64,
 ) -> Arc<BlockData> {
@@ -883,7 +888,11 @@ fn prompt(
     let mut data = BlockData::new(
         key,
         index,
-        BlockKind::Prompt { images, preparing },
+        BlockKind::Prompt {
+            images,
+            references: references.to_vec(),
+            preparing,
+        },
         body.join("\n\n"),
     );
     data.primary = copy.join("\n\n").into();
@@ -1767,6 +1776,7 @@ mod tests {
             blocks.extend(entry.blocks);
         }
         conv.push_entry(HistoryEntry::Conversation(ConversationEntry {
+            references: Vec::new(),
             header: None,
             blocks,
         }));
@@ -1816,6 +1826,7 @@ mod tests {
         let BlockKind::Prompt {
             images,
             preparing: false,
+            ..
         } = &rows[0].data.kind
         else {
             unreachable!()

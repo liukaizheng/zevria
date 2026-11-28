@@ -170,6 +170,7 @@ async fn submit(
             text: "new conversation only".into(),
             mode,
             behavior: zevria_foundation::RequestBehavior::Standard,
+            references: Vec::new(),
         }))
         .unwrap();
     completed(events, &selected.profile, mode, context.input_token_limit).await;

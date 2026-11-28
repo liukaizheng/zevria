@@ -8,6 +8,7 @@ fn request(text: &str) -> Vec<TranscriptItem> {
         TranscriptItem::RequestPrompt {
             message: Message::user(text),
             request: request.clone(),
+            references: None,
         },
         TranscriptItem::RequestDirective(Box::new(
             zevria_instructions::RequestDirective::boundary(request),

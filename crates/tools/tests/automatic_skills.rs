@@ -160,6 +160,7 @@ async fn ordinary_commit_discloses_metadata_then_pins_before_action_and_reapplie
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: text.into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )

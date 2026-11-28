@@ -137,6 +137,7 @@ impl AdmissionFixture {
             PromptTurnInput::Message {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "next".into(),
+                references: Vec::new(),
             }
         };
         (anchor, input)
@@ -211,6 +212,7 @@ impl AdmissionFixture {
                 PromptTurnInput::Message {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: text.into(),
+                    references: Vec::new(),
                 },
                 SessionMode::Build,
             )

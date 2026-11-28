@@ -359,6 +359,7 @@ async fn successive_plan_and_build_submissions_resolve_fresh_policies() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "make a plan".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -370,6 +371,7 @@ async fn successive_plan_and_build_submissions_resolve_fresh_policies() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "Implement the approved plan.".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -466,6 +468,7 @@ async fn plan_policy_allows_command_and_is_fixed_across_continuations() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "make a plan".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -544,6 +547,7 @@ async fn plan_policy_denies_file_tools_before_dispatch_and_preserves_correlation
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "plan file changes".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -625,6 +629,7 @@ async fn ordinary_plan_final_remains_planning_without_approval() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "make a plan".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -691,6 +696,7 @@ async fn identical_titles_in_different_sessions_have_distinct_projections() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "plan it".into(),
                     mode: SessionMode::Plan,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -754,6 +760,7 @@ async fn build_turns_and_unconfigured_engines_never_write_plans() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "build something".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -778,6 +785,7 @@ async fn build_turns_and_unconfigured_engines_never_write_plans() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "make a plan".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -836,6 +844,7 @@ async fn plan_projection_failures_preserve_ready_approval() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "make a plan".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -936,6 +945,7 @@ async fn provider_failure_after_submit_plan_leaves_workflow_planning() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "plan it".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -994,6 +1004,7 @@ async fn cancellation_after_submit_plan_acceptance_never_commits_ready() {
             behavior: zevria_foundation::RequestBehavior::Standard,
             text: "plan it".into(),
             mode: SessionMode::Plan,
+            references: Vec::new(),
         }))
         .expect("submission command");
     let mut turn_id = None;
@@ -1103,6 +1114,7 @@ async fn duplicate_plan_submission_is_denied_after_first_acceptance() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "plan it".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1525,6 +1537,7 @@ async fn direct_build_abandons_planning_but_ready_rejects_direct_submission() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "plan first".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1540,6 +1553,7 @@ async fn direct_build_abandons_planning_but_ready_rejects_direct_submission() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "build now".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1571,6 +1585,7 @@ async fn direct_build_abandons_planning_but_ready_rejects_direct_submission() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "bypass approval".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1615,6 +1630,7 @@ async fn editing_earlier_prompt_truncates_later_plan_records_and_recomputes_stat
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "initial question".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1626,6 +1642,7 @@ async fn editing_earlier_prompt_truncates_later_plan_records_and_recomputes_stat
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "plan the change".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1690,6 +1707,7 @@ async fn atomic_revision_feedback_edits_retain_the_planning_prefix() {
                     text: "untyped feedback is still blocked".into(),
                     mode: SessionMode::Plan,
                     behavior: zevria_foundation::RequestBehavior::Standard,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -1736,6 +1754,7 @@ async fn atomic_revision_feedback_edits_retain_the_planning_prefix() {
                 text: "edited feedback".into(),
                 mode: SessionMode::Plan,
                 behavior: zevria_foundation::RequestBehavior::Standard,
+                references: Vec::new(),
             }
         };
         engine
@@ -1810,6 +1829,7 @@ async fn plan_revision_retains_id_path_and_increments_revision() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "plan it".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1879,6 +1899,7 @@ async fn plan_revision_retains_id_path_and_increments_revision() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "revise it".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }
         };
         engine

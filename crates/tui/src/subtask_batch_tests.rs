@@ -98,6 +98,7 @@ fn one_batch_rows_keep_stable_selection_and_independent_panes_with_duplicate_tit
         turn_id: TEST_TURN_ID,
         message: Message::user("launch both"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     views.apply(SessionEvent::Turn(TurnEvent::Intermediate {
         turn_id: TEST_TURN_ID,
@@ -204,6 +205,7 @@ fn plural_terminal_fallback_and_restore_create_both_rows_and_panes_without_launc
                 turn_id: TEST_TURN_ID,
                 message: Message::user("launch both"),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }));
             views.apply(SessionEvent::Turn(TurnEvent::Intermediate {
                 turn_id: TEST_TURN_ID,

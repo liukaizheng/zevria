@@ -54,6 +54,7 @@ pub(super) struct SubtaskSupervisor {
 /// senders and take the sole event receiver, while this handle retains task,
 /// transcript, and shutdown ownership.
 pub struct RunningSession {
+    pub(super) side_chats: Option<crate::side_chats::SideChatSupervisor>,
     pub(super) mcp: Option<Arc<zevria_mcp::McpManager>>,
     pub(super) command_jobs: Option<CommandJobs>,
     // Only existing histories use conservative legacy cleanup. A new pending
@@ -126,7 +127,16 @@ impl RunningSession {
         let command_jobs = self.command_jobs.take();
         let mcp = self.mcp.take();
 
-        let (supervisor_shutdown, (), ()) = tokio::join!(
+        let side_chats = self.side_chats.take();
+        let (side_shutdown, supervisor_shutdown, (), ()) = tokio::join!(
+            async {
+                if let Some(supervisor) = side_chats {
+                    supervisor.stop.cancel();
+                    join_with_grace(supervisor.task, "Side Chat supervisor", SHUTDOWN_GRACE).await
+                } else {
+                    Ok(())
+                }
+            },
             async {
                 if let Some(supervisor) = supervisor {
                     supervisor.shutdown.cancel();
@@ -161,9 +171,21 @@ impl RunningSession {
             tracing::warn!(target: "zevria::runtime", %error, "session cleanup task failed");
         }
 
-        match (engine_shutdown, supervisor_shutdown) {
-            (Err(engine), Err(supervisor)) => Err(anyhow::anyhow!("{engine:#}; {supervisor:#}")),
-            (result, Ok(())) | (Ok(()), result) => result,
+        let mut errors = [engine_shutdown, supervisor_shutdown, side_shutdown]
+            .into_iter()
+            .filter_map(Result::err);
+        match (errors.next(), errors.next()) {
+            (None, _) => Ok(()),
+            (Some(error), None) => Err(error),
+            (Some(first), Some(second)) => Err(anyhow::anyhow!(
+                "{}",
+                std::iter::once(first)
+                    .chain(std::iter::once(second))
+                    .chain(errors)
+                    .map(|error| format!("{error:#}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )),
         }
     }
 }

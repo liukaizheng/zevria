@@ -19,6 +19,7 @@ fn typing_then_ctrl_enter_returns_to_normal_without_changing_the_workflow() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "hi there".into(),
                     mode,
+                    references: Vec::new(),
                 }
             )))
         );
@@ -40,6 +41,7 @@ fn typing_then_ctrl_enter_returns_to_normal_without_changing_the_workflow() {
                 turn_id: TEST_TURN_ID,
                 message: Message::user("hi there"),
                 mode,
+                references: Vec::new(),
             }),
         );
         assert!(app.interaction().is_normal());
@@ -96,6 +98,7 @@ fn plain_enter_inserts_a_newline_and_ctrl_enter_submits_all_lines() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "first line\nsecond line".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }
         )))
     );
@@ -957,6 +960,7 @@ fn submission_returns_to_transcript_navigation_before_acknowledgement_and_while_
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "go".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }
         )))
     );
@@ -974,6 +978,7 @@ fn submission_returns_to_transcript_navigation_before_acknowledgement_and_while_
         turn_id: TEST_TURN_ID,
         message: Message::user("go"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     app.reduce_without_effects(SessionStreamState::new(TEST_TURN_ID, (Message::assistant(
             "stream row 0\nstream row 1\nstream row 2\nstream row 3\nstream row 4\nlatest streamed tail",
@@ -1049,6 +1054,7 @@ fn an_in_flight_turn_preserves_insert_focus_and_new_drafts() {
         turn_id: TEST_TURN_ID,
         message: Message::user("go"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     assert!(local.interaction().is_insert());
     assert_eq!(local.input(), "x");
@@ -1079,6 +1085,7 @@ fn an_in_flight_turn_preserves_insert_focus_and_new_drafts() {
         turn_id: authoritative_turn_id,
         message: Message::user("engine-started"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     assert!(authoritative.is_busy());
     assert!(authoritative.interaction().is_insert());
@@ -1483,6 +1490,9 @@ fn ensemble_multiline_selection_tracks_wrapping_and_worker_navigation() {
             assert!(rendered.contains(prompt));
             assert!(!rendered.contains(&start.command()));
             assert_eq!(app.handle_event(key(KeyCode::Enter)), None);
+            assert_eq!(app.surface().context(), crate::input::KeyContext::TextNav);
+            assert_eq!(app.handle_event(key(KeyCode::Esc)), None);
+            assert_eq!(app.surface().context(), crate::input::KeyContext::BlockNav);
 
             let confirmation = "2/3 workers confirmed · synthesis waits for every exact revision";
             let mut worker_start = prompt_range.end();
@@ -1663,6 +1673,7 @@ fn ensemble_row_plain_and_leading_space_edits_become_messages() {
                         behavior: zevria_foundation::RequestBehavior::Standard,
                         text: expected.into(),
                         mode: SessionMode::Plan,
+                        references: Vec::new(),
                     },
                 })
             )))
@@ -1838,6 +1849,7 @@ fn ensemble_tail_rewrites_commit_only_on_the_matching_acceptance_event() {
         turn_id: TurnId::new(3),
         message: Message::user("ordinary replacement"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
     assert_eq!(
         effects,
@@ -1986,6 +1998,7 @@ fn ctrl_enter_submits_the_revision_and_keeps_the_pane_until_the_engine_confirms(
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "second revised".into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 },
             })
         )))
@@ -2010,6 +2023,7 @@ fn ctrl_enter_submits_the_revision_and_keeps_the_pane_until_the_engine_confirms(
             turn_id: TEST_TURN_ID,
             message: Message::user("second revised"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
     );
     assert!(!app.is_awaiting_edit_acceptance());
@@ -2053,6 +2067,7 @@ fn edited_pre_turn_compaction_moves_its_marker_before_the_revised_prompt() {
         turn_id,
         message: Message::user("second!"),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
 
     assert_eq!(app.history().len(), 4);
@@ -2085,6 +2100,7 @@ fn prompt_ordinals_skip_rows_that_are_not_user_prompts() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "second".into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 },
             })
         )))
@@ -2142,6 +2158,7 @@ fn a_confirmed_edit_rerenders_the_replaced_prompt() {
             turn_id: TEST_TURN_ID,
             message: Message::user("original question revised"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
     );
 

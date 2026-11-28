@@ -25,6 +25,7 @@ fn start(controller: &Entity<SessionController>, cx: &mut TestAppContext) -> Res
             turn_id: TURN,
             mode: SessionMode::Build,
             message: Message::user("Trace the source."),
+            references: Vec::new(),
         }),
         cx,
     );

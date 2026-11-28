@@ -75,6 +75,7 @@ impl ConversationState {
             }
         } else {
             let history_index = self.push_entry(HistoryEntry::Conversation(ConversationEntry {
+                references: Vec::new(),
                 header: None,
                 blocks: Vec::new(),
             }));

@@ -5,7 +5,9 @@
 //! connected here through Rig's shared tool server and session events.
 
 mod builder;
+mod side_chat;
 pub use builder::SessionEngineBuilder;
+pub use side_chat::{ParentForkHandle, ParentForkMeta, SideChatReadOnlyConfig};
 
 use crate::session::kernel::accounting::ContextAccounting;
 use crate::session::kernel::request_plan::RequestPlan;
@@ -50,6 +52,7 @@ pub struct SessionEngine<P> {
     request_plans: Mutex<Vec<Arc<RequestPlan>>>,
     skills: SkillState,
     capabilities: RootCapabilities,
+    side_chat: Option<SideChatReadOnlyConfig>,
     next_turn_id: u64,
     plan_projection_warnings: HashSet<PlanId>,
 }
@@ -176,6 +179,7 @@ impl<P: ModelProvider> SessionEngine<P> {
             context,
             request_plans: Mutex::new(Vec::new()),
             capabilities: RootCapabilities::default(),
+            side_chat: None,
             next_turn_id: 1,
             plan_projection_warnings: HashSet::new(),
         })
@@ -300,6 +304,9 @@ impl<P: ModelProvider> SessionEngine<P> {
     }
 
     pub(super) fn desired_tool_declarations(&self, policy: &TurnPolicy) -> ToolDeclarations {
+        if let Some(side) = &self.side_chat {
+            return (*side.frozen_tools).clone();
+        }
         ToolDeclarations::from_definitions(self.tools.snapshot().definitions(), |tool| {
             self.allows_tool(policy, tool.name.as_str())
         })
@@ -311,6 +318,9 @@ impl<P: ModelProvider> SessionEngine<P> {
         desired: &ToolDeclarations,
         window: &zevria_transcript::ToolWindow<'_>,
     ) -> Option<TranscriptItem> {
+        if self.side_chat.is_some() && window.initial.is_some() {
+            return None;
+        }
         let (placement, tools) = if window.initial.is_some() {
             let additions = desired
                 .iter()
@@ -411,6 +421,9 @@ impl<P: ModelProvider> SessionEngine<P> {
         events: &SessionEventSender,
     ) -> Result<(), SessionReplayError> {
         self.replay_changed()?;
+        if self.side_chat.is_some() && matches!(command, SessionCommand::Manage(_)) {
+            return Ok(());
+        }
         let (action, reply) = self.route_idle_command(command, true);
         if let Some(reply) = reply {
             let _ = events.send(reply).await;

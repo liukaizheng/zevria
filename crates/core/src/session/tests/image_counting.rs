@@ -1,5 +1,231 @@
 //! Exact image measurement is needed only until compatible usage covers it.
 
+#[tokio::test]
+async fn side_chat_never_summarizes_a_frozen_prefix() {
+    use zevria_foundation::{RequestBehavior, SideChatId, SideChatOrigin};
+    for (threshold, provider_rejects) in [(10, false), (95, true)] {
+        let (_directory, transcript) = test_transcript();
+        let instructions = "Frozen parent instructions";
+        let fork = zevria_transcript::SideChatFork {
+            origin: SideChatOrigin {
+                version: 1,
+                id: SideChatId::random(),
+                parent_session_id: "parent".into(),
+                title: "Test fork".into(),
+                forked_mode: SessionMode::Plan,
+                forked_model_role: ModelRole::Plan,
+                forked_profile: ModelProfileRef::new("fake", "test-model"),
+                forked_reasoning: zevria_foundation::ReasoningLevel::Medium,
+                inherited_turn_count: 1,
+                quoted_excerpt: None,
+            },
+            instructions: instructions.into(),
+            initial_tools: ToolDeclarations::default(),
+            skills_enabled: false,
+        };
+        let response = if provider_rejects {
+            Err(
+                zevria_model::ModelInputTooLarge::pre_execution(anyhow::anyhow!("window full"))
+                    .into(),
+            )
+        } else {
+            response(Message::assistant("done"), true)
+        };
+        let mut engine = SessionEngine::builder(
+            ScriptedProvider::with_model_responses(vec![response]),
+            ToolServer::new().run(),
+            test_policies(),
+            transcript,
+            Arc::new(SkillCatalog::default()),
+        )
+        .unwrap()
+        .with_transcript_items(vec![
+            TranscriptItem::SideChatOrigin(Box::new(fork)),
+            TranscriptItem::SessionMode(SessionMode::Build),
+            TranscriptItem::Message(Message::user("parent question with context ".repeat(400))),
+            TranscriptItem::SideChatForkBoundary,
+        ])
+        .unwrap()
+        .with_read_only_side_chat(crate::SideChatReadOnlyConfig {
+            quoted_excerpt: None,
+            skills_enabled: false,
+            mode: SessionMode::Plan,
+            instructions: Arc::from(instructions),
+            frozen_tools: Arc::new(ToolDeclarations::default()),
+            mcp_tools: None,
+            mcp: None,
+        })
+        .with_compaction_policy(test_compaction_policy(10_000, threshold, 0))
+        .build()
+        .unwrap();
+        engine.context.arm(ModelRole::Plan);
+        let (events, mut receiver) = session_event_channel(256);
+        engine
+            .handle_command(
+                SessionCommand::Turn(TurnCommand::Submit {
+                    text: "How does this work?".into(),
+                    mode: SessionMode::Plan,
+                    behavior: RequestBehavior::SideChat,
+                    references: Vec::new(),
+                }),
+                &events,
+            )
+            .await
+            .unwrap();
+        let updates = collect_events(&mut receiver).await;
+        assert!(
+            updates.iter().any(|event| match event {
+                SessionEvent::Turn(TurnEvent::Completed { .. }) => !provider_rejects,
+                SessionEvent::Turn(TurnEvent::Failed { error, .. }) =>
+                    provider_rejects && error.contains("context window"),
+                _ => false,
+            }),
+            "{updates:?}"
+        );
+        assert_eq!(engine.provider.requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            engine
+                .conversation
+                .replay()
+                .unwrap()
+                .instructions
+                .persisted_mode(),
+            Some(SessionMode::Build)
+        );
+        assert!(
+            !engine
+                .conversation
+                .items()
+                .iter()
+                .any(|item| matches!(item, TranscriptItem::Compaction(_)))
+        );
+    }
+}
+
+#[tokio::test]
+async fn side_chat_rejects_non_side_commands_and_reports_disabled_compaction_over_limit() {
+    use zevria_foundation::{
+        RequestBehavior, SideChatId, SideChatOrigin, SideChatReferenceAttachment,
+    };
+    let (_directory, transcript) = test_transcript();
+    let instructions = "Frozen parent instructions";
+    let fork = zevria_transcript::SideChatFork {
+        origin: SideChatOrigin {
+            version: 1,
+            id: SideChatId::random(),
+            parent_session_id: "parent".into(),
+            title: "Test fork".into(),
+            forked_mode: SessionMode::Build,
+            forked_model_role: ModelRole::Build,
+            forked_profile: ModelProfileRef::new("fake", "test-model"),
+            forked_reasoning: zevria_foundation::ReasoningLevel::Medium,
+            inherited_turn_count: 1,
+            quoted_excerpt: None,
+        },
+        instructions: instructions.into(),
+        initial_tools: ToolDeclarations::default(),
+        skills_enabled: false,
+    };
+    let mut engine = SessionEngine::builder(
+        ScriptedProvider::with_model_responses(Vec::new()),
+        ToolServer::new().run(),
+        test_policies(),
+        transcript,
+        Arc::new(SkillCatalog::default()),
+    )
+    .unwrap()
+    .with_transcript_items(vec![
+        TranscriptItem::SideChatOrigin(Box::new(fork)),
+        TranscriptItem::Message(Message::user("parent question with context ".repeat(200))),
+        TranscriptItem::SideChatForkBoundary,
+    ])
+    .unwrap()
+    .with_compaction_policy(test_compaction_policy(400, 10, 0))
+    .with_read_only_side_chat(crate::SideChatReadOnlyConfig {
+        quoted_excerpt: None,
+        skills_enabled: false,
+        mode: SessionMode::Build,
+        instructions: Arc::from(instructions),
+        frozen_tools: Arc::new(ToolDeclarations::default()),
+        mcp_tools: None,
+        mcp: None,
+    })
+    .build()
+    .unwrap();
+    engine.context.arm(ModelRole::Build);
+
+    let reference = SideChatReferenceAttachment {
+        id: SideChatId::random(),
+        short_id: "sc-12345678".into(),
+        title: "Other side".into(),
+        turn_ordinal: Some(1),
+        question_preview: "q".into(),
+        excerpt: "a".into(),
+    };
+    for command in [
+        TurnCommand::Submit {
+            text: "not side behavior".into(),
+            mode: SessionMode::Build,
+            behavior: RequestBehavior::Standard,
+            references: Vec::new(),
+        },
+        TurnCommand::Submit {
+            text: "orchestrate rejected".into(),
+            mode: SessionMode::Build,
+            behavior: RequestBehavior::Orchestrate,
+            references: Vec::new(),
+        },
+        TurnCommand::Submit {
+            text: "nested ref".into(),
+            mode: SessionMode::Build,
+            behavior: RequestBehavior::SideChat,
+            references: vec![reference],
+        },
+        TurnCommand::Compact {
+            mode: SessionMode::Build,
+        },
+    ] {
+        let (events, mut receiver) = session_event_channel(64);
+        engine
+            .handle_command(SessionCommand::Turn(command), &events)
+            .await
+            .unwrap();
+        let updates = collect_events(&mut receiver).await;
+        assert!(
+            updates.iter().any(|event| matches!(
+                event,
+                SessionEvent::Turn(TurnEvent::Rejected { error, .. })
+                if error.contains("only Side Chat message submission")
+            )),
+            "{updates:?}"
+        );
+    }
+
+    let (events, mut receiver) = session_event_channel(64);
+    engine
+        .handle_command(
+            SessionCommand::Turn(TurnCommand::Submit {
+                text: "too large for tiny limit ".repeat(120).into(),
+                mode: SessionMode::Build,
+                behavior: RequestBehavior::SideChat,
+                references: Vec::new(),
+            }),
+            &events,
+        )
+        .await
+        .unwrap();
+    let updates = collect_events(&mut receiver).await;
+    assert!(
+        updates.iter().any(|event| matches!(
+            event,
+            SessionEvent::Turn(TurnEvent::Rejected { error, .. })
+            if error.contains("automatic compaction is disabled for Side Chat")
+        )),
+        "{updates:?}"
+    );
+    assert!(engine.provider.requests.lock().unwrap().is_empty());
+}
+
 #[test]
 fn persisted_same_mode_append_preserves_measured_image_baseline() {
     use crate::session::kernel::records::{RecordChange, TurnAnchor};
@@ -105,6 +331,7 @@ async fn three_image_tool_rounds_count_once_when_usage_covers_images_and_recount
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: image_prompt(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -144,6 +371,7 @@ async fn three_image_tool_rounds_count_once_when_usage_covers_images_and_recount
                         behavior: zevria_foundation::RequestBehavior::Standard,
                         text: prompt,
                         mode,
+                        references: Vec::new(),
                     }),
                     &events,
                 )
@@ -209,6 +437,7 @@ async fn tool_result_images_trigger_exact_counts_and_usage_covers_only_existing_
                         behavior: zevria_foundation::RequestBehavior::Standard,
                         text: text.into(),
                         mode: SessionMode::Build,
+                        references: Vec::new(),
                     }),
                     &events,
                 )
@@ -389,6 +618,7 @@ async fn safe_token_rejection_compacts_and_retries_only_the_pending_round() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: image_prompt(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -487,6 +717,7 @@ async fn ambiguous_or_upload_size_failures_never_authorize_context_replay() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: image_prompt(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -531,6 +762,7 @@ async fn unresolved_image_admission_is_explicit_and_transitions_back_to_usage() 
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: image_prompt(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -656,6 +888,7 @@ async fn observed_output_hosted_activity_or_accepted_response_veto_pre_execution
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: image_prompt(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -750,6 +983,7 @@ async fn rejection_recovery_stops_for_resumed_disarm_spent_predictive_budget_or_
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: image_prompt(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )

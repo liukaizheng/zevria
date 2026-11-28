@@ -87,6 +87,7 @@ fn submit(text: &str) -> SessionCommand {
         behavior: zevria_foundation::RequestBehavior::Standard,
         text: text.into(),
         mode: SessionMode::Build,
+        references: Vec::new(),
     })
 }
 fn compact() -> SessionCommand {
@@ -391,6 +392,7 @@ async fn resumed_session_reuses_the_pre_shutdown_prefix_after_tool_activation() 
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: text.into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             })
         };
         run(&mut resumed, plan_prompt("plan without skills")).await;

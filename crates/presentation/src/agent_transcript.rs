@@ -810,6 +810,7 @@ impl AgentTranscriptReducer {
         self.fence();
         let history_index =
             conversation.push_entry(HistoryEntry::Conversation(ConversationEntry {
+                references: Vec::new(),
                 header: None,
                 blocks: Vec::new(),
             }));
@@ -1836,6 +1837,7 @@ impl AgentTranscriptReducer {
             return index;
         }
         let index = conversation.push_entry(HistoryEntry::Conversation(ConversationEntry {
+            references: Vec::new(),
             header: None,
             blocks: Vec::new(),
         }));

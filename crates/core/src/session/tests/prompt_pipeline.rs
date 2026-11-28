@@ -30,6 +30,7 @@ fn input(skill: bool, text: impl Into<zevria_content::UserPrompt>) -> PromptTurn
         PromptTurnInput::Message {
             text: text.into(),
             behavior: zevria_foundation::RequestBehavior::Standard,
+            references: Vec::new(),
         }
     }
 }
@@ -549,6 +550,7 @@ async fn orchestration_is_checked_once_before_any_persistence_repair() {
             PromptTurnInput::Message {
                 text: "delegate independent work".into(),
                 behavior: zevria_foundation::RequestBehavior::Orchestrate,
+                references: Vec::new(),
             },
             SessionMode::Build,
             &events,

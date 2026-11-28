@@ -9,12 +9,13 @@ use std::{
 
 use anyhow::Context as _;
 
-const DIRECTORIES: [&str; 5] = [
+const DIRECTORIES: [&str; 6] = [
     "agent-runs",
     "plans",
     "sessions",
     "subsessions",
     "ensemble-sessions",
+    "side-chats",
 ];
 
 pub fn run(workspace: &Path) -> anyhow::Result<()> {
@@ -305,12 +306,18 @@ mod tests {
                 write(&referent.join("keep"), b"keep");
             }
             let mut preserved = Vec::new();
-            for name in ["agent-runs", "plans", "sessions", "subsessions"] {
+            for name in [
+                "agent-runs",
+                "plans",
+                "sessions",
+                "subsessions",
+                "ensemble-sessions",
+            ] {
                 let path = storage(workspace.path()).join(name).join("keep");
                 write(&path, b"keep");
                 preserved.push(path);
             }
-            let link = workspace.path().join(".zevria/ensemble-sessions");
+            let link = workspace.path().join(".zevria/side-chats");
             symlink(&referent, &link).unwrap();
             let mut output = Vec::new();
             let error = run_with_output(workspace.path(), &mut output).unwrap_err();

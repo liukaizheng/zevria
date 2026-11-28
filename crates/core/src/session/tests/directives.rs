@@ -31,6 +31,7 @@ async fn submit(engine: &mut SessionEngine<ScriptedProvider>, text: &str, mode: 
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: text.into(),
                 mode,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -295,6 +296,7 @@ async fn guidance_inheritance_discards_notices_and_combined_budget_rejects_befor
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "first".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -706,6 +708,7 @@ async fn failed_completed_activation_persistence_keeps_truthful_result_pin_and_b
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "blocked".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )

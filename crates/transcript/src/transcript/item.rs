@@ -31,6 +31,8 @@ pub(super) enum RecordType {
     Batch,
     SessionModels,
     SessionMode,
+    SideChatOrigin,
+    SideChatForkBoundary,
     Message,
     RequestPrompt,
     ProviderMessage,
@@ -146,6 +148,8 @@ pub enum TranscriptItem {
     SessionModels(Box<SessionModels>),
     /// Model-inert, last-wins mode selection.
     SessionMode(crate::SessionMode),
+    SideChatOrigin(Box<crate::SideChatFork>),
+    SideChatForkBoundary,
     /// Validated skill instructions, persisted without their derived rendered text.
     Directive(Box<crate::DirectiveContent>),
     RequestDirective(Box<zevria_instructions::RequestDirective>),
@@ -153,6 +157,7 @@ pub enum TranscriptItem {
     RequestPrompt {
         message: Message,
         request: zevria_foundation::RequestMetadata,
+        references: Option<Box<crate::ReferencedPrompt>>,
     },
     Message(Message),
     /// A provider-native replay plus its internally cached canonical message.
@@ -191,11 +196,18 @@ impl Clone for TranscriptItem {
             Self::IncompleteResponse(record) => Self::IncompleteResponse(record.clone()),
             Self::SessionModels(models) => Self::SessionModels(models.clone()),
             Self::SessionMode(mode) => Self::SessionMode(*mode),
+            Self::SideChatOrigin(origin) => Self::SideChatOrigin(origin.clone()),
+            Self::SideChatForkBoundary => Self::SideChatForkBoundary,
             Self::Directive(record) => Self::Directive(record.clone()),
             Self::RequestDirective(record) => Self::RequestDirective(record.clone()),
-            Self::RequestPrompt { message, request } => Self::RequestPrompt {
+            Self::RequestPrompt {
+                message,
+                request,
+                references,
+            } => Self::RequestPrompt {
                 message: message.clone(),
                 request: request.clone(),
+                references: references.clone(),
             },
             Self::Message(message) => Self::Message(message.clone()),
             Self::ProviderMessage(message) => Self::ProviderMessage(message.clone()),
@@ -250,6 +262,15 @@ impl Serialize for TranscriptItem {
             Self::SessionMode(mode) => {
                 single(serializer, RecordType::SessionMode, "selected", mode)
             }
+            Self::SideChatOrigin(fork) => {
+                fork.validate().map_err(serde::ser::Error::custom)?;
+                single(serializer, RecordType::SideChatOrigin, "fork", fork)
+            }
+            Self::SideChatForkBoundary => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("type", &RecordType::SideChatForkBoundary)?;
+                map.end()
+            }
             Self::Message(message) => {
                 if matches!(message, Message::System { .. }) {
                     return Err(serde::ser::Error::custom(
@@ -258,12 +279,31 @@ impl Serialize for TranscriptItem {
                 }
                 single(serializer, RecordType::Message, "message", message)
             }
-            Self::RequestPrompt { message, request } => {
+            Self::RequestPrompt {
+                message,
+                request,
+                references,
+            } => {
                 request.validate().map_err(serde::ser::Error::custom)?;
-                let mut map = serializer.serialize_map(Some(3))?;
+                let count = references.as_ref().map_or(0, |r| {
+                    usize::from(!r.attachments().is_empty())
+                        + usize::from(r.quoted_excerpt().is_some())
+                });
+                let mut map = serializer.serialize_map(Some(3 + count))?;
                 map.serialize_entry("type", &RecordType::RequestPrompt)?;
                 map.serialize_entry("message", message)?;
                 map.serialize_entry("request", request)?;
+                if let Some(references) = references {
+                    references
+                        .validate_projection(message)
+                        .map_err(serde::ser::Error::custom)?;
+                    if !references.attachments().is_empty() {
+                        map.serialize_entry("references", references.attachments())?;
+                    }
+                    if let Some(excerpt) = references.quoted_excerpt() {
+                        map.serialize_entry("quoted_excerpt", excerpt)?;
+                    }
+                }
                 map.end()
             }
             Self::ProviderMessage(message) => single(
@@ -389,6 +429,18 @@ impl TranscriptItem {
             }
             RecordType::SessionModels => Self::SessionModels(field!(models: Box<SessionModels>)),
             RecordType::SessionMode => Self::SessionMode(field!(selected: crate::SessionMode)),
+            RecordType::SideChatOrigin => {
+                let fork = field!(fork: Box<crate::SideChatFork>);
+                fork.validate().map_err(A::Error::custom)?;
+                Self::SideChatOrigin(fork)
+            }
+            RecordType::SideChatForkBoundary => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Boundary {}
+                Boundary::deserialize(fields)?;
+                Self::SideChatForkBoundary
+            }
             RecordType::Message => Self::Message(field!(message: Message, "read_message")),
             RecordType::RequestPrompt => {
                 #[derive(Deserialize)]
@@ -397,9 +449,25 @@ impl TranscriptItem {
                     #[serde(deserialize_with = "read_prompt_message")]
                     message: Message,
                     request: RequestMetadata,
+                    #[serde(default)]
+                    references: Vec<zevria_foundation::SideChatReferenceAttachment>,
+                    #[serde(default)]
+                    quoted_excerpt: Option<String>,
                 }
-                let Fields { message, request } = Fields::deserialize(fields)?;
-                Self::RequestPrompt { message, request }
+                let Fields {
+                    message,
+                    request,
+                    references,
+                    quoted_excerpt,
+                } = Fields::deserialize(fields)?;
+                let references =
+                    crate::ReferencedPrompt::with_excerpt(&message, references, quoted_excerpt)
+                        .map_err(A::Error::custom)?;
+                Self::RequestPrompt {
+                    message,
+                    request,
+                    references,
+                }
             }
             RecordType::ProviderMessage => {
                 Self::ProviderMessage(field!(replay: ReplayBackedMessage, "read_replay"))
@@ -588,6 +656,8 @@ impl TranscriptItem {
             Self::Ensemble(record) => record.model_message(),
             Self::SessionModels(_)
             | Self::SessionMode(_)
+            | Self::SideChatOrigin(_)
+            | Self::SideChatForkBoundary
             | Self::Directive(_)
             | Self::RequestDirective(_)
             | Self::ToolDeclarations(_)
@@ -599,7 +669,10 @@ impl TranscriptItem {
 
     /// Frontend-only projection; request prefixes never enter model input.
     pub fn display_message(&self) -> Option<Message> {
-        if let Self::RequestPrompt { message, request } = self {
+        if let Self::RequestPrompt {
+            message, request, ..
+        } = self
+        {
             let prompt = zevria_content::UserPrompt::from_message(message).ok()?;
             return Some(match request.behavior {
                 zevria_foundation::RequestBehavior::Orchestrate => {
@@ -623,6 +696,8 @@ impl TranscriptItem {
             | Self::ToolResults { .. }
             | Self::SessionModels(_)
             | Self::SessionMode(_)
+            | Self::SideChatOrigin(_)
+            | Self::SideChatForkBoundary
             | Self::Directive(_)
             | Self::RequestDirective(_)
             | Self::SkillInvocation(_)
@@ -653,9 +728,18 @@ impl TranscriptItem {
             Self::ProviderMessage(provider_message) => {
                 Some(ModelRequestItem::replay_backed(&provider_message.content))
             }
-            Self::Message(message)
-            | Self::RequestPrompt { message, .. }
-            | Self::ToolResults { message, .. } => Some(ModelRequestItem::message(message)),
+            Self::RequestPrompt {
+                message,
+                references,
+                ..
+            } => Some(ModelRequestItem::message(
+                references
+                    .as_ref()
+                    .map_or(message, |value| value.model_message()),
+            )),
+            Self::Message(message) | Self::ToolResults { message, .. } => {
+                Some(ModelRequestItem::message(message))
+            }
             Self::SkillInvocation(invocation) => {
                 Some(ModelRequestItem::message(invocation.model_message()))
             }
@@ -666,6 +750,8 @@ impl TranscriptItem {
             Self::Ensemble(record) => record.model_message().map(ModelRequestItem::message),
             Self::SessionModels(_)
             | Self::SessionMode(_)
+            | Self::SideChatOrigin(_)
+            | Self::SideChatForkBoundary
             | Self::Compaction(_)
             | Self::IncompleteResponse(_)
             | Self::Error { .. } => None,

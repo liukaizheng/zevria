@@ -68,6 +68,13 @@ pub struct InstructionReplayState {
     tool_initial: bool,
     metadata: Arc<SessionMetadataState>,
     next_record_index: usize,
+    fork_origin: bool,
+    fork_boundary: bool,
+    fork_prompt_count: usize,
+    fork_quote: Option<Arc<str>>,
+    turn_count: usize,
+    safe_len: usize,
+    safe_turn_count: usize,
 }
 
 impl InstructionReplayState {
@@ -102,6 +109,10 @@ impl InstructionReplayState {
     }
 
     pub(crate) fn ensure_metadata_boundary(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.fork_boundary,
+            "session metadata cannot follow a Side Chat fork boundary"
+        );
         self.requests.validate_complete()?;
         anyhow::ensure!(
             self.pending.is_empty(),
@@ -114,6 +125,22 @@ impl InstructionReplayState {
         debug_assert!(self.ensure_metadata_boundary().is_ok());
         Arc::make_mut(&mut self.metadata).apply(item);
         self.next_record_index += 1;
+        self.advance_cursor();
+    }
+
+    pub fn fork_cursor(&self) -> (usize, usize) {
+        (self.safe_len, self.safe_turn_count)
+    }
+
+    pub fn side_prompt_count(&self) -> usize {
+        self.fork_prompt_count
+    }
+
+    fn advance_cursor(&mut self) {
+        if self.pending.is_empty() && self.requests.is_complete() {
+            self.safe_len = self.next_record_index;
+            self.safe_turn_count = self.turn_count;
+        }
     }
 
     /// Historical capability, not just the currently active request contract.
@@ -136,12 +163,98 @@ impl InstructionReplayState {
         for item in items {
             self.apply_record(item, decoded)?;
             self.next_record_index += 1;
+            self.turn_count += usize::from(crate::is_prompt_item(item));
+            self.advance_cursor();
         }
         self.requests.validate_complete()?;
+        anyhow::ensure!(
+            !self.fork_origin || self.fork_boundary,
+            "Side Chat origin has no fork boundary"
+        );
         Ok(self)
     }
 
     fn apply_record(&mut self, item: &TranscriptItem, decoded: bool) -> anyhow::Result<()> {
+        if self.fork_boundary {
+            let allowed = match item {
+                TranscriptItem::RequestPrompt { .. }
+                | TranscriptItem::IncompleteResponse(_)
+                | TranscriptItem::Error { .. }
+                | TranscriptItem::ProviderMessage(_)
+                | TranscriptItem::Message(Message::Assistant(_)) => true,
+                TranscriptItem::RequestDirective(directive) => {
+                    directive.request.behavior == zevria_foundation::RequestBehavior::SideChat
+                }
+                TranscriptItem::ToolResults {
+                    skill_applications, ..
+                } => skill_applications.is_empty(),
+                TranscriptItem::ToolDeclarations(record) => {
+                    record.placement == crate::ToolDeclarationPlacement::Initial
+                }
+                _ => false,
+            };
+            anyhow::ensure!(
+                allowed,
+                "record is forbidden after a Side Chat fork boundary"
+            );
+        }
+        match item {
+            TranscriptItem::SideChatOrigin(fork) => {
+                anyhow::ensure!(
+                    self.next_record_index == 0,
+                    "Side Chat origin must be the first record"
+                );
+                if !decoded {
+                    fork.validate()?;
+                }
+                self.fork_origin = true;
+                self.fork_quote = fork.origin.quoted_excerpt.as_deref().map(Arc::from);
+            }
+            TranscriptItem::SideChatForkBoundary => {
+                self.ensure_metadata_boundary()?;
+                anyhow::ensure!(
+                    self.fork_origin && !self.fork_boundary,
+                    "unexpected Side Chat fork boundary"
+                );
+                self.fork_boundary = true;
+            }
+            TranscriptItem::RequestPrompt {
+                request,
+                references,
+                ..
+            } => {
+                anyhow::ensure!(
+                    (request.behavior == zevria_foundation::RequestBehavior::SideChat)
+                        == self.fork_boundary,
+                    "Side Chat intent must occur after a fork boundary"
+                );
+                let excerpt = references
+                    .as_ref()
+                    .and_then(|reference| reference.quoted_excerpt());
+                if self.fork_boundary {
+                    anyhow::ensure!(
+                        references
+                            .as_ref()
+                            .is_none_or(|reference| reference.attachments().is_empty()),
+                        "Side Chat references belong to the main conversation"
+                    );
+                    let expected = (self.fork_prompt_count == 0)
+                        .then_some(self.fork_quote.as_deref())
+                        .flatten();
+                    anyhow::ensure!(
+                        excerpt == expected,
+                        "Side Chat selection must belong to the first question and match its origin"
+                    );
+                    self.fork_prompt_count += 1;
+                } else {
+                    anyhow::ensure!(
+                        excerpt.is_none(),
+                        "a main prompt cannot carry a Side Chat selection"
+                    );
+                }
+            }
+            _ => {}
+        }
         if crate::is_leading_metadata(item) {
             self.ensure_metadata_boundary()?;
             Arc::make_mut(&mut self.metadata).apply(item);

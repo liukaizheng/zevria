@@ -32,6 +32,7 @@ async fn guidance_checkpoint_and_maintenance_preserve_both_components_and_cleare
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "first".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -300,6 +301,7 @@ async fn compaction_preserves_skill_overlay_and_next_request_restores_it_once() 
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "continue after compaction".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -442,6 +444,7 @@ async fn edited_submission_atomically_compacts_its_retained_prefix_before_the_re
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: text.into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -547,6 +550,7 @@ async fn edited_skill_atomically_compacts_before_its_compact_turn_started_displa
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: text.into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -670,6 +674,7 @@ async fn edited_overflow_reports_a_prepared_but_uninstalled_checkpoint() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: text.into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -748,6 +753,7 @@ async fn manual_local_compaction_installs_checkpoint_and_replaces_next_request_h
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "first question".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -768,6 +774,7 @@ async fn manual_local_compaction_installs_checkpoint_and_replaces_next_request_h
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "second question".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -874,6 +881,7 @@ async fn manual_compaction_uses_the_selected_mode_model_role() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "first question".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -981,6 +989,7 @@ async fn compaction_reinjects_the_latest_successful_task_snapshot() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "second question".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1074,6 +1083,7 @@ async fn successful_checkpoint_is_not_automatically_recompacted_before_new_work(
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "first".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1094,6 +1104,7 @@ async fn successful_checkpoint_is_not_automatically_recompacted_before_new_work(
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "second".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1126,6 +1137,7 @@ async fn failed_local_compaction_installs_nothing_and_keeps_existing_history() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "first".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1218,6 +1230,7 @@ async fn irreducible_small_plan_profile_rejects_without_compaction_or_prompt_com
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "new Plan prompt".into(),
                 mode: SessionMode::Plan,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1268,6 +1281,7 @@ async fn prospective_overflow_compacts_then_rejects_without_committing_prompt_if
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: oversized.clone().into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1337,6 +1351,7 @@ async fn automatic_compaction_triggers_at_the_exact_threshold_before_next_prompt
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: text.into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -1399,6 +1414,7 @@ async fn automatic_compaction_does_not_trigger_one_token_below_threshold() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: text.into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -1446,6 +1462,7 @@ async fn exact_count_compacts_once_rechecks_and_dispatches_when_it_fits() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "p".repeat(2_100).into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1509,6 +1526,7 @@ async fn exact_over_limit_after_one_compaction_rejects_truthfully_without_loopin
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "p".repeat(2_100).into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )
@@ -1569,6 +1587,7 @@ async fn repeated_oversized_prompt_installs_only_one_checkpoint() {
                     behavior: zevria_foundation::RequestBehavior::Standard,
                     text: "p".repeat(2_100).into(),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 &events,
             )
@@ -1855,6 +1874,7 @@ async fn resumed_plan_handoff_history_compacts_manually_or_before_a_new_prompt()
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "continue".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             })
         };
         engine.handle_command(command, &events).await.unwrap();
@@ -2178,6 +2198,7 @@ async fn mid_turn_compaction_waits_for_the_complete_tool_result_batch() {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: "use the tool".into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         )

@@ -1,5 +1,5 @@
 use super::{
-    style,
+    images, style,
     theme::{palette, tones},
     window::DesktopWindow,
 };
@@ -19,6 +19,23 @@ impl DesktopWindow {
             return;
         }
         let draft = self.composer.read(cx).value().to_string();
+        if controller.side_chat_running()
+            && controller.edit.is_none()
+            && controller.draft_images.is_empty()
+            && matches!(
+                controller
+                    .model
+                    .controls
+                    .registry
+                    .classify_prompt(&zevria_content::UserPrompt::from_text(draft.as_str())),
+                Ok(zevria_presentation::command::ClassifiedInput::Builtin(
+                    zevria_presentation::command::SlashCommand::New
+                ))
+            )
+        {
+            self.request_replace(super::window::Replacement::New, cx);
+            return;
+        }
         self.controller.update(cx, |this, cx| {
             if this.draft != draft {
                 this.edit_draft(draft, cx);
@@ -46,6 +63,15 @@ impl DesktopWindow {
         if self.completion_dismissed.as_ref() == Some(&(text.to_string(), cursor)) {
             return Vec::new();
         }
+        if let Some((query, _)) = zevria_presentation::side_chats::side_chat_query(&text, cursor) {
+            return zevria_presentation::side_chats::side_chat_reference_completions(
+                &controller.model.side_chats,
+                query,
+            )
+            .into_iter()
+            .map(|item| (item.insertion, item.label))
+            .collect();
+        }
         self.controller
             .read(cx)
             .model
@@ -70,12 +96,19 @@ impl DesktopWindow {
         ) {
             let text = self.composer.read(cx).value().to_string();
             let cursor = self.composer.read(cx).cursor();
-            let Some(query) = zevria_presentation::completion::command_query(&text, cursor) else {
+            let range = if value.starts_with("@side:") {
+                zevria_presentation::side_chats::side_chat_query(&text, cursor)
+                    .map(|(_, range)| range)
+            } else {
+                zevria_presentation::completion::command_query(&text, cursor)
+                    .map(|query| query.replacement())
+            };
+            let Some(range) = range else {
                 return;
             };
-            let caret = query.replacement.start + value.len() + 1;
+            let caret = range.start + value.len() + 1;
             let mut replacement = text;
-            replacement.replace_range(query.replacement(), &format!("{value} "));
+            replacement.replace_range(range, &format!("{value} "));
             self.composer.update(cx, |input, cx| {
                 input.set_value(replacement.clone(), window, cx);
                 input.set_selected_range(caret..caret, cx);
@@ -138,50 +171,6 @@ impl DesktopWindow {
                         })),
                 )
             })
-    }
-
-    fn composer_attachments(&self, editable: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = palette(cx);
-        let mut strip = div()
-            .id("composer-attachments")
-            .test_support()
-            .flex()
-            .flex_wrap()
-            .gap(px(4.));
-        for (index, image) in self.controller.read(cx).draft_images.iter().enumerate() {
-            let (width, height) = image.dimensions();
-            let format = image.mime_type().trim_start_matches("image/");
-            let label = format!("Image {} · {format} · {width}×{height}", index + 1);
-            strip = strip.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.))
-                    .pl(px(6.))
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(tones(cx).hairline)
-                    .child(
-                        style::meta()
-                            .text_color(t.text.muted)
-                            .child(style::observed_text(label)),
-                    )
-                    .child(
-                        style::icon_button(
-                            ("remove-attachment", index),
-                            Lucide::X,
-                            format!("Remove image {}", index + 1),
-                        )
-                        .disabled(!editable)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.controller.update(cx, |controller, cx| {
-                                controller.remove_draft_image(index, cx)
-                            });
-                        })),
-                    ),
-            );
-        }
-        strip
     }
 
     pub(super) fn composer_view(
@@ -278,9 +267,16 @@ impl DesktopWindow {
         let focus = self.composer.focus_handle(cx);
         let focused = focus.contains_focused(window, cx);
         let hints = !applying_edit && (focused || empty);
+        let picture_target = self.controller.clone();
+        let drop_target = self.controller.clone();
         let mut field = div()
             .id("composer-panel")
             .test_support()
+            .when(editable, |d| {
+                d.on_drop(move |paths: &ExternalPaths, _, cx| {
+                    images::drop_paths(&drop_target, None, paths.0.to_vec(), cx)
+                })
+            })
             .relative()
             .flex_1()
             .min_w_0()
@@ -298,7 +294,13 @@ impl DesktopWindow {
                 d.child(self.edit_banner(applying_edit, cx))
             })
             .when(has_images, |d| {
-                d.child(self.composer_attachments(editable, cx))
+                d.child(attachments(
+                    &self.controller,
+                    None,
+                    &self.controller.read(cx).draft_images,
+                    editable,
+                    cx,
+                ))
             })
             .child(
                 div()
@@ -310,6 +312,9 @@ impl DesktopWindow {
                             .appearance(false)
                             .disabled(!editable)
                             .aria_label("Message to Zevria")
+                            .on_paste(move |clip, _, cx| {
+                                editable && images::paste(&picture_target, None, clip, cx)
+                            })
                             .text_size(px(14.))
                             .line_height(px(20.)),
                     ),
@@ -317,7 +322,13 @@ impl DesktopWindow {
         if !matches.is_empty() {
             field = field.child(completions);
         }
-        let mut footer = div().flex().flex_wrap().items_center().gap(px(8.));
+        let mut footer = div().flex().flex_wrap().items_center().gap(px(8.)).child(
+            images::attach_button("attach-image")
+                .disabled(!editable)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    images::choose(this.controller.clone(), None, cx);
+                })),
+        );
         let mut group = ToggleGroup::new("mode-switch")
             .segmented()
             .small()
@@ -456,4 +467,71 @@ impl DesktopWindow {
             )
             .into_any_element()
     }
+}
+
+pub(super) fn attachments(
+    controller: &Entity<crate::controller::SessionController>,
+    target: images::Target,
+    items: &[zevria_content::PromptImage],
+    editable: bool,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    let t = palette(cx);
+    let strip_id = if target.is_some() {
+        "side-composer-attachments"
+    } else {
+        "composer-attachments"
+    };
+    let remove_id = if target.is_some() {
+        "remove-side-attachment"
+    } else {
+        "remove-attachment"
+    };
+    let mut strip = div()
+        .id(strip_id)
+        .test_support()
+        .flex()
+        .flex_wrap()
+        .gap(px(4.));
+    for (index, image) in items.iter().enumerate() {
+        let (width, height) = image.dimensions();
+        let format = image.mime_type().trim_start_matches("image/");
+        let label = format!("Image {} · {format} · {width}×{height}", index + 1);
+        strip = strip.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .pl(px(6.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(tones(cx).hairline)
+                .child(
+                    style::meta()
+                        .text_color(t.text.muted)
+                        .child(style::observed_text(label)),
+                )
+                .child(
+                    style::icon_button(
+                        (remove_id, index),
+                        Lucide::X,
+                        format!("Remove image {}", index + 1),
+                    )
+                    .disabled(!editable)
+                    .on_click({
+                        let controller = controller.clone();
+                        move |_, _, cx| {
+                            controller.update(cx, |controller, cx| {
+                                if let Some(id) = target {
+                                    controller.remove_side_image(id, index, cx);
+                                } else {
+                                    controller.remove_draft_image(index, cx);
+                                }
+                            })
+                        }
+                    }),
+                ),
+        );
+    }
+    strip
 }

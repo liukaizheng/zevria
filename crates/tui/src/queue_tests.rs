@@ -237,6 +237,7 @@ fn queued_orchestration_keeps_its_captured_plan_mode_and_recovers_on_engine_reje
                 text: "independent work".into(),
                 mode: SessionMode::Plan,
                 behavior: RequestBehavior::Orchestrate,
+                references: Vec::new(),
             }
         )))
     );
@@ -361,6 +362,7 @@ fn fifo_dispatch_waits_for_barriers_accepts_detached_drafts_and_preserves_new_co
                 text: "first".into(),
                 mode: SessionMode::Build,
                 behavior: RequestBehavior::Orchestrate,
+                references: Vec::new(),
             }
         )))
     );

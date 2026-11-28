@@ -252,6 +252,7 @@ async fn submit(engine: &mut SessionEngine<ProviderRouter>, text: &str) {
                 behavior: zevria_foundation::RequestBehavior::Standard,
                 text: text.into(),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             &events,
         ),

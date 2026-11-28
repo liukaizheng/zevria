@@ -204,6 +204,7 @@ fn validates_window_sequences_pending_batches_and_checkpoint_contents() {
         TranscriptItem::RequestPrompt {
             message: Message::user("prompt"),
             request,
+            references: None,
         },
         initial,
         TranscriptItem::RequestDirective(Box::new(boundary)),

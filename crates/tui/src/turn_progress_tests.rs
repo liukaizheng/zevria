@@ -19,6 +19,7 @@ fn start(app: &mut App, id: u64, text: &str) {
         turn_id: TurnId::new(id),
         message: Message::user(text),
         mode: SessionMode::Build,
+        references: Vec::new(),
     }));
 }
 
@@ -77,6 +78,7 @@ fn call_durations_exclude_dispatch_delay_and_freeze_independently_after_tools() 
             turn_id: TEST_TURN_ID,
             message: Message::user("prompt"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
         now + Duration::from_secs(3),
     );
@@ -173,6 +175,7 @@ fn long_command_headers_tick_without_events_until_all_their_tools_finish() {
                 turn_id: TEST_TURN_ID,
                 message: Message::user("prompt"),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             SessionEvent::Turn(TurnEvent::ModelCallStarted {
                 turn_id: TEST_TURN_ID,
@@ -274,6 +277,7 @@ fn late_tool_results_only_finish_their_own_header_not_a_new_model_call() {
             turn_id: TEST_TURN_ID,
             message: Message::user("prompt"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
         SessionEvent::Turn(TurnEvent::ModelCallStarted {
             turn_id: TEST_TURN_ID,
@@ -358,6 +362,7 @@ fn terminal_events_stop_headers_with_pending_commands() {
                 turn_id: TEST_TURN_ID,
                 message: Message::user("prompt"),
                 mode: SessionMode::Build,
+                references: Vec::new(),
             }),
             SessionEvent::Turn(TurnEvent::ModelCallStarted {
                 turn_id: TEST_TURN_ID,
@@ -410,6 +415,7 @@ fn retries_backward_clocks_and_rejected_events_cannot_restart_or_rewind_a_call()
             turn_id: TEST_TURN_ID,
             message: Message::user("prompt"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
         now,
     );
@@ -532,6 +538,7 @@ fn accepted_edits_prune_timing_before_ordinal_reuse_and_restore_discards_it() {
                     turn_id,
                     message: Message::user(format!("prompt {id}")),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 at,
             );
@@ -570,6 +577,7 @@ fn accepted_edits_prune_timing_before_ordinal_reuse_and_restore_discards_it() {
                     turn_id: TurnId::new(3),
                     message: Message::user("replacement"),
                     mode: SessionMode::Build,
+                    references: Vec::new(),
                 }),
                 now + Duration::from_secs(32),
             );
@@ -839,6 +847,7 @@ fn native_child_headers_and_status_titles_are_independent_of_root() {
             turn_id: TurnId::new(42),
             message: Message::user("child prompt"),
             mode: SessionMode::Build,
+            references: Vec::new(),
         }),
         SessionEvent::Turn(TurnEvent::ModelCallStarted {
             turn_id: TurnId::new(42),

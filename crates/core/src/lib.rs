@@ -4,7 +4,9 @@
 //! owned by their domain crates. Adapters import those owners directly.
 
 mod session;
-pub use session::{SessionEngine, SessionEngineBuilder};
+pub use session::{
+    ParentForkHandle, ParentForkMeta, SessionEngine, SessionEngineBuilder, SideChatReadOnlyConfig,
+};
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]

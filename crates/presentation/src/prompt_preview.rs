@@ -9,7 +9,7 @@ use std::{
 };
 
 use zevria_content::{PromptBlock, UserPrompt, readable::sanitize_readable};
-use zevria_foundation::TurnId;
+use zevria_foundation::{SideChatReferenceAttachment, TurnId};
 
 use crate::blocks::{
     BlockVisibility, PresentationBlock, PresentationBlockId, PresentationBlockKind,
@@ -22,6 +22,7 @@ pub const PREPARING_PROMPT: &str = "Preparing…";
 pub struct PromptPreview {
     id: u64,
     blocks: Vec<PresentationBlock>,
+    pub(crate) references: Vec<SideChatReferenceAttachment>,
     paint: Option<PromptPaint>,
 }
 
@@ -64,7 +65,12 @@ impl PromptPreview {
                 },
             })
             .collect();
-        Self { id, blocks, paint }
+        Self {
+            id,
+            blocks,
+            references: Vec::new(),
+            paint,
+        }
     }
 
     pub fn id(&self) -> u64 {
@@ -73,6 +79,10 @@ impl PromptPreview {
 
     pub fn blocks(&self) -> &[PresentationBlock] {
         &self.blocks
+    }
+
+    pub fn references(&self) -> &[SideChatReferenceAttachment] {
+        &self.references
     }
 
     pub fn paint_probe(&self) -> Option<&PromptPaint> {

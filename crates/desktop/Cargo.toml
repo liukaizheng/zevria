@@ -41,7 +41,7 @@ ratex-font = { workspace = true }
 ratex-katex-fonts = { workspace = true }
 tiny-skia = { workspace = true }
 ttf-parser = { workspace = true }
-image = { workspace = true }
+image = { workspace = true, features = ["bmp", "tiff"] }
 
 [target.'cfg(windows)'.dependencies]
 # Use Kit's locked backend directly for its fallible startup constructor.
